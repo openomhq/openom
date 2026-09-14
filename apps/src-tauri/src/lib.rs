@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AddedMember, AppCoreHost, BlobData, BlobMeta, KeyringRevisionPayload, MemberAccount, MemberToAdd,
-    MemberUnlocked, PassphraseChanged, Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut, Unlocked,
+    AddedMember, AppCoreHost, BlobData, BlobMeta, InviteMaterial, KeyringRevisionPayload, MemberAccount,
+    MemberToAdd, MemberUnlocked, PassphraseChanged, Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut,
+    Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -359,6 +360,13 @@ fn core_invite_pin(state: State<'_, Host>, doc: String) -> Result<Vec<u8>, Strin
     state.invite_pin(&doc).map_err(e)
 }
 
+/// The invite MINT material (v3): `{ engine, pin(full), signers }` — the webview drives `invite.mint`
+/// engine-agnostically and records the signer set for the admit gate.
+#[tauri::command]
+fn core_invite_material(state: State<'_, Host>, doc: String) -> Result<InviteMaterial, String> {
+    state.invite_material(&doc).map_err(e)
+}
+
 // ---- claim edits (buffered into the intention; core_commit seals them) ----
 
 #[tauri::command]
@@ -634,6 +642,7 @@ pub fn run() {
             core_keyring_publish_payload,
             core_membership_summary,
             core_invite_pin,
+            core_invite_material,
             core_assert_claim,
             core_supersede_claim,
             core_remove_record,

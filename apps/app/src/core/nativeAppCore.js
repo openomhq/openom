@@ -18,6 +18,7 @@
 
 import { makeError, normalizeUnknown } from './errorModel.js';
 import { frameHops } from './sharing.js';
+import { mint as mintInvite, verifyClaim as verifyInviteClaim } from './invite.js';
 import { pushMembershipSummary } from './membershipSummary.js';
 
 const invoke = () => globalThis.__TAURI__?.core?.invoke;
@@ -80,6 +81,25 @@ export function createNativeAppCore() {
   const markNeedsCreateTree = (docId) => { needsTreeMem.add(docId); try { lstore()?.setItem(NEEDS_TREE_KEY(docId), '1'); } catch { /* no storage */ } };
   const needsCreateTree = (docId) => { if (needsTreeMem.has(docId)) return true; try { return lstore()?.getItem(NEEDS_TREE_KEY(docId)) === '1'; } catch { return false; } };
   const clearNeedsCreateTree = (docId) => { needsTreeMem.delete(docId); try { lstore()?.removeItem(NEEDS_TREE_KEY(docId)); } catch { /* best-effort */ } };
+
+  // Owner-local DURABLE invite mint records (invite model v3), keyed by invite_id in the webview's localStorage —
+  // a refresh must not orphan outstanding invites (admit hard-fails without the record; the flow spans
+  // hours-days). Holds `s_mac_claim` + role/engine/expiry + the mint-time flat signer set (the chain admit gate).
+  // `s_mac_claim` is UNSEALED at rest for now (OPE-453; bounded owner-device-at-rest risk). NEVER sent to the host
+  // or the server. Mirrors the web worker's IndexedDB mint record — different store (main thread), same purpose.
+  const MINT_KEY = (inviteId) => `openom:invite-mint:${inviteId}`;
+  const saveMintRecord = (rec) => {
+    try { lstore()?.setItem(MINT_KEY(rec.inviteId), JSON.stringify({ ...rec, sMacClaim: Array.from(rec.sMacClaim) })); } catch { /* no storage */ }
+  };
+  const loadMintRecord = (inviteId) => {
+    try {
+      const raw = lstore()?.getItem(MINT_KEY(inviteId));
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      return { ...o, sMacClaim: Uint8Array.from(o.sMacClaim) };
+    } catch { return null; }
+  };
+  const deleteMintRecord = (inviteId) => { try { lstore()?.removeItem(MINT_KEY(inviteId)); } catch { /* best-effort */ } };
 
   // Publish a membership change to the server (OPE-433/434, review C2): the KEYRING channel (the crypto
   // revocation — the server serves the rotated keyring, so a removed member can no longer decrypt new content)
@@ -222,6 +242,39 @@ export function createNativeAppCore() {
       const m = await call('core_provision_member', { passphrase });
       return { kdfParams: u8(m.kdfParams), authorPublicKey: u8(m.authorPublicKey), hpkePublicKey: u8(m.hpkePublicKey) };
     },
+    // Owner: mint a v3 share invite. The host supplies the full engine pin + the flat signer set (core_invite_material);
+    // `invite.mint` (pure JS) builds the short link + authenticated metadata; the record is persisted durably.
+    async inviteMember(docId, { role, recipientPin = null, ttlMs, base }) {
+      const material = await call('core_invite_material', { doc: docId }); // { engine, pin, signers }
+      const minted = await mintInvite({
+        uuid: docId, role, engine: material.engine, pin: u8(material.pin), recipientPin,
+        ...(ttlMs ? { ttlMs } : {}), ...(base ? { base } : {}),
+      });
+      saveMintRecord({ ...minted.record, signers: Array.from(material.signers) }); // signers = the admit-gate baseline
+      return { inviteId: minted.inviteId, link: minted.link, pending: minted.pending };
+    },
+    // Owner: admit a claimed invite — durable record + local expiry re-check + the anti-substitution admit gate
+    // (chain: the current flat signer set must byte-equal the mint-time one — a signer change since mint fails;
+    // dag leans on verify-on-ingest, a coverage recompute being a follow-up), then verify the claim MAC + addMember
+    // at the record's role. The caller MARKS the server invite admitted (never deletes).
+    async admitMember(docId, { passphrase, treeId, ownerMemberId, inviteId, claim }) {
+      const record = loadMintRecord(inviteId);
+      if (!record) throw makeError('internal', { cause: 'no local mint record for this invite — admit on the minting device' });
+      if (Date.now() > record.expiry) throw makeError('internal', { cause: 'invite expired' });
+      if (record.engine === 'chain') {
+        const cur = await call('core_invite_material', { doc: docId });
+        if (!u8eq(Array.from(cur.signers), record.signers)) {
+          throw makeError('internal', { cause: 'signer set changed since mint — cancel and re-invite' });
+        }
+      }
+      if (!(await verifyInviteClaim(record, claim))) throw makeError('internal', { cause: 'invite claim MAC mismatch — rejected' });
+      await api.addMember(docId, {
+        passphrase, treeId, ownerMemberId,
+        newMemberId: claim.memberId, role: record.role,
+        memberAuthorPublic: claim.authorPublicKey, memberHpkePublic: claim.hpkePublicKey,
+      });
+      deleteMintRecord(inviteId);
+    },
     async addMember(docId, { passphrase, treeId, ownerMemberId, newMemberId, role, memberAuthorPublic, memberHpkePublic }) {
       const out = await call('core_add_member', {
         doc: docId, treeId: bytes(treeId), ownerMemberId, ownerPassphrase: passphrase,
@@ -247,11 +300,22 @@ export function createNativeAppCore() {
     // Fetches the keyring genesis-walk itself (transport.readKeyring → frameHops), so this presents the SAME
     // contract as the web worker's joinAsMember — the caller no longer pre-fetches `hops`. The transport must be
     // attached for `docId` first (attachTransport). Closes the OPE-434 join hops-fetch parity gap.
-    async joinAsMember({ docId, treeId, memberId, passphrase, memberKdfParams, pinnedRevision, pinnedHash }) {
+    async joinAsMember({ docId, treeId, memberId, passphrase, memberKdfParams, engine, pin, pinnedRevision, pinnedHash }) {
       remember(docId, treeId);
       const transport = transports.get(docId);
       if (!transport) {
         return Promise.reject(makeError('internal', { cause: `joinAsMember: no transport attached for ${docId}` }));
+      }
+      if (engine === 'dag') {
+        return Promise.reject(makeError('internal', { cause: 'native dag member-join is not wired yet (OPE-447 follow-up)' }));
+      }
+      // v3: unpack the opaque chain pin (rev(u32 BE)‖kh(32) = 36 bytes) into (revision, hash); a low-level caller
+      // may instead pass them already unpacked.
+      if (pin !== undefined) {
+        const p = u8(pin);
+        if (p.length !== 36) return Promise.reject(makeError('internal', { cause: 'chain invite pin must be 36 bytes' }));
+        pinnedRevision = new DataView(p.buffer, p.byteOffset, 4).getUint32(0, false);
+        pinnedHash = p.slice(4);
       }
       const { revisions } = await transport.readKeyring(docId, 1); // the full walk from genesis (rev 1)
       const hops = frameHops((revisions ?? []).map((r) => r.bytes));
