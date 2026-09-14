@@ -1,32 +1,20 @@
-// RemoteStore: the DocStore contract (see store.js) over HTTP to the openom server.
-// It moves OPAQUE bytes — it knows nothing about encryption (that's SealedStore, one
-// layer up) and nothing about offline queueing (that's SyncStore). V1 is snapshot-only:
-// readSnapshot / putSnapshot map onto GET / PUT /trees/{id} with the server's
-// ETag / If-Match compare-and-swap; the delta-log methods are V2 and report so.
-//
-// The local DocStore version token ('v'+counter) and the server's ETag (a random UUID
-// per write) are DIFFERENT namespaces — this store's `version` is always the server
-// ETag. SyncStore owns the mapping between the two.
+// RemoteStore: the openom server's HTTP surface. It moves OPAQUE bytes — it knows nothing about encryption
+// (that's SealedStore, one layer up). The live sync path is the DATA channel as a content-addressable BLOB store
+// (blobList/blobGet/blobPut/putFrontier), plus the keyring channel (readKeyring/putKeyring), the advisory
+// membership summary (getAccess/putAccess), the Mode A share invites (createInvite/listInvites/claimInvite/
+// deleteInvite), and createTree. The old V1 snapshot (GET/PUT /trees/{id}) and V2 delta-log (/trees/{id}/log)
+// methods were removed once the blob quartet replaced them — nothing called them.
 
 import { ConflictError, AuthError } from './store.js';
 import { makeError, isAppError } from './errorModel.js';
 import { ERROR_CODES } from './errorCodes.generated.js';
 
-const unquote = (etag) => (etag ? etag.replace(/^"|"$/g, '') : null);
 const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) : new Uint8Array(0));
 const b64encode = (u8) => btoa(String.fromCharCode(...u8)); // STANDARD base64, matching the server's decoder
 
 // Per-request deadline: a hung Lambda cold-start / half-open socket must fail, not hang the sync driver
 // forever (design C2). #send aborts the fetch after this; the abort surfaces as the `timeout` code.
 const REQUEST_TIMEOUT_MS = 20_000;
-
-// A thrown HTTP error carrying its `status`, so callers (the sync driver's retry/backoff classification) can
-// tell a permanent refusal from a transient one. The NEW blob channel (below) throws AppErrors instead.
-function httpError(label, status, detail = '') {
-  const e = new Error(`${label}: HTTP ${status}${detail ? ` — ${detail}` : ''}`);
-  e.status = status;
-  return e;
-}
 
 // ---- blob-channel error normalization (OPE-418 client adapter) ----
 // The data channel crosses the Comlink worker↔main boundary, so its failures must be PLAIN AppErrors
@@ -64,19 +52,6 @@ function statusFallbackCode(status) {
   if (status === 429) return 'rate_limited';
   if (status >= 500) return 'unavailable';
   return 'invalid_request';
-}
-
-/**
- * The requested log tail is below the server's retained window (HTTP 410): the client can't catch up
- * from deltas and must bootstrap from a snapshot. Carries the retained bounds so the caller can decide.
- */
-export class BootstrapRequiredError extends Error {
-  constructor(oldestRetainedSeq, headSeq) {
-    super('log tail no longer retained — bootstrap from a snapshot');
-    this.name = 'BootstrapRequiredError';
-    this.oldestRetainedSeq = oldestRetainedSeq;
-    this.headSeq = headSeq;
-  }
 }
 
 export class RemoteStore {
@@ -155,7 +130,7 @@ export class RemoteStore {
    * Explicit create-tree (OPE-407): POST the tree id to mint its `trees` row (entitlement-gated on
    * `max_trees`) so the caller becomes owner, BEFORE any blob write reaches the server — `put_blob` no
    * longer mints and `404`s on a missing tree. Idempotent for the owner (a returning device re-POSTs and
-   * gets `2xx`, not an error); a tree owned by someone else is refused (`403`, surfaced as an httpError so
+   * gets `2xx`, not an error); a tree owned by someone else is refused (`403`, surfaced as an AppError so
    * `runTick` can tell a permanent refusal from offline). `id` is the tree UUID (the same id `#tree` routes on).
    */
   async createTree(id) {
@@ -166,89 +141,6 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-  }
-
-  async readSnapshot(id) {
-    const res = await this.#send(this.#tree(id), { method: 'GET' });
-    if (res.status === 404) return null;
-    if (!res.ok) throw httpError(`readSnapshot ${id}`, res.status);
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    return { bytes, version: unquote(res.headers.get('etag')) };
-  }
-
-  // `expected` is the server ETag the edit was based on (null → create, must not exist).
-  // A 409 means someone else advanced the snapshot: surface it as ConflictError so the
-  // caller pulls + reapplies, distinct from a network error (retry with the same body).
-  async putSnapshot(id, bytes, expected = null) {
-    const extraHeaders = { 'content-type': 'application/octet-stream' };
-    if (expected != null) extraHeaders['if-match'] = expected; // server trims any quotes
-    const res = await this.#send(this.#tree(id), { method: 'PUT', extraHeaders, body: bytes });
-    if (res.status === 409) throw new ConflictError(expected, null);
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw httpError(`putSnapshot ${id}`, res.status, detail);
-    }
-    return unquote(res.headers.get('etag'));
-  }
-
-  // ---- delta-log surface (POST/GET /trees/{id}/log) ----
-
-  /** Append one sealed delta envelope; returns its server-assigned `seq` (idempotent on the dot). */
-  async appendLog(id, sealedDelta) {
-    const res = await this.#send(`${this.#tree(id)}/log`, {
-      method: 'POST',
-      extraHeaders: { 'content-type': 'application/octet-stream' },
-      body: sealedDelta,
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw httpError(`appendLog ${id}`, res.status, detail);
-    }
-    return (await res.json()).seq;
-  }
-
-  /**
-   * The ordered tail after `since` (default from the start). Returns `{ entries, nextCursor,
-   * oldestRetainedSeq, headSeq }`; each entry is `{ seq, member, replica, counter, time, payload }`
-   * with `payload` the sealed delta bytes. Throws BootstrapRequiredError on a 410 (cursor below the
-   * retained window).
-   */
-  async readLog(id, since = -1) {
-    const res = await this.#send(`${this.#tree(id)}/log?since=${since}`, { method: 'GET' });
-    if (res.status === 404) return { entries: [], nextCursor: since, oldestRetainedSeq: 0, headSeq: -1 };
-    if (res.status === 410) {
-      const j = await res.json().catch(() => ({}));
-      throw new BootstrapRequiredError(j.oldest_retained_seq ?? 0, j.head_seq ?? -1);
-    }
-    if (!res.ok) throw httpError(`readLog ${id}`, res.status);
-    const tail = await res.json();
-    return {
-      entries: (tail.entries ?? []).map((e) => ({
-        seq: e.seq,
-        member: e.member ?? null,
-        replica: e.replica,
-        counter: e.counter,
-        time: e.time ?? null,
-        payload: b64decode(e.payload),
-      })),
-      nextCursor: tail.next_cursor,
-      oldestRetainedSeq: tail.oldest_retained_seq,
-      headSeq: tail.head_seq,
-    };
-  }
-
-  /**
-   * The change-history / activity feed: log metadata (who/when/where in the sequence) without paying
-   * for the payload bytes. Same endpoint; the caller ignores `payload`. (A payload-free server mode is
-   * a later optimization.)
-   */
-  async activity(id, since = -1) {
-    const { entries, nextCursor, headSeq } = await this.readLog(id, since);
-    return {
-      changes: entries.map(({ seq, member, replica, counter, time }) => ({ seq, member, replica, counter, time })),
-      nextCursor,
-      headSeq,
-    };
   }
 
   // ---- data blob surface (the OPE-397 BlobStore-over-HTTP; the managed server is OPE-398) ----

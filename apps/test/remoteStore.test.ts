@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
-import { ConflictError, AuthError } from '../app/src/core/store.js';
+import { ConflictError } from '../app/src/core/store.js';
 
 // A minimal fetch Response stand-in.
 function res({ status = 200, etag = null as string | null, body = new Uint8Array(), text = '' } = {}) {
@@ -24,77 +24,43 @@ function jsonRes({ status = 200, json = {} as any } = {}) {
   };
 }
 
+// The shared #send machinery (per-request bearer, the single 401 forced-refresh retry, the timeout) is exercised
+// here through a surviving method — blobGet for GETs, putKeyring for PUTs. (The V1 snapshot / V2 delta-log methods
+// that used to vehicle these were removed; the blob quartet + keyring + access + invites are the live surface.)
 describe('RemoteStore', () => {
-  it('readSnapshot returns bytes + unquoted version', async () => {
-    const fetch = vi.fn(async () => res({ status: 200, etag: '"abc-123"', body: new Uint8Array([1, 2, 3]) }));
-    const store = new RemoteStore({ baseUrl: 'http://x', fetch });
-    const snap = await store.readSnapshot('tree-1');
-    expect(Array.from(snap!.bytes)).toEqual([1, 2, 3]);
-    expect(snap!.version).toBe('abc-123');
-    expect(fetch).toHaveBeenCalledWith('http://x/v1/trees/tree-1', expect.anything());
-  });
-
-  it('readSnapshot returns null on 404', async () => {
-    const store = new RemoteStore({ baseUrl: 'http://x', fetch: async () => res({ status: 404 }) });
-    expect(await store.readSnapshot('t')).toBeNull();
-  });
-
-  it('putSnapshot returns the new version and omits If-Match on create', async () => {
-    const fetch = vi.fn(async () => res({ status: 200, etag: '"v-new"' }));
-    const store = new RemoteStore({ baseUrl: 'http://x', fetch });
-    const v = await store.putSnapshot('t', new Uint8Array([9]), null);
-    expect(v).toBe('v-new');
-    const init = fetch.mock.calls[0][1] as any;
-    expect(init.method).toBe('PUT');
-    expect(init.headers['if-match']).toBeUndefined();
-  });
-
-  it('putSnapshot sends If-Match when expected is given', async () => {
-    const fetch = vi.fn(async () => res({ status: 200, etag: '"v2"' }));
-    const store = new RemoteStore({ baseUrl: 'http://x', fetch });
-    await store.putSnapshot('t', new Uint8Array([9]), 'v1');
-    const init = fetch.mock.calls[0][1] as any;
-    expect(init.headers['if-match']).toBe('v1');
-  });
-
-  it('putSnapshot throws ConflictError on 409', async () => {
-    const store = new RemoteStore({ baseUrl: 'http://x', fetch: async () => res({ status: 409 }) });
-    await expect(store.putSnapshot('t', new Uint8Array([1]), 'stale')).rejects.toBeInstanceOf(ConflictError);
-  });
-
   it('fetches the bearer PER REQUEST from the AuthSession seam (never captured at construction)', async () => {
-    const fetch = vi.fn(async () => res({ status: 200, etag: '"v"' }));
+    const fetch = vi.fn(async () => res({ status: 200 }));
     // A seam whose token rotates between calls — a construction-time token would strand the second.
     let n = 0;
     const auth = { getAccessToken: vi.fn(async () => `jwt-${++n}`) };
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
-    await store.readSnapshot('t');
-    await store.readSnapshot('t');
+    await store.blobGet('t/snapshot');
+    await store.blobGet('t/snapshot');
     expect((fetch.mock.calls[0][1] as any).headers.authorization).toBe('Bearer jwt-1');
     expect((fetch.mock.calls[1][1] as any).headers.authorization).toBe('Bearer jwt-2');
     expect(auth.getAccessToken).toHaveBeenCalledTimes(2);
   });
 
   it('accepts a bare getAccessToken function as the seam', async () => {
-    const fetch = vi.fn(async () => res({ status: 200, etag: '"v"' }));
+    const fetch = vi.fn(async () => res({ status: 200 }));
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth: async () => 'jwt-fn' });
-    await store.readSnapshot('t');
+    await store.blobGet('t/x');
     expect((fetch.mock.calls[0][1] as any).headers.authorization).toBe('Bearer jwt-fn');
   });
 
   it('omits Authorization when no auth seam is given', async () => {
-    const fetch = vi.fn(async () => res({ status: 200, etag: '"v"' }));
+    const fetch = vi.fn(async () => res({ status: 200 }));
     const store = new RemoteStore({ baseUrl: 'http://x', fetch });
-    await store.readSnapshot('t');
+    await store.blobGet('t/x');
     expect((fetch.mock.calls[0][1] as any).headers.authorization).toBeUndefined();
   });
 
   it('on a 401 does EXACTLY ONE forced-refresh retry, then succeeds', async () => {
-    const fetch = vi.fn(async () => (fetch.mock.calls.length === 1 ? res({ status: 401 }) : res({ status: 200, etag: '"ok"' })));
-    const auth = { getAccessToken: vi.fn(async ({ forceRefresh } = {}) => (forceRefresh ? 'fresh' : 'stale')) };
+    const fetch = vi.fn(async () => (fetch.mock.calls.length === 1 ? res({ status: 401 }) : res({ status: 200, body: new Uint8Array([5]) })));
+    const auth = { getAccessToken: vi.fn(async ({ forceRefresh } = {} as any) => (forceRefresh ? 'fresh' : 'stale')) };
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
-    const snap = await store.readSnapshot('t');
-    expect(snap!.version).toBe('ok');
+    const bytes = await store.blobGet('t/x');
+    expect(Array.from(bytes!)).toEqual([5]);
     // First attempt stale, retry forced-refresh.
     expect(auth.getAccessToken).toHaveBeenNthCalledWith(1, { forceRefresh: false });
     expect(auth.getAccessToken).toHaveBeenNthCalledWith(2, { forceRefresh: true });
@@ -102,25 +68,27 @@ describe('RemoteStore', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it('a persistent 401 surfaces AuthError after one retry — never loops', async () => {
+  it('a persistent 401 surfaces an auth_required AppError after one retry — never loops', async () => {
     const fetch = vi.fn(async () => res({ status: 401, text: 'nope' }));
     const auth = { getAccessToken: vi.fn(async () => 'tok') };
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
-    await expect(store.readSnapshot('t')).rejects.toBeInstanceOf(AuthError);
+    const err = await store.blobGet('t/x').catch((e: any) => e);
+    expect(err.code).toBe('auth_required'); // #send throws AuthError; the blob channel normalizes it to an AppError
     expect(fetch).toHaveBeenCalledTimes(2); // initial + one forced-refresh retry, no more
   });
 
-  it('a 401 with no auth seam surfaces AuthError without a retry', async () => {
+  it('a 401 with no auth seam surfaces an auth_required AppError without a retry', async () => {
     const fetch = vi.fn(async () => res({ status: 401 }));
     const store = new RemoteStore({ baseUrl: 'http://x', fetch });
-    await expect(store.readSnapshot('t')).rejects.toBeInstanceOf(AuthError);
+    const err = await store.blobGet('t/x').catch((e: any) => e);
+    expect(err.code).toBe('auth_required');
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('the 401 retry also protects a PUT (keyring publish path)', async () => {
     const queue = [res({ status: 401 }), jsonRes({ json: { revision: 2 } })];
     const fetch = vi.fn(async () => queue.shift());
-    const auth = { getAccessToken: vi.fn(async ({ forceRefresh } = {}) => (forceRefresh ? 'fresh' : 'stale')) };
+    const auth = { getAccessToken: vi.fn(async ({ forceRefresh } = {} as any) => (forceRefresh ? 'fresh' : 'stale')) };
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
     const out = await store.putKeyring('t', new Uint8Array([1, 2]));
     expect(out).toEqual({ revision: 2 });
@@ -132,9 +100,8 @@ describe('RemoteStore', () => {
     expect(store.caps()).toEqual({ remote: true, conditionalWrites: true, durable: true });
   });
 
-  it('readLog on a 404 (no log yet) returns an empty tail; list/delete stay unsupported', async () => {
+  it('list and delete stay unsupported', async () => {
     const store = new RemoteStore({ baseUrl: 'http://x', fetch: async () => res({ status: 404 }) });
-    expect(await store.readLog('t', -1)).toEqual({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 });
     await expect(store.list()).rejects.toThrow();
     await expect(store.delete()).rejects.toThrow();
   });
