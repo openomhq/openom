@@ -14,6 +14,7 @@ import { ERROR_CODES } from './errorCodes.generated.js';
 
 const unquote = (etag) => (etag ? etag.replace(/^"|"$/g, '') : null);
 const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) : new Uint8Array(0));
+const b64encode = (u8) => btoa(String.fromCharCode(...u8)); // STANDARD base64, matching the server's decoder
 
 // Per-request deadline: a hung Lambda cold-start / half-open socket must fail, not hang the sync driver
 // forever (design C2). #send aborts the fetch after this; the abort surfaces as the `timeout` code.
@@ -440,6 +441,114 @@ export class RemoteStore {
     if (!res.ok) throw await httpAppError(res);
     const b = await res.json();
     return { generation: b.generation ?? null, unchanged: !!b.unchanged };
+  }
+
+  // ---- Mode A share-invite surface (POST/GET /trees/{id}/invites, PUT/DELETE /invites/{invite_id}) ----
+  //
+  // The pending-invite transport for the two-channel invite protocol (plan/sharing/design.mode-a-client-flow.md
+  // §2/§7). This layer moves ONLY public data: the owner's OPEN pending invite and the invitee's MAC'd public-key
+  // claim. It is advisory transport + spam control, NEVER the security boundary — the real membership change is
+  // the owner's signed keyring PUT (admitted by the engine verifier), and the MAC is verified by the owner from
+  // its LOCAL mint record (the server never holds the link secret `s`). Keys/tag cross the wire base64 (STANDARD,
+  // matching the server's `base64::STANDARD`).
+
+  #invite(inviteId) {
+    return `${this.#baseUrl}/v1/invites/${encodeURIComponent(inviteId)}`;
+  }
+
+  /**
+   * Owner: create a pending invite on the server. `pending` is the `mint()` payload — `{ inviteId, uuid, role,
+   * recipientPin?, expiry }` — carrying NO secret (`s`/`s_mac` stay in the owner's local record + the link). `id`
+   * is the tree UUID (`realDoc`). Returns the server-echoed `{ inviteId }`.
+   */
+  async createInvite(id, pending) {
+    const body = {
+      invite_id: pending.inviteId,
+      role: pending.role,
+      recipient_pin: pending.recipientPin ?? null,
+      expiry: pending.expiry,
+    };
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/invites`, {
+        method: 'POST',
+        extraHeaders: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
+    const b = await res.json().catch(() => ({}));
+    return { inviteId: b.invite_id ?? pending.inviteId };
+  }
+
+  /**
+   * Owner: list this tree's pending invites and any submitted claims (to admit). Returns
+   * `[{ inviteId, role, recipientPin, expiry, status, claim }]` where `claim` (when present) is
+   * `{ memberId, hpkePublicKey, authorPublicKey, tag }` with the keys/tag decoded to bytes for `verifyClaim`.
+   */
+  async listInvites(id) {
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/invites`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (res.status === 404) return [];
+    if (!res.ok) throw await httpAppError(res);
+    const rows = await res.json();
+    return (rows ?? []).map((r) => ({
+      inviteId: r.invite_id,
+      role: r.role,
+      recipientPin: r.recipient_pin ?? null,
+      expiry: r.expiry,
+      status: r.status,
+      claim: r.claim
+        ? {
+          memberId: r.claim.member_id,
+          hpkePublicKey: b64decode(r.claim.hpke_public),
+          authorPublicKey: b64decode(r.claim.author_public),
+          tag: b64decode(r.claim.tag),
+        }
+        : null,
+    }));
+  }
+
+  /**
+   * Invitee: submit the MAC'd public-key claim against a pending invite. `claim` is the `invite.claim()` output —
+   * `{ inviteId, memberId, hpkePublicKey, authorPublicKey, tag }` (bytes) — sent base64. The server enforces
+   * member_id == the JWT sub, the recipient pin, OPEN + unexpired, and one live claim; it does NOT verify the MAC.
+   */
+  async claimInvite(claim) {
+    const body = {
+      member_id: claim.memberId,
+      hpke_public: b64encode(claim.hpkePublicKey),
+      author_public: b64encode(claim.authorPublicKey),
+      tag: b64encode(claim.tag),
+    };
+    let res;
+    try {
+      res = await this.#send(`${this.#invite(claim.inviteId)}/claim`, {
+        method: 'PUT',
+        extraHeaders: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
+  }
+
+  /** Owner: consume/cancel an invite after admitting it. Idempotent (the server 204s a missing invite). */
+  async deleteInvite(inviteId) {
+    let res;
+    try {
+      res = await this.#send(this.#invite(inviteId), { method: 'DELETE' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
   }
 
   async list() {

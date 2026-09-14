@@ -7,6 +7,10 @@ import { TreeTransfer } from './core/transfer.js';
 import { SessionController, DevAuth } from './core/session.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
+import {
+  inviteMember as mInviteMember, pendingInvites as mPendingInvites, admitMember as mAdmitMember,
+  joinTree as mJoinTree, completeJoin as mCompleteJoin,
+} from './core/membership.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { errText } from './core/errorText.js';
@@ -422,6 +426,77 @@ class App {
       passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
       removeMemberId,
     });
+  }
+
+  // ── Mode A share invite / join seams (OPE-442) the members-UI (OPE-10/416) binds to. Invite/admit require the
+  // server (the /invites transport + the keyring channel), so all of these need a configured backend + an active
+  // account; a local-only tree can't be shared. Orchestration lives in core/membership.js — these are thin App
+  // wrappers that bind the active tree identity + a RemoteStore, mirroring the promote/demote/removeMember seams.
+
+  // A RemoteStore for the active backend+account, or null when local-only. Built on demand (stateless, per-request
+  // auth), exactly like startSync's.
+  #membershipRemote() {
+    if (!this.serverUrl || !this.auth.memberId()) return null;
+    return new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth });
+  }
+
+  // The worker's network transport for `docId`, wrapped for Comlink — the join needs it attached before it can
+  // fetch the keyring channel.
+  #attachTransport(remote) {
+    return (docId) => this.worker.attachTransport(docId, Comlink.proxy(remoteTransport(remote)));
+  }
+
+  /**
+   * Owner: mint a share invite for the active tree and register it server-side. Returns `{ inviteId, link, fp }` —
+   * deliver `link` out of band. `role` ∈ 'viewer' | 'editor' | 'maintainer' | 'co-owner'.
+   */
+  async inviteMember(role, { recipientPin = null } = {}) {
+    const remote = this.#membershipRemote();
+    if (!remote) throw new Error('sharing needs a configured backend and an active account');
+    return mInviteMember({ worker: this.worker, remote }, {
+      docId: this.realDoc, treeId: this.realTreeId, role, recipientPin,
+    });
+  }
+
+  /** Owner: the active tree's pending invites + any submitted claims (each ready-to-admit item has a `claim`). */
+  async pendingInvites() {
+    const remote = this.#membershipRemote();
+    if (!remote) throw new Error('sharing needs a configured backend and an active account');
+    return mPendingInvites({ remote }, { docId: this.realDoc });
+  }
+
+  /**
+   * Owner: admit a claimed invite — verifies the claimant's MAC against the local mint record, adds them at the
+   * invited role, and consumes the invite. `claim` is an item's `.claim` from `pendingInvites()`. Needs the
+   * owner's passphrase (re-derives the signing identity), like the other membership ops.
+   */
+  async admitMember(inviteId, claim, ownerPassphrase) {
+    const remote = this.#membershipRemote();
+    if (!remote) throw new Error('sharing needs a configured backend and an active account');
+    return mAdmitMember({ worker: this.worker, remote }, {
+      docId: this.realDoc, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      passphrase: ownerPassphrase, inviteId, claim,
+    });
+  }
+
+  /**
+   * Invitee (signed into their OWN account): join a shared tree from an invite `link`. Throws
+   * `WaitingForApproval` (carrying `.context`) while the owner hasn't admitted yet — poll `completeJoin(context)`.
+   * On success the member core is open; the caller then `enterApp`s it. Requires an active account + backend.
+   */
+  async joinTree(link, passphrase) {
+    const remote = this.#membershipRemote();
+    if (!remote) throw new Error('joining needs a configured backend and an active account');
+    return mJoinTree({ worker: this.worker, remote, attachTransport: this.#attachTransport(remote) }, {
+      link, passphrase, memberId: this.authMemberId(),
+    });
+  }
+
+  /** Invitee: resume a pending join (poll after `WaitingForApproval`) with the `context` it carried. */
+  async completeJoin(context) {
+    const remote = this.#membershipRemote();
+    if (!remote) throw new Error('joining needs a configured backend and an active account');
+    return mCompleteJoin({ worker: this.worker, attachTransport: this.#attachTransport(remote) }, context);
   }
 
   // Open the tree over the (already-provisioned/unlocked) worker core and switch to the app. `createdBy`
