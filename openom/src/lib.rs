@@ -139,6 +139,12 @@ pub fn app(state: AppState) -> Router {
             post(invites::create_invite).get(invites::list_invites),
         )
         .route("/invites/{invite_id}/claim", put(invites::claim_invite))
+        // v3: the invitee fetches authenticated metadata (verify meta_mac with s_mac, then join); the owner marks
+        // an invite admitted (no delete — the joiner still needs /meta to finish) or reopens a slot a garbage
+        // claim burned.
+        .route("/invites/{invite_id}/meta", get(invites::get_invite_meta))
+        .route("/invites/{invite_id}/admit", post(invites::admit_invite))
+        .route("/invites/{invite_id}/reopen", post(invites::reopen_invite))
         .route("/invites/{invite_id}", delete(invites::delete_invite))
         // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
         // traverse the server, so the body limit below doesn't apply to them.
