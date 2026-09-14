@@ -36,6 +36,14 @@ const u8 = (x) => (x == null ? x : x instanceof Uint8Array ? x : new Uint8Array(
 // REMOTE is `{treeKey}/…`, so the sync tick re-keys between them (exactly as appCore.worker.js does).
 const hexKey = (treeId) => Array.from(treeId, (b) => b.toString(16).padStart(2, '0')).join('');
 
+// OPE-407 durable create-tree marker (native mirror of the web worker's IndexedDB marker): this device
+// PROVISIONED a new tree whose server `trees` row may not exist yet. Set at provision, consumed on the first
+// sync tick that reaches the server. Durable via the webview's localStorage so an offline provision that RESTARTS
+// before it ever synced still mints the tree on a later tick rather than 404ing forever. A JOINing member never
+// sets it (it adopts a tree the owner already created), so a member never calls createTree — no 403 to swallow.
+const NEEDS_TREE_KEY = (docId) => `openom:${docId}:needs-create-tree`;
+const lstore = () => { try { return globalThis.localStorage ?? null; } catch { return null; } };
+
 export function createNativeAppCore() {
   const call = (cmd, args) => {
     const inv = invoke();
@@ -65,6 +73,13 @@ export function createNativeAppCore() {
     treeKeys.set(docId, hexKey(treeId));
     treeIds.set(docId, treeId);
   };
+
+  // The create-tree marker, localStorage-backed with an in-memory fallback so create-tree is never silently
+  // disabled when storage is unavailable (private mode) — the fallback still gives within-session retry.
+  const needsTreeMem = new Set();
+  const markNeedsCreateTree = (docId) => { needsTreeMem.add(docId); try { lstore()?.setItem(NEEDS_TREE_KEY(docId), '1'); } catch { /* no storage */ } };
+  const needsCreateTree = (docId) => { if (needsTreeMem.has(docId)) return true; try { return lstore()?.getItem(NEEDS_TREE_KEY(docId)) === '1'; } catch { return false; } };
+  const clearNeedsCreateTree = (docId) => { needsTreeMem.delete(docId); try { lstore()?.removeItem(NEEDS_TREE_KEY(docId)); } catch { /* best-effort */ } };
 
   // Publish a membership change to the server (OPE-433/434, review C2): the KEYRING channel (the crypto
   // revocation — the server serves the rotated keyring, so a removed member can no longer decrypt new content)
@@ -130,6 +145,7 @@ export function createNativeAppCore() {
 
     provisionCore: ({ passphrase, treeId, memberId, docId }) => {
       remember(docId, treeId);
+      markNeedsCreateTree(docId); // owner-only: a new tree whose server row the first tick must mint
       return call('core_provision', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
     },
 
@@ -272,10 +288,17 @@ export function createNativeAppCore() {
       if (syncing.get(docId)) return { state: 'busy' };
       syncing.set(docId, true);
       try {
-        // First push per session: mint this owner's server `trees` row (OPE-407). Idempotent for the owner;
-        // a joining member 403s here (the owner already created it), so swallow — its blob PUTs still land.
+        // First push per session: mint this owner's server `trees` row (OPE-407). Gated on the durable marker
+        // that ONLY the provisioning owner set — a joining member skips this entirely (no createTree, so no 403
+        // to swallow). A real failure (offline / entitlement / auth / 5xx) is NOT swallowed: createTree throws,
+        // which propagates to the tick's catch → {state:'error'} → the driver retries, and because treeEnsured
+        // stays false and the marker stays set (cleared only on success), a later tick / restart retries too.
+        // Idempotent for the owner (a returning device re-POSTs and gets a 2xx no-op).
         if (!treeEnsured.has(docId)) {
-          try { await transport.createTree(docId); } catch { /* member / already exists */ }
+          if (needsCreateTree(docId)) {
+            await transport.createTree(docId);
+            clearNeedsCreateTree(docId);
+          }
           treeEnsured.add(docId);
         }
         // KEYRING sync, derived from local-head vs server-head in ONE readKeyring (chain only — a dag call
