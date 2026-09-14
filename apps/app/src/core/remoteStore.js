@@ -496,6 +496,70 @@ export class RemoteStore {
     if (!res.ok) throw await httpAppError(res);
   }
 
+  // ---- proposals surface (POST/GET /trees/{id}/proposals, DELETE /trees/{id}/proposals/{id}) ----
+  //
+  // The review-changes approval channel: an Editor submits a sealed KIND_PROPOSAL bundle (opaque bytes) for a
+  // Maintainer to verify + re-author as a signed delta. Transient + off the authoritative log — the server never
+  // folds a proposal into tree state (the log append path refuses KIND_PROPOSAL), so it's advisory transport, and
+  // the REAL trust is the client's verify_entry on the proposal envelope before commit. The payload is opaque.
+
+  /**
+   * Editor: submit a sealed KIND_PROPOSAL bundle (opaque bytes). Returns `{ id, expiresAt }`. `id` is the tree
+   * UUID (`realDoc`).
+   */
+  async createProposal(id, sealedBytes) {
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/proposals`, {
+        method: 'POST',
+        extraHeaders: { 'content-type': 'application/octet-stream' },
+        body: sealedBytes,
+      });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
+    const b = await res.json();
+    return { id: b.id, expiresAt: b.expires_at };
+  }
+
+  /**
+   * Maintainer: list the tree's open proposals (payloads inline, for verify + re-author). Returns
+   * `[{ id, proposer, sizeBytes, createdAt, expiresAt, ciphertextHash(bytes), payload(bytes) }]`.
+   */
+  async listProposals(id, { includeExpired = false } = {}) {
+    const qs = includeExpired ? '?include_expired=true' : '';
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/proposals${qs}`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (res.status === 404) return [];
+    if (!res.ok) throw await httpAppError(res);
+    const b = await res.json();
+    return (b.proposals ?? []).map((p) => ({
+      id: p.id,
+      proposer: p.proposer,
+      sizeBytes: p.size_bytes,
+      createdAt: p.created_at,
+      expiresAt: p.expires_at,
+      ciphertextHash: b64decode(p.ciphertext_hash),
+      payload: b64decode(p.payload),
+    }));
+  }
+
+  /** Maintainer (any proposal) or the proposer (own): resolve/withdraw a proposal. Idempotent. */
+  async deleteProposal(id, proposalId) {
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/proposals/${encodeURIComponent(proposalId)}`, { method: 'DELETE' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
+  }
+
   async list() {
     throw new Error('remote list is not supported');
   }
