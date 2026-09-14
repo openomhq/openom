@@ -307,9 +307,21 @@ export function createNativeAppCore() {
         return Promise.reject(makeError('internal', { cause: `joinAsMember: no transport attached for ${docId}` }));
       }
       if (engine === 'dag') {
-        return Promise.reject(makeError('internal', { cause: 'native dag member-join is not wired yet (OPE-447 follow-up)' }));
+        // Dag: the highest served revision is the self-contained anchor; the host verifies it against the OOB pin
+        // (the v3 dag pin) and unlocks. No genesis-walk framing.
+        const { revisions } = await transport.readKeyring(docId, 1);
+        if (!revisions || revisions.length === 0) {
+          return Promise.reject(makeError('internal', { cause: 'no keyring anchor to verify' }));
+        }
+        const anchor = revisions[revisions.length - 1].bytes;
+        const out = await call('core_join_dag_anchor', {
+          doc: docId, treeId: bytes(treeId), memberId, passphrase,
+          memberKdfParams: bytes(memberKdfParams), anchor: bytes(anchor), pin: bytes(u8(pin)),
+        });
+        await call('core_bootstrap', { doc: docId });
+        return out;
       }
-      // v3: unpack the opaque chain pin (rev(u32 BE)‖kh(32) = 36 bytes) into (revision, hash); a low-level caller
+      // v3 chain: unpack the opaque pin (rev(u32 BE)‖kh(32) = 36 bytes) into (revision, hash); a low-level caller
       // may instead pass them already unpacked.
       if (pin !== undefined) {
         const p = u8(pin);

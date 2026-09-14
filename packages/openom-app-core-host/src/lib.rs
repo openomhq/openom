@@ -912,6 +912,67 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(MemberUnlocked { did_key })
     }
 
+    /// A joining member's FIRST open on the DAG engine: the dag analog of [`join_as_member`]. Instead of a
+    /// genesis-walk, verify the served self-contained anchor against the OOB pin (`verify_dag_anchor` — fails
+    /// closed on founder substitution / rollback / checkpoint), unlock as the member at the verified anchor
+    /// (empty trusted-signers + revision 0, no per-revision retention — the anchor IS the whole history), then
+    /// persist context + commit the anchor as the sole commit point. Same op-lock + re-join guard as the chain
+    /// path. `anchor_wrapped` is the highest served (MembershipEnvelope-wrapped) revision; `pin` is the v3 dag pin.
+    ///
+    /// # Errors
+    /// [`HostError::Store`] if already joined / on a store fault; [`HostError::Vault`] on a failed anchor verify;
+    /// [`HostError::Core`] on a wrong passphrase / member-unlock failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn join_dag_anchor(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        member_id: &str,
+        passphrase: &Passphrase,
+        member_kdf_params: &[u8],
+        anchor_wrapped: &[u8],
+        pin: &[u8],
+    ) -> Result<MemberUnlocked, HostError> {
+        if self.engine != EngineKind::Dag {
+            return Err(HostError::Store("join_dag_anchor is dag-only".into()));
+        }
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.store.load_keyring(doc).map_err(HostError::Store)?.is_some() {
+            return Err(HostError::Store(format!("already joined {doc:?}; unlock, don't re-join")));
+        }
+        let anchor = openom_vault::sharing::unwrap_dag_keyring(anchor_wrapped)?;
+        let verified = openom_vault::sharing::verify_dag_anchor(&anchor, tree_id, pin)?;
+        let no_retained: Vec<(u32, Vec<u8>)> = Vec::new();
+        // Unlock at the verified anchor BEFORE persisting (F3). Dag carries no signer walk / retention, so the
+        // trusted-signers are empty and the revision is 0 (mirrors the web joinDagAnchor).
+        let m = openom_app_core::unlock_as_member(
+            self.doc_store(doc)?,
+            self.engine,
+            &verified.keyring,
+            passphrase,
+            member_kdf_params,
+            tree_id,
+            member_id,
+            &[],
+            &fresh_replica()?,
+            0,
+            &no_retained,
+            doc.to_string(),
+        )?;
+        self.save_member_context(doc, member_kdf_params, &[])?;
+        self.store
+            .commit_keyring(doc, &verified.keyring, &m.watermark)
+            .map_err(HostError::Store)?;
+        let did_key = m.did_key.clone();
+        self.register(doc, m.core);
+        self.with_core(doc, |c| {
+            c.author_cover()?;
+            Ok(())
+        })?;
+        Ok(MemberUnlocked { did_key })
+    }
+
     /// Unlock a SHARED tree as a non-owner member on a device that has already JOINED: load the trusted keyring,
     /// the member context (kdf + trusted signers), and the anti-rollback floor FROM NATIVE CUSTODY (never a
     /// webview argument — C2), HPKE-unwrap the member DEKs, and register a ready core carrying its epoch-adopt
@@ -1936,6 +1997,64 @@ mod tests {
                 .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
                 .is_err(),
             "re-joining an already-joined tree is refused"
+        );
+
+        std::fs::remove_dir_all(&dir_o).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
+    }
+
+    #[test]
+    fn a_member_joins_a_dag_tree_by_anchor_and_converges_with_the_owner() {
+        use super::MemberToAdd;
+        let (dir_o, dir_b) = (temp_dir(), temp_dir());
+        let owner_host = AppCoreHost::new(MemStore::default(), &dir_o, EngineKind::Dag);
+        let bob_host = AppCoreHost::new(MemStore::default(), &dir_b, EngineKind::Dag);
+        let tree_id = [21u8; 16];
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let bob_pass = Passphrase::new(b"bob's own passphrase here".to_vec());
+
+        // Bob mints his account; the owner (dag) admits him as a Maintainer.
+        let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
+        let bob_member = MemberToAdd {
+            member_id: "acct-bob".into(),
+            role: "maintainer".into(),
+            author_public_key: bob_acct.author_public_key.clone(),
+            hpke_public_key: bob_acct.hpke_public_key.clone(),
+        };
+        let added = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &bob_member).unwrap();
+
+        // Dag: the published anchor is self-contained (no genesis-walk). The SERVED form is the MembershipEnvelope
+        // the server stores (== the payload the owner publishes); bob receives that + the OOB dag pin, and joins by
+        // verifying the anchor against the pin — the v3 native dag member-join path.
+        let served = openom_keyring_api::MembershipEnvelope::wrap(EngineKind::Dag, added.keyring.clone()).encode();
+        let pin = owner_host.invite_pin("t").unwrap();
+        bob_host
+            .join_dag_anchor("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &served, &pin)
+            .unwrap();
+        assert!(
+            bob_host.store().load_keyring("t").unwrap().is_some(),
+            "the verified anchor is committed as native custody"
+        );
+
+        // Bob writes as an attributed member; the owner pulls + folds → converges on his write.
+        bob_host.assert_anchor("t", "pBob", PERSON).unwrap();
+        bob_host.commit("t").unwrap();
+        let remote: Vec<_> =
+            bob_host.sync("t", &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
+        owner_host.sync("t", &remote, 0).unwrap();
+        assert!(
+            owner_host.project("t").unwrap().contains("pBob"),
+            "the owner converges on the joined dag member's attributed write"
+        );
+
+        // Re-open from custody works; a second join is refused by the re-join guard.
+        assert!(bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(), "re-unlock from custody");
+        assert!(
+            bob_host
+                .join_dag_anchor("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &served, &pin)
+                .is_err(),
+            "re-joining an already-joined dag tree is refused"
         );
 
         std::fs::remove_dir_all(&dir_o).ok();

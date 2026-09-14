@@ -278,6 +278,37 @@ async fn core_join_as_member(
     .map_err(join_err)?
 }
 
+/// A joining member's FIRST open on the DAG engine — verify the served self-contained anchor against the OOB pin,
+/// then unlock as the member. Argon2id, so `spawn_blocking`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri invoke convention: the flat argument list IS the JS calling shape
+async fn core_join_dag_anchor(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    member_id: String,
+    passphrase: String,
+    member_kdf_params: Vec<u8>,
+    anchor: Vec<u8>,
+    pin: Vec<u8>,
+) -> Result<MemberUnlocked, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.join_dag_anchor(
+            &doc,
+            &tree_id,
+            &member_id,
+            &Passphrase::new(passphrase.into_bytes()),
+            &member_kdf_params,
+            &anchor,
+            &pin,
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(join_err)?
+}
+
 /// Re-open a shared tree as a member on a device that already joined: the host loads the keyring + member
 /// context from native custody (no webview trust inputs) and unlocks. Argon2id, so `spawn_blocking`.
 #[tauri::command]
@@ -633,6 +664,7 @@ pub fn run() {
             core_remove_member,
             core_change_role,
             core_join_as_member,
+            core_join_dag_anchor,
             core_unlock_as_member,
             core_bootstrap,
             core_assert_anchor,
