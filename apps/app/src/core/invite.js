@@ -99,6 +99,30 @@ export async function fingerprintSigners(signers, { subtle = crypto.subtle } = {
 }
 
 /**
+ * The tree's SIGNER set (owner + co-owners = role ≤ 2) as a sorted memberId list, from the engine-agnostic keyring
+ * summary `[{memberId, role}]`. Recorded at mint for the admit-time anti-substitution gate. Engine-agnostic (the
+ * summary works for chain AND dag).
+ * @param {{memberId: string, role: number}[]} members
+ */
+export function signerIds(members) {
+  return (members ?? []).filter((m) => m.role <= 2).map((m) => m.memberId).sort();
+}
+
+/**
+ * The admit-time ANTI-SUBSTITUTION check: is every signer present at MINT still a signer NOW? REMOVAL-ONLY — a
+ * signer removed or demoted since mint fails (e.g. a co-owner about to be kicked pre-minted an invite for
+ * themselves, then it's admitted after their removal), so the stale invite is refused. ADDING a signer since mint
+ * is TOLERATED (it enables no stale-invite attack — the invite admits the claimant at the recorded role, not the
+ * new signer). Subset check, not equality.
+ * @param {string[]} mintSignerIds  the sorted signer list recorded at mint (`signerIds` output)
+ * @param {{memberId: string, role: number}[]} currentMembers  the CURRENT keyring summary members
+ */
+export function signersRetained(mintSignerIds, currentMembers) {
+  const now = new Set((currentMembers ?? []).filter((m) => m.role <= 2).map((m) => m.memberId));
+  return (mintSignerIds ?? []).every((id) => now.has(id));
+}
+
+/**
  * Owner: mint an invite. `pin` is OPAQUE engine-specific bytes the caller (the worker) produced (chain: rev‖kh;
  * dag: dagAnchorPin). Returns the short shareable `link` (`#invite=<id>&s=<s>` — only `s` is out-of-band), the
  * `pending` payload for the server (the authenticated metadata, NO secret), and the LOCAL `record` (holds

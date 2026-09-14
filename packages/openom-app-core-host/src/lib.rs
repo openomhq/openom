@@ -116,17 +116,15 @@ pub struct KeyringRevisionPayload {
     pub body: Vec<u8>,
 }
 
-/// Everything the native invite MINT needs from the keyring, so the webview's `invite.mint` (pure JS) stays
-/// engine-agnostic: the FULL v3 pin (chain: `rev(u32 BE)‖kh(32)` = 36 bytes; dag: the opaque `dagAnchorPin`), the
-/// `engine` tag, and the flat signer set (chain only) — the owner records the signers at mint and compares them
-/// at admit (the anti-substitution gate detects a signer-set change; byte-equality of the flat signers is
-/// equivalent to the web's fingerprint compare, and self-consistent since mint + admit run on the same device).
+/// What the native invite MINT needs from the keyring so the webview's `invite.mint` (pure JS) stays
+/// engine-agnostic: the FULL v3 pin (chain: `rev(u32 BE)‖kh(32)` = 36 bytes; dag: the opaque `dagAnchorPin`) and
+/// the `engine` tag. (The admit-gate signer fingerprint is derived separately from the engine-agnostic keyring
+/// summary, so it isn't needed here.)
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InviteMaterial {
     pub engine: String,
     pub pin: Vec<u8>,
-    pub signers: Vec<u8>,
 }
 
 /// The result of [`AppCoreHost::unlock`] — the core is registered in the host; the caller gets the author
@@ -1202,10 +1200,9 @@ impl<St: VaultStore> AppCoreHost<St> {
         })
     }
 
-    /// The invite MINT material (v3): the full engine pin + the flat signer set (for the admit gate), so the
-    /// webview drives `invite.mint` engine-agnostically. Chain packs `rev‖kh` here (the joiner's `verify_keyring_walk`
-    /// checks exactly those 36 bytes); dag returns the opaque anchor pin and no signers (its admit gate is the
-    /// keyring's verify-on-ingest, a coverage-based recompute being a follow-up, as on the web).
+    /// The invite MINT material (v3): the full engine pin, so the webview drives `invite.mint` engine-agnostically.
+    /// Chain packs `rev‖kh` here (the joiner's `verify_keyring_walk` checks exactly those 36 bytes); dag returns
+    /// the opaque anchor pin.
     ///
     /// # Errors
     /// [`HostError::NoKeyring`] if none is stored; [`HostError::Vault`]/[`HostError::Store`] on a malformed keyring.
@@ -1221,12 +1218,11 @@ impl<St: VaultStore> AppCoreHost<St> {
                 let kh = openom_vault::sharing::chain_keyring_pin(&keyring)?; // the 32-byte keyring-body hash
                 let mut pin = revision.to_be_bytes().to_vec();
                 pin.extend_from_slice(&kh);
-                let signers = openom_vault::sharing::chain_head_signers_flat(&keyring)?;
-                Ok(InviteMaterial { engine: EngineKind::Chain.as_tag().to_string(), pin, signers })
+                Ok(InviteMaterial { engine: EngineKind::Chain.as_tag().to_string(), pin })
             }
             EngineKind::Dag => {
                 let pin = openom_vault::sharing::dag_anchor_pin(&keyring)?;
-                Ok(InviteMaterial { engine: EngineKind::Dag.as_tag().to_string(), pin, signers: Vec::new() })
+                Ok(InviteMaterial { engine: EngineKind::Dag.as_tag().to_string(), pin })
             }
         }
     }

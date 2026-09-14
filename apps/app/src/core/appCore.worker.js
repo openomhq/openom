@@ -45,9 +45,9 @@ import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
 import {
   joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl,
-  joinDagAnchor, publishDagAnchor, syncDagAnchor, chainRevision, frameHops,
+  joinDagAnchor, publishDagAnchor, syncDagAnchor, chainRevision,
 } from './sharing.js';
-import { mint as mintInvite, verifyClaim as verifyInviteClaim, fingerprintSigners } from './invite.js';
+import { mint as mintInvite, verifyClaim as verifyInviteClaim, signerIds, signersRetained } from './invite.js';
 import { pushMembershipSummary } from './membershipSummary.js';
 import { MembershipAsserts } from './membershipAsserts.js';
 
@@ -186,8 +186,6 @@ function core(docId) {
   return c;
 }
 
-const hexToBytes = (hex) => Uint8Array.from(hex.match(/.{1,2}/g) ?? [], (b) => parseInt(b, 16));
-
 // Owner-local DURABLE mint records, keyed by invite_id in IndexedDB (design.invite-model-v3.md §6a): a tab
 // refresh must NOT orphan outstanding invites — admit hard-fails without the record, and the flow spans
 // hours-to-days (mint → out-of-band delivery → claim → owner admits later). The record holds `s_mac_claim` (to
@@ -221,29 +219,6 @@ function packChainPin(revision, khBytes) {
   new DataView(out.buffer).setUint32(0, revision >>> 0, false);
   out.set(khBytes, 4);
   return out;
-}
-
-// The owner's CURRENT signer set + head invite-pin, derived by the SAME genesis-walk the joiner runs (over the
-// owner's retained revisions instead of the server's). Self-pinned at the head via `keyringHash` — exactly the
-// pin the joiner verifies — so the walk succeeds and `fingerprintSigners(signers)` matches the joiner's post-walk
-// fp bit-for-bit. Chain only (the dag has no per-revision retention / genesis-walk join). Returns
-// `{ signers: [{memberId, authorPublicKey(bytes)}], pinnedRevision, pinnedHash(bytes) }`.
-async function ownerSignersAndPin(docId, treeId) {
-  const head = await keyringStore().loadHead(docId);
-  if (!head) throw new Error(`no keyring stored for ${docId}`);
-  // The dag joins via an OOB anchor pin (joinDagAnchor / dagAnchorPin), not this genesis-walk + fp — so the dag
-  // invite path is a separate branch, tracked as OPE-446. Both engines must ship (owner slightly prefers dag).
-  if ((head.engine || 'chain') !== 'chain') throw new Error('dag share invites are not wired yet (OPE-446)');
-  const pinnedRevision = (await keyringStore().head(docId))?.revision ?? 1;
-  const pinnedHash = wasmKeyringHash(head.bytes); // the head pin the joiner's verifyKeyringWalk checks
-  const pairs = await retainedKeyrings(docId, 'chain');
-  if (pairs.length === 0) throw new Error('invite requires a retained keyring history');
-  const walk = wasmVerifyKeyringWalk(treeId, frameHops(pairs.map(([, b]) => b)), pinnedRevision, pinnedHash);
-  const signers = JSON.parse(walk.signersJson).map((s) => ({
-    memberId: s.memberId,
-    authorPublicKey: hexToBytes(s.authorPublicKey),
-  }));
-  return { signers, pinnedRevision, pinnedHash };
 }
 
 // Gather a chain tree's retained per-revision keyrings as `[revision, Uint8Array][]` for the §B3 resolver.
@@ -902,56 +877,54 @@ const api = {
 
   /**
    * Owner: mint a Mode A share invite (invite model v3, both engines). Produces the OPAQUE engine pin (chain:
-   * rev‖kh from the genesis-walk head + the mint-time signer fp for the admit gate; dag: the dagAnchorPin), builds
-   * the short two-channel invite (`invite.mint`), and DURABLY persists the mint record for `admitMember`. Returns
-   * `{ inviteId, link, pending }`: the caller delivers `link` out-of-band and POSTs `pending` (the authenticated
-   * metadata, NO secret) via `RemoteStore.createInvite`. Not a signed keyring op — the server authorizes who mints.
-   * `opts`: { treeId(bytes), role, recipientPin?, ttlMs?, base? }.
+   * rev‖kh; dag: the dagAnchorPin) + the mint-time SIGNER fingerprint (the admit-gate baseline, from the
+   * engine-agnostic keyring summary), builds the short two-channel invite (`invite.mint`), and DURABLY persists
+   * the mint record for `admitMember`. Returns `{ inviteId, link, pending }`: the caller delivers `link`
+   * out-of-band and POSTs `pending` (the authenticated metadata, NO secret) via `RemoteStore.createInvite`. Not a
+   * signed keyring op — the server authorizes who mints. `opts`: { role, recipientPin?, ttlMs?, base? }.
    */
-  async inviteMember(docId, { treeId, role, recipientPin = null, ttlMs, base }) {
+  async inviteMember(docId, { role, recipientPin = null, ttlMs, base }) {
     await ensureInit();
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const engine = head.engine || 'chain';
     let pin;
-    let fp = null;
     if (engine === 'chain') {
-      const { signers, pinnedRevision, pinnedHash } = await ownerSignersAndPin(docId, treeId);
-      pin = packChainPin(pinnedRevision, pinnedHash);
-      fp = await fingerprintSigners(signers); // the admit-gate anti-substitution baseline (LOCAL record only)
+      const revision = (await keyringStore().head(docId))?.revision ?? 1;
+      pin = packChainPin(revision, wasmKeyringHash(head.bytes)); // rev‖kh — the joiner's genesis-walk checks it
     } else if (engine === 'dag') {
       pin = wasmDagAnchorPin(head.bytes);
     } else {
       throw new Error(`unknown keyring engine: ${engine}`);
     }
+    const mintSigners = signerIds(JSON.parse(wasmKeyringSummary(engine, head.bytes)).members);
     const minted = await mintInvite({
       uuid: docId, role, engine, pin, recipientPin,
       ...(ttlMs ? { ttlMs } : {}), ...(base ? { base } : {}),
     });
-    await saveMintRecord({ ...minted.record, fp }); // durable; `record.engine` set by mint()
+    await saveMintRecord({ ...minted.record, signerIds: mintSigners }); // durable; `record.engine` set by mint()
     return { inviteId: minted.inviteId, link: minted.link, pending: minted.pending };
   },
 
   /**
    * Owner: admit a claimed invite. Reads the DURABLE local mint record; re-checks expiry locally (defense-in-depth
-   * vs a compromised server resurrecting a stale invite); runs the anti-substitution ADMIT GATE — a SIGNER-SET
-   * comparison, NOT head-equality (which would invalidate every OTHER outstanding invite on any revision): chain
-   * recomputes fp over the current signer set; dag leans on the keyring's verify-on-ingest (a coverage-based dag
-   * recompute is a follow-up). Verifies the claimant's MAC against the record (role/uuid/inviteId from the RECORD,
-   * never the server/claim), then `addMember`s at the role + engine FROM THE RECORD. Drops the record after. The
-   * caller then MARKS the server invite admitted (never deletes — the joiner still needs `/meta` to finish).
-   * `opts`: { passphrase, treeId(bytes), ownerMemberId, inviteId, claim } where `claim` = { memberId,
-   * hpkePublicKey(bytes), authorPublicKey(bytes), tag(bytes) }.
+   * vs a compromised server resurrecting a stale invite); runs the anti-substitution ADMIT GATE for BOTH engines —
+   * REMOVAL-ONLY: refuse if a signer present at mint is no longer a signer (removed/demoted — e.g. a
+   * soon-to-be-removed co-owner pre-minting an invite for themselves), but TOLERATE signers ADDED since mint (an
+   * add enables no stale-invite attack). Not head-equality (any revision trips that). Verifies the claimant's MAC
+   * against the record (role/uuid/inviteId from the RECORD, never the server/claim), then `addMember`s at the role
+   * + engine FROM THE RECORD. Drops the record after. The caller then MARKS the server invite admitted (never
+   * deletes — the joiner still needs `/meta` to finish). `opts`: { passphrase, treeId, ownerMemberId, inviteId, claim }.
    */
   async admitMember(docId, { passphrase, treeId, ownerMemberId, inviteId, claim }) {
     const record = await loadMintRecord(inviteId);
     if (!record) throw new Error('no local mint record for this invite — admit on the minting device');
     if (Date.now() > record.expiry) throw new Error('invite expired');
-    if (record.engine === 'chain') {
-      const { signers } = await ownerSignersAndPin(docId, treeId);
-      if ((await fingerprintSigners(signers)) !== record.fp) {
-        throw new Error('signer set changed since mint — cancel and re-invite');
-      }
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const currentMembers = JSON.parse(wasmKeyringSummary(record.engine, head.bytes)).members;
+    if (!signersRetained(record.signerIds, currentMembers)) {
+      throw new Error('a signer was removed since mint — cancel and re-invite');
     }
     if (!(await verifyInviteClaim(record, claim))) throw new Error('invite claim MAC mismatch — rejected');
     await api.addMember(docId, {

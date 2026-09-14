@@ -10,13 +10,12 @@ import {
   WaitingForApproval, InviteUnavailable,
 } from '../app/src/core/membership.js';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
-import { mint, verifyClaim, fingerprintSigners } from '../app/src/core/invite.js';
+import { mint, verifyClaim, signerIds, signersRetained } from '../app/src/core/invite.js';
 
 const DOC = '00112233-4455-6677-8899-aabbccddeeff'; // tree uuid == docId
 const TREE_ID = Uint8Array.from(DOC.replace(/-/g, '').match(/../g).map((h) => parseInt(h, 16)));
 const OWNER_ID = 'acct-owner';
 const JOINER_ID = 'acct-joiner';
-const SIGNERS = [{ memberId: OWNER_ID, authorPublicKey: new Uint8Array(32).fill(0x11) }];
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
 const chainPin = () => new Uint8Array(36).fill(7); // opaque to the JS layer (real shape: rev‖kh)
 
@@ -81,23 +80,23 @@ function makeServer() {
 function makeOwnerWorker(server, engine = 'chain') {
   const records = new Map();      // DURABLE mint records (simulated)
   const members = new Map([[OWNER_ID, 'co-owner']]);
-  let currentFp = null;           // the "current signer set" fp; the test flips it to simulate a change
+  // The current SIGNER set (owner/co-owner), engine-agnostic (both engines derive the admit-gate fp from this);
+  // the test flips it to simulate a signer add/remove since mint.
+  let signerSet = [{ memberId: OWNER_ID, role: 1 }];
   const provisions = { count: 0 };
   return {
-    engine, members, provisions, setCurrentFp: (v) => { currentFp = v; },
+    engine, members, provisions, setSigners: (s) => { signerSet = s; },
     async inviteMember(docId, { role, ttlMs }) {
       const pin = engine === 'chain' ? chainPin() : new Uint8Array([9, 9, 9]);
-      const fp = engine === 'chain' ? await fingerprintSigners(SIGNERS) : null;
-      if (currentFp === null) currentFp = fp;
       const m = await mint({ uuid: docId, role, engine, pin, ...(ttlMs ? { ttlMs } : {}) });
-      records.set(m.inviteId, { ...m.record, fp });
+      records.set(m.inviteId, { ...m.record, signerIds: signerIds(signerSet) });
       return { inviteId: m.inviteId, link: m.link, pending: m.pending };
     },
     async admitMember(docId, { inviteId, claim }) {
       const record = records.get(inviteId);
       if (!record) throw new Error('no local mint record for this invite');
       if (Date.now() > record.expiry) throw new Error('invite expired');
-      if (record.engine === 'chain' && currentFp !== record.fp) throw new Error('signer set changed since mint');
+      if (!signersRetained(record.signerIds, signerSet)) throw new Error('a signer was removed since mint');
       if (!(await verifyClaim(record, claim))) throw new Error('invite claim MAC mismatch — rejected');
       members.set(claim.memberId, record.role);
       server.publishKeyring(docId);
@@ -207,18 +206,37 @@ describe('membership two-account loop v3 (App API)', () => {
     ).rejects.toBeInstanceOf(InviteUnavailable);
   });
 
-  it('rejects a tampered claim at admit (MAC mismatch); a since-mint signer change also fails admit', async () => {
-    const ownerWorker = makeOwnerWorker(server, 'chain');
-    const joinerWorker = makeJoinerWorker(server, ownerWorker);
-    const ownerDeps = { worker: ownerWorker, remote };
-    const invite = await inviteMember(ownerDeps, { docId: DOC, treeId: TREE_ID, role: 'viewer' });
-    await submitJoinClaim({ worker: joinerWorker, remote, attachTransport, storage: memStorage() }, { link: invite.link, passphrase: 'pw', memberId: JOINER_ID });
-    const [p] = await pendingInvites(ownerDeps, { docId: DOC });
-    const tampered = { ...p.claim, tag: new Uint8Array(p.claim.tag.length).fill(0) };
-    await expect(admitMember(ownerDeps, { docId: DOC, treeId: TREE_ID, ownerMemberId: OWNER_ID, passphrase: 'x', inviteId: p.inviteId, claim: tampered }))
-      .rejects.toThrow(/MAC mismatch/);
-    ownerWorker.setCurrentFp('a-different-signer-set'); // the signer set changed since mint
-    await expect(admitMember(ownerDeps, { docId: DOC, treeId: TREE_ID, ownerMemberId: OWNER_ID, passphrase: 'x', inviteId: p.inviteId, claim: p.claim }))
-      .rejects.toThrow(/signer set changed/);
-  });
+  // The anti-substitution admit gate is engine-agnostic (both engines derive the signer set from the keyring
+  // summary) — run it on BOTH to prove parity. REMOVAL-ONLY: closes the "a co-owner about to be removed pre-mints
+  // an invite for themselves, then it's admitted after their removal" hole, while TOLERATING benign additions.
+  for (const engine of ['chain', 'dag']) {
+    it(`admit gate: rejects a tampered claim + a since-mint signer REMOVAL, tolerates an ADD [${engine}]`, async () => {
+      const ownerWorker = makeOwnerWorker(server, engine);
+      const joinerWorker = makeJoinerWorker(server, ownerWorker);
+      const ownerDeps = { worker: ownerWorker, remote };
+      const invite = await inviteMember(ownerDeps, { docId: DOC, treeId: TREE_ID, role: 'viewer' });
+      await submitJoinClaim({ worker: joinerWorker, remote, attachTransport, storage: memStorage() }, { link: invite.link, passphrase: 'pw', memberId: JOINER_ID });
+      const [p] = await pendingInvites(ownerDeps, { docId: DOC });
+      const tampered = { ...p.claim, tag: new Uint8Array(p.claim.tag.length).fill(0) };
+      await expect(admitMember(ownerDeps, { docId: DOC, treeId: TREE_ID, ownerMemberId: OWNER_ID, passphrase: 'x', inviteId: p.inviteId, claim: tampered }))
+        .rejects.toThrow(/MAC mismatch/);
+      // ADD a co-owner since mint → the mint-time signer is still present → admit is NOT blocked by the gate.
+      ownerWorker.setSigners([{ memberId: OWNER_ID, role: 1 }, { memberId: 'carol', role: 2 }]);
+      await admitMember(ownerDeps, { docId: DOC, treeId: TREE_ID, ownerMemberId: OWNER_ID, passphrase: 'x', inviteId: p.inviteId, claim: p.claim });
+      expect(ownerWorker.members.get(JOINER_ID)).toBe('viewer'); // admitted despite the add
+    });
+
+    it(`admit gate: a mint-time signer REMOVED since mint fails admit [${engine}]`, async () => {
+      const ownerWorker = makeOwnerWorker(server, engine);
+      const joinerWorker = makeJoinerWorker(server, ownerWorker);
+      const ownerDeps = { worker: ownerWorker, remote };
+      const invite = await inviteMember(ownerDeps, { docId: DOC, treeId: TREE_ID, role: 'viewer' });
+      await submitJoinClaim({ worker: joinerWorker, remote, attachTransport, storage: memStorage() }, { link: invite.link, passphrase: 'pw', memberId: JOINER_ID });
+      const [p] = await pendingInvites(ownerDeps, { docId: DOC });
+      // The mint-time signer (OWNER_ID) is no longer a signer → the stale invite is refused.
+      ownerWorker.setSigners([{ memberId: 'a-new-owner', role: 1 }]);
+      await expect(admitMember(ownerDeps, { docId: DOC, treeId: TREE_ID, ownerMemberId: OWNER_ID, passphrase: 'x', inviteId: p.inviteId, claim: p.claim }))
+        .rejects.toThrow(/signer was removed/);
+    });
+  }
 });

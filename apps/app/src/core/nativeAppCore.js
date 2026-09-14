@@ -18,7 +18,7 @@
 
 import { makeError, normalizeUnknown } from './errorModel.js';
 import { frameHops } from './sharing.js';
-import { mint as mintInvite, verifyClaim as verifyInviteClaim } from './invite.js';
+import { mint as mintInvite, verifyClaim as verifyInviteClaim, signerIds, signersRetained } from './invite.js';
 import { pushMembershipSummary } from './membershipSummary.js';
 
 const invoke = () => globalThis.__TAURI__?.core?.invoke;
@@ -242,30 +242,31 @@ export function createNativeAppCore() {
       const m = await call('core_provision_member', { passphrase });
       return { kdfParams: u8(m.kdfParams), authorPublicKey: u8(m.authorPublicKey), hpkePublicKey: u8(m.hpkePublicKey) };
     },
-    // Owner: mint a v3 share invite. The host supplies the full engine pin + the flat signer set (core_invite_material);
-    // `invite.mint` (pure JS) builds the short link + authenticated metadata; the record is persisted durably.
+    // Owner: mint a v3 share invite. The host supplies the engine pin (core_invite_material); the mint-time signer
+    // fingerprint (the admit-gate baseline) comes from the engine-agnostic keyring summary; `invite.mint` (pure JS)
+    // builds the short link + authenticated metadata; the record is persisted durably.
     async inviteMember(docId, { role, recipientPin = null, ttlMs, base }) {
-      const material = await call('core_invite_material', { doc: docId }); // { engine, pin, signers }
+      const material = await call('core_invite_material', { doc: docId }); // { engine, pin }
+      const summary = JSON.parse(await call('core_membership_summary', { doc: docId }));
+      const mintSigners = signerIds(summary.members);
       const minted = await mintInvite({
         uuid: docId, role, engine: material.engine, pin: u8(material.pin), recipientPin,
         ...(ttlMs ? { ttlMs } : {}), ...(base ? { base } : {}),
       });
-      saveMintRecord({ ...minted.record, signers: Array.from(material.signers) }); // signers = the admit-gate baseline
+      saveMintRecord({ ...minted.record, signerIds: mintSigners });
       return { inviteId: minted.inviteId, link: minted.link, pending: minted.pending };
     },
     // Owner: admit a claimed invite — durable record + local expiry re-check + the anti-substitution admit gate
-    // (chain: the current flat signer set must byte-equal the mint-time one — a signer change since mint fails;
-    // dag leans on verify-on-ingest, a coverage recompute being a follow-up), then verify the claim MAC + addMember
-    // at the record's role. The caller MARKS the server invite admitted (never deletes).
+    // for BOTH engines (REMOVAL-ONLY: refuse if a mint-time signer is no longer a signer — e.g. a soon-to-be-
+    // removed co-owner pre-minting an invite for themselves; tolerate signers ADDED since mint), then verify the
+    // claim MAC + addMember at the record's role. The caller MARKS the server invite admitted.
     async admitMember(docId, { passphrase, treeId, ownerMemberId, inviteId, claim }) {
       const record = loadMintRecord(inviteId);
       if (!record) throw makeError('internal', { cause: 'no local mint record for this invite — admit on the minting device' });
       if (Date.now() > record.expiry) throw makeError('internal', { cause: 'invite expired' });
-      if (record.engine === 'chain') {
-        const cur = await call('core_invite_material', { doc: docId });
-        if (!u8eq(Array.from(cur.signers), record.signers)) {
-          throw makeError('internal', { cause: 'signer set changed since mint — cancel and re-invite' });
-        }
+      const summary = JSON.parse(await call('core_membership_summary', { doc: docId }));
+      if (!signersRetained(record.signerIds, summary.members)) {
+        throw makeError('internal', { cause: 'a signer was removed since mint — cancel and re-invite' });
       }
       if (!(await verifyInviteClaim(record, claim))) throw makeError('internal', { cause: 'invite claim MAC mismatch — rejected' });
       await api.addMember(docId, {
