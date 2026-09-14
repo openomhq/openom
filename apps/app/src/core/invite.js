@@ -1,14 +1,17 @@
-// The two-channel invite crypto for Mode A sharing — pure WebCrypto, no server, no wasm.
-// See plan/sharing/design.mode-a-client-flow.md §2. The security boundary:
-//   * the link secret `s` is KDF-split into `s_mac` (HKDF); `s_mac` authenticates the invitee's key to
-//     the owner via HMAC and NEVER reaches the server. The owner admits from a LOCAL mint record.
-//   * the MAC binds invite_id ‖ uuid ‖ role ‖ member_id ‖ hpke_public ‖ author_public (length-prefixed),
-//     so a server can't swap the account, the keys, the role, or replay across trees/invites.
-//   * a leaked link is a bearer token (a family-app-acceptable decision) — hardened server-side (email
-//     pin + expiry + one-live-claim), not here.
-// The signer FINGERPRINT `fp` (a hash of the tree's signer set) travels in the link too, so the joiner
-// can cross-check it against the head it walks to from genesis (§4). Everything is async (crypto.subtle)
-// and injectable (`subtle`, `makeBytes`, `now`) for tests.
+// The two-channel invite crypto for Mode A sharing — invite model v3 (plan/sharing/design.invite-model-v3.md).
+// Pure WebCrypto, no server, no wasm. The security boundary:
+//   * `s` (the 32-byte link secret) is the ONLY out-of-band field. It is HKDF-split into DOMAIN-SEPARATED subkeys
+//     `s_mac_claim` and `s_mac_meta`, so a tag valid in one direction can NEVER verify in the other (no
+//     cross-protocol confusion, regardless of future field shapes). The server never sees `s` or either subkey.
+//   * META MAC (owner → invitee, `s_mac_meta`): authenticates uuid/role/engine/pin — the metadata the joiner
+//     fetches from the untrusted server. The server lacks `s`, so it serves the real metadata or fails verify;
+//     it can never forge or substitute (equivalent to putting the pin in the link, just shorter).
+//   * CLAIM MAC (invitee → owner, `s_mac_claim`): authenticates the invitee's keys + role/tree/invite. The owner
+//     admits from a LOCAL mint record and verifies this MAC — role/uuid/inviteId come from the RECORD, never the
+//     server/claim.
+//   * a leaked link is a bearer token (a stated, family-app-acceptable decision).
+// This module is engine-AGNOSTIC: `pin` is opaque bytes the worker packs per engine; invite.js only carries it
+// and MACs over it. Everything is async (crypto.subtle) and injectable (`subtle`, `makeBytes`, `now`) for tests.
 
 const enc = new TextEncoder();
 
@@ -46,7 +49,9 @@ function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
-const MAC_INFO = 'openom:invite:mac';
+// Domain-separated MAC subkeys — the two directions can never be confused (crypto review).
+const CLAIM_INFO = 'openom:invite:mac:claim';
+const META_INFO = 'openom:invite:mac:meta';
 
 async function hkdf(subtle, ikm, info) {
   const key = await subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
@@ -67,14 +72,20 @@ async function sha256(subtle, data) {
   return new Uint8Array(await subtle.digest('SHA-256', data));
 }
 
-async function macTag(subtle, sMac, { inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey }) {
-  return hmac(subtle, sMac, framed(inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey));
+// The invitee's key claim, MAC'd under s_mac_claim: binds invite/tree/role/account/keys.
+async function claimTag(subtle, sMacClaim, { inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey }) {
+  return hmac(subtle, sMacClaim, framed(inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey));
+}
+
+// The owner's metadata MAC under s_mac_meta: binds invite/tree/role/engine/pin so the server can't tamper.
+async function metaTag(subtle, sMacMeta, { inviteId, uuid, role, engine, pin }) {
+  return hmac(subtle, sMacMeta, framed(inviteId, uuid, role, engine, pin));
 }
 
 /**
- * Canonical fingerprint of a tree's signer set: SHA-256 over the signers SORTED by member id, each
- * as framed(member_id ‖ author_public), base64url. Both the owner (at mint/admit) and the member
- * (after the genesis-walk) must produce identical bytes, so the encoding is pinned here.
+ * Canonical fingerprint of a tree's signer set: SHA-256 over the signers SORTED by member id, each as
+ * framed(member_id ‖ author_public), base64url. Used by the OWNER's admit-time anti-substitution gate (compare
+ * the current signer set against the mint-time one) — NOT part of the authenticated pin (kh already covers it).
  * @param {{memberId: string, authorPublicKey: Uint8Array}[]} signers
  */
 export async function fingerprintSigners(signers, { subtle = crypto.subtle } = {}) {
@@ -88,22 +99,18 @@ export async function fingerprintSigners(signers, { subtle = crypto.subtle } = {
 }
 
 /**
- * Owner: mint an invite. Returns the shareable `link`, the LOCAL mint `record` (persist DEK-sealed —
- * admit reads ONLY this), and the `pending` payload for the server (which never sees `s`).
- * The head keyring's `(pinnedRevision, pinnedHash)` also travel in the link: the joiner's genesis-walk
- * cross-checks the head it reaches against them, so a colluding co-owner can't substitute a forged
- * alternate history whose signer-set `fp` matches (the hash chain commits every revision; the pin
- * commits the head). `fp` stays as a human-readable cross-check only.
- * @param {{ uuid: string, role: string, signers: object[], pinnedRevision: number,
- *   pinnedHash: Uint8Array, recipientPin?: string|null, ttlMs?: number, base?: string, now?: number,
- *   subtle?: SubtleCrypto, makeBytes?: (n:number)=>Uint8Array }} o
+ * Owner: mint an invite. `pin` is OPAQUE engine-specific bytes the caller (the worker) produced (chain: rev‖kh;
+ * dag: dagAnchorPin). Returns the short shareable `link` (`#invite=<id>&s=<s>` — only `s` is out-of-band), the
+ * `pending` payload for the server (the authenticated metadata, NO secret), and the LOCAL `record` (holds
+ * `s_mac_claim` for admit — the caller augments it with the mint-time signer set for the admit gate).
+ * @param {{ uuid: string, role: string, engine: string, pin: Uint8Array, recipientPin?: string|null,
+ *   ttlMs?: number, base?: string, now?: number, subtle?: SubtleCrypto, makeBytes?: (n:number)=>Uint8Array }} o
  */
 export async function mint({
   uuid,
   role,
-  signers,
-  pinnedRevision,
-  pinnedHash,
+  engine,
+  pin,
   recipientPin = null,
   ttlMs = 7 * 24 * 3600 * 1000,
   base = 'https://openom.app',
@@ -111,61 +118,70 @@ export async function mint({
   subtle = crypto.subtle,
   makeBytes = (n) => crypto.getRandomValues(new Uint8Array(n)),
 }) {
-  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1 || pinnedRevision > 0xffffffff) throw new Error('mint: pinnedRevision must be a u32 >= 1');
-  if (!(pinnedHash instanceof Uint8Array) || pinnedHash.length !== 32) throw new Error('mint: pinnedHash must be 32 bytes');
+  if (engine !== 'chain' && engine !== 'dag') throw new Error("mint: engine must be 'chain' or 'dag'");
+  if (!(pin instanceof Uint8Array) || pin.length === 0) throw new Error('mint: pin must be non-empty bytes');
   const s = makeBytes(32);
-  const sMac = await hkdf(subtle, s, MAC_INFO);
+  const sMacClaim = await hkdf(subtle, s, CLAIM_INFO);
+  const sMacMeta = await hkdf(subtle, s, META_INFO);
   const inviteId = b64u.enc(makeBytes(16));
-  const fp = await fingerprintSigners(signers, { subtle });
   const expiry = now + ttlMs;
-  const q = `tree=${encodeURIComponent(uuid)}&invite=${encodeURIComponent(inviteId)}&s=${b64u.enc(s)}` +
-    `&fp=${encodeURIComponent(fp)}&role=${encodeURIComponent(role)}` +
-    `&rev=${pinnedRevision}&kh=${b64u.enc(pinnedHash)}`;
+  const metaMac = await metaTag(subtle, sMacMeta, { inviteId, uuid, role, engine, pin });
+  const q = `invite=${encodeURIComponent(inviteId)}&s=${b64u.enc(s)}`;
   return {
     inviteId,
-    fp,
     link: `${base}/join#${q}`,
-    record: { inviteId, uuid, role, sMac, recipientPin, fp, expiry, pinnedRevision, pinnedHash }, // LOCAL only
-    pending: { inviteId, uuid, role, recipientPin, expiry }, // to the server — NO s
+    // To the server (the authenticated metadata + spam control). `pin`/`metaMac` are bytes; the transport b64s them.
+    pending: { inviteId, uuid, role, engine, pin, metaMac, recipientPin, expiry },
+    // LOCAL only — admit reads this. `s_mac_claim` verifies the claimant's MAC; the caller adds the signer set.
+    record: { inviteId, uuid, role, engine, sMacClaim, expiry, recipientPin },
   };
 }
 
-/** Invitee: parse the invite link's fragment. Throws on a malformed link. */
+/** Invitee: parse the short invite link's fragment → `{ inviteId, s }`. Throws on a malformed link. */
 export function parseLink(url) {
   const frag = url.includes('#') ? url.slice(url.indexOf('#') + 1) : '';
   const p = new URLSearchParams(frag);
-  const uuid = p.get('tree');
   const inviteId = p.get('invite');
   const sB64 = p.get('s');
-  const fp = p.get('fp');
-  const role = p.get('role');
-  const revStr = p.get('rev');
-  const khB64 = p.get('kh');
-  if (!uuid || !inviteId || !sB64 || !fp || !role || !revStr || !khB64) throw new Error('invalid invite link');
-  const pinnedRevision = Number(revStr);
-  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1 || pinnedRevision > 0xffffffff) throw new Error('invalid invite link: rev');
-  const pinnedHash = b64u.dec(khB64);
-  if (pinnedHash.length !== 32) throw new Error('invalid invite link: kh');
-  return { uuid, inviteId, s: b64u.dec(sB64), fp, role, pinnedRevision, pinnedHash };
+  if (!inviteId || !sB64) throw new Error('invalid invite link');
+  return { inviteId, s: b64u.dec(sB64) };
 }
 
 /**
- * Invitee: build the claim to submit to the server, MAC'd with `s_mac` over its own keys. `s` comes
- * from the parsed link; `role`/`inviteId`/`uuid` too. The server stores this against the pending invite.
+ * Invitee: verify the server-fetched metadata's MAC with `s_mac_meta` (from the link's `s`). UNCONDITIONAL and
+ * fail-closed — ANY missing field throws, never an "if present, check; else proceed" fallback (there is no
+ * redundant channel behind `meta_mac`). Returns the trusted `{ uuid, role, engine, pin }` on success; throws on
+ * a mismatch or a missing field.
+ * @param {{ s: Uint8Array, inviteId: string, uuid: string, role: string, engine: string,
+ *   pin: Uint8Array, metaMac: Uint8Array }} m
+ */
+export async function verifyMeta({ s, inviteId, uuid, role, engine, pin, metaMac }, { subtle = crypto.subtle } = {}) {
+  if (!s || !inviteId || !uuid || !role || !engine || !(pin instanceof Uint8Array) || !(metaMac instanceof Uint8Array)) {
+    throw new Error('invite meta: missing or malformed field');
+  }
+  const sMacMeta = await hkdf(subtle, s, META_INFO);
+  const expected = await metaTag(subtle, sMacMeta, { inviteId, uuid, role, engine, pin });
+  if (!timingSafeEqual(expected, metaMac)) throw new Error('invite meta MAC mismatch');
+  return { uuid, role, engine, pin };
+}
+
+/**
+ * Invitee: build the claim to submit to the server, MAC'd with `s_mac_claim` over its own keys. `s` comes from
+ * the parsed link; `uuid`/`role` from the VERIFIED meta; `inviteId` from the link.
  */
 export async function claim({ s, inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey }, { subtle = crypto.subtle } = {}) {
-  const sMac = await hkdf(subtle, s, MAC_INFO);
-  const tag = await macTag(subtle, sMac, { inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey });
+  const sMacClaim = await hkdf(subtle, s, CLAIM_INFO);
+  const tag = await claimTag(subtle, sMacClaim, { inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey });
   return { inviteId, memberId, hpkePublicKey, authorPublicKey, tag };
 }
 
 /**
- * Owner: verify a claim's MAC against the LOCAL mint record. The role/uuid/inviteId come from the
- * RECORD, never the claim — so a tampered claim (or a lying server) fails to match and is rejected.
+ * Owner: verify a claim's MAC against the LOCAL mint record. role/uuid/inviteId come from the RECORD, never the
+ * claim — so a tampered claim (or a lying server) fails to match and is rejected.
  * @returns {Promise<boolean>}
  */
 export async function verifyClaim(record, claim, { subtle = crypto.subtle } = {}) {
-  const expected = await macTag(subtle, record.sMac, {
+  const expected = await claimTag(subtle, record.sMacClaim, {
     inviteId: record.inviteId,
     uuid: record.uuid,
     role: record.role,
@@ -176,4 +192,4 @@ export async function verifyClaim(record, claim, { subtle = crypto.subtle } = {}
   return timingSafeEqual(expected, claim.tag);
 }
 
-export const _internal = { framed, b64u, timingSafeEqual };
+export const _internal = { framed, b64u, timingSafeEqual, CLAIM_INFO, META_INFO };

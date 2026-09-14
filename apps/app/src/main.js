@@ -496,7 +496,7 @@ class App {
   async completeJoin(context) {
     const remote = this.#membershipRemote();
     if (!remote) throw new Error('joining needs a configured backend and an active account');
-    return mCompleteJoin({ worker: this.worker, attachTransport: this.#attachTransport(remote) }, context);
+    return mCompleteJoin({ worker: this.worker, remote, attachTransport: this.#attachTransport(remote) }, context);
   }
 
   // Open the tree over the (already-provisioned/unlocked) worker core and switch to the app. `createdBy`

@@ -349,14 +349,18 @@ export class RemoteStore {
   }
 
   /**
-   * Owner: create a pending invite on the server. `pending` is the `mint()` payload — `{ inviteId, uuid, role,
-   * recipientPin?, expiry }` — carrying NO secret (`s`/`s_mac` stay in the owner's local record + the link). `id`
-   * is the tree UUID (`realDoc`). Returns the server-echoed `{ inviteId }`.
+   * Owner: create a pending invite on the server (invite model v3). `pending` is the `mint()` payload —
+   * `{ inviteId, uuid, role, engine, pin(bytes), metaMac(bytes), recipientPin?, expiry }`. `pin`/`metaMac` are
+   * the authenticated metadata (sent base64); NO secret (`s`/`s_mac` stay in the owner's local record + the
+   * link). `id` is the tree UUID (`realDoc`). Returns the server-echoed `{ inviteId }`.
    */
   async createInvite(id, pending) {
     const body = {
       invite_id: pending.inviteId,
       role: pending.role,
+      engine: pending.engine,
+      pin: b64encode(pending.pin),
+      meta_mac: b64encode(pending.metaMac),
       recipient_pin: pending.recipientPin ?? null,
       expiry: pending.expiry,
     };
@@ -373,6 +377,55 @@ export class RemoteStore {
     if (!res.ok) throw await httpAppError(res);
     const b = await res.json().catch(() => ({}));
     return { inviteId: b.invite_id ?? pending.inviteId };
+  }
+
+  /**
+   * Invitee: fetch an invite's authenticated metadata to verify with `s_mac_meta` then join. Returns
+   * `{ uuid, role, engine, pin(bytes), metaMac(bytes), expiry, status }`, or `null` if the invite is missing or
+   * expired (the server returns an identical 404 for both — no existence oracle).
+   */
+  async getInviteMeta(inviteId) {
+    let res;
+    try {
+      res = await this.#send(`${this.#invite(inviteId)}/meta`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (res.status === 404) return null;
+    if (!res.ok) throw await httpAppError(res);
+    const b = await res.json();
+    return {
+      uuid: b.uuid,
+      role: b.role,
+      engine: b.engine,
+      pin: b64decode(b.pin),
+      metaMac: b64decode(b.meta_mac),
+      expiry: b.expiry,
+      status: b.status,
+    };
+  }
+
+  /** Owner: mark a claimed invite ADMITTED after landing the member in the keyring (does NOT delete — the joiner
+   *  still needs the metadata to finish joining). Idempotent. */
+  async admitInvite(inviteId) {
+    let res;
+    try {
+      res = await this.#send(`${this.#invite(inviteId)}/admit`, { method: 'POST' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
+  }
+
+  /** Owner: reset a `claimed` invite back to `open` (a garbage claim burned the slot) — keeps the same link. */
+  async reopenInvite(inviteId) {
+    let res;
+    try {
+      res = await this.#send(`${this.#invite(inviteId)}/reopen`, { method: 'POST' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
   }
 
   /**
