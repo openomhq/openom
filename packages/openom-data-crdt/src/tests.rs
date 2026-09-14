@@ -21,6 +21,23 @@ fn mods(authors: &[&str]) -> BTreeSet<String> {
     authors.iter().map(ToString::to_string).collect()
 }
 
+/// Committer map for the common case: each op's AUTHOR committed it (a normal write / local mint). Tests that
+/// model propose/approve (committer != author) build a map explicitly instead.
+fn by_author(items: &[ChannelItem]) -> std::collections::BTreeMap<String, BTreeSet<String>> {
+    items
+        .iter()
+        .filter_map(|i| match i {
+            ChannelItem::Op(op) => Some((op.id.clone(), BTreeSet::from([op.created_by.clone()]))),
+            ChannelItem::Assert(_) => None,
+        })
+        .collect()
+}
+
+/// `materialize` with the author-committed committer map — the default for tests where author == committer.
+fn mat(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record> {
+    materialize(items, &by_author(items), moderators)
+}
+
 fn anchor(id: &str, author: &str) -> Record {
     Record::try_from(json!({
         "id": id,
@@ -78,7 +95,7 @@ fn revoke(remove_op: &Op, author: &str) -> Op {
 }
 
 fn live(items: &[ChannelItem], moderators: &BTreeSet<String>) -> BTreeSet<String> {
-    materialize(items, moderators)
+    mat(items, moderators)
         .into_iter()
         .map(|r| r.id().to_owned())
         .collect()
@@ -106,7 +123,24 @@ fn a_moderator_remove_drops_the_record() {
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(remove(&n, &did(1))),
     ];
-    assert!(materialize(&items, &mods(&[&did(1)])).is_empty());
+    assert!(mat(&items, &mods(&[&did(1)])).is_empty());
+}
+
+#[test]
+fn authority_is_by_committer_not_author() {
+    // The propose/approve case: a Remove AUTHORED by an editor (did(1), not a moderator) but COMMITTED by a
+    // moderator (did(2), the Maintainer who approved + re-sealed it) GOVERNS — authority comes from the
+    // committer, attribution stays the editor.
+    let n = name_claim("pA", "Ada", &did(1), 1);
+    let rm = remove(&n, &did(1)); // authored by the editor
+    let items = vec![ChannelItem::Assert(n.clone()), ChannelItem::Op(rm.clone())];
+    let committers = std::collections::BTreeMap::from([(rm.id.clone(), BTreeSet::from([did(2)]))]);
+    assert!(
+        materialize(&items, &committers, &mods(&[&did(2)])).is_empty(),
+        "a moderator committed it → the removal applies despite the editor author"
+    );
+    // The same op, if only its editor author had committed it (by_author) — a non-moderator — is a no-op.
+    assert_eq!(live(&items, &mods(&[&did(2)])), ids([&n]), "editor-committed by a non-moderator → no removal");
 }
 
 #[test]
@@ -129,7 +163,7 @@ fn a_moderator_removes_anothers_record() {
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(remove(&n, &did(2))),
     ];
-    assert!(materialize(&items, &mods(&[&did(2)])).is_empty());
+    assert!(mat(&items, &mods(&[&did(2)])).is_empty());
 }
 
 #[test]
@@ -141,7 +175,7 @@ fn demotion_resurfaces_a_moderators_removal() {
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(remove(&n, &did(2))),
     ];
-    assert!(materialize(&items, &mods(&[&did(2)])).is_empty(), "removed while did(2) moderates");
+    assert!(mat(&items, &mods(&[&did(2)])).is_empty(), "removed while did(2) moderates");
     assert_eq!(live(&items, &mods(&[])), ids([&n]), "did(2) demoted → the removal no longer applies");
 }
 
@@ -195,7 +229,7 @@ fn a_supersede_replacement_attributed_to_another_is_a_forgery() {
         ChannelItem::Assert(old.clone()),
         ChannelItem::Op(supersede(&old, forged.clone(), &did(2))), // ...but written by did(2)
     ];
-    assert!(materialize(&items, &mods(&[&did(2)])).is_empty()); // prior killed, forgery dropped
+    assert!(mat(&items, &mods(&[&did(2)])).is_empty()); // prior killed, forgery dropped
     // And when did(2) is NOT a moderator, neither the kill nor the injection happens — the prior stands.
     assert_eq!(live(&items, &mods(&[])), ids([&old]));
 }
@@ -264,7 +298,7 @@ fn a_non_moderator_revoke_does_not_restore() {
         ChannelItem::Op(r.clone()),
         ChannelItem::Op(revoke(&r, &did(2))), // did(2) has no authority
     ];
-    assert!(materialize(&items, &mods(&[&did(1)])).is_empty());
+    assert!(mat(&items, &mods(&[&did(1)])).is_empty());
 }
 
 #[test]
@@ -290,7 +324,7 @@ fn duplicate_items_are_idempotent() {
         ChannelItem::Assert(n.clone()),
         ChannelItem::Assert(n.clone()),
     ];
-    assert_eq!(materialize(&once, &mods(&[])), materialize(&twice, &mods(&[])));
+    assert_eq!(mat(&once, &mods(&[])), mat(&twice, &mods(&[])));
 }
 
 // --- content addressing & ingest -------------------------------------------------------------
@@ -419,7 +453,7 @@ proptest! {
     #[test]
     fn materialize_is_order_independent(shuffled in Just(scenario()).prop_shuffle()) {
         let m = mods(&[&did(1), &did(2)]);
-        prop_assert_eq!(materialize(&shuffled, &m), materialize(&scenario(), &m));
+        prop_assert_eq!(mat(&shuffled, &m), mat(&scenario(), &m));
     }
 }
 
@@ -461,7 +495,7 @@ fn a_novel_type_is_preserved_through_the_fold() {
     assert!(matches!(vessel, Record::Unknown(_)));
     let known = name_claim("pA", "Ada", &did(1), 1);
 
-    let live = materialize(
+    let live = mat(
         &[
             ChannelItem::Assert(vessel.clone()),
             ChannelItem::Assert(known.clone()),
@@ -482,7 +516,7 @@ fn an_unknown_record_obeys_the_same_ops_as_any_record() {
     // A moderator remove kills it; a non-moderator remove is a no-op — createdBy is read from the
     // preserved JSON, so op semantics apply to an unknown type exactly as to a known one.
     let vessel = unknown("vessel-1", "openom.org/core/vessel/v1", &did(1));
-    assert!(materialize(
+    assert!(mat(
         &[
             ChannelItem::Assert(vessel.clone()),
             ChannelItem::Op(remove(&vessel, &did(1))),
@@ -562,12 +596,12 @@ proptest! {
 
         if remove_it {
             let rm = ChannelItem::Op(remove(&rec, &did(1)));
-            prop_assert!(materialize(&[assert, rm], &mods(&[&did(1)])).is_empty());
+            prop_assert!(mat(&[assert, rm], &mods(&[&did(1)])).is_empty());
         } else {
-            let mat = materialize(&[assert], &mods(&[]));
-            prop_assert_eq!(mat.len(), 1);
-            prop_assert!(matches!(&mat[0], Record::Claim(lc) if lc.id_is_current().unwrap()));
-            prop_assert_eq!(mat[0].to_value(), c.to_value());
+            let out = mat(&[assert], &mods(&[]));
+            prop_assert_eq!(out.len(), 1);
+            prop_assert!(matches!(&out[0], Record::Claim(lc) if lc.id_is_current().unwrap()));
+            prop_assert_eq!(out[0].to_value(), c.to_value());
         }
     }
 }

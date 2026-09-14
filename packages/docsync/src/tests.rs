@@ -24,11 +24,16 @@ impl Engine for GrowSet {
         }
     }
 
-    fn merge(&mut self, delta: &[u8]) -> std::result::Result<(), Infallible> {
+    fn merge(&mut self, delta: &[u8], _committer: &str) -> std::result::Result<(), Infallible> {
         if !delta.is_empty() {
             self.lines.insert(String::from_utf8_lossy(delta).into_owned());
         }
         Ok(())
+    }
+
+    #[allow(clippy::unnecessary_literal_bound)] // the trait ties the lifetime to &self; the mock returns a literal
+    fn author(&self) -> &str {
+        "did:key:zTESTOWNER"
     }
 
     fn snapshot(&self) -> Vec<u8> {
@@ -41,6 +46,13 @@ impl Engine for GrowSet {
         }
         Ok(())
     }
+}
+
+/// Tag a delta verdict with a throwaway committer. These transport-mechanics tests exercise the
+/// frontier/hold/reject/drop machinery, NOT committer authority (that lives in openom-data-crdt's
+/// fold, over `GrowSet` which ignores the committer) — so the string is never asserted here.
+fn tag(v: Verdict) -> (Verdict, String) {
+    (v, "did:key:zC".to_owned())
 }
 
 // --- BlobSyncClient (OPE-397): the BlobStore-native, per-replica-frontier delta path ---
@@ -195,7 +207,7 @@ fn a_rejected_snapshot_is_overwritten_by_an_honest_recompaction() {
     let reject_poison = |_e: &[u8], body: &[u8]| {
         if body.ends_with(b"poison-state") { Verdict::Reject } else { Verdict::Accept }
     };
-    a.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, reject_poison)
+    a.bootstrap_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER, reject_poison)
         .unwrap();
     assert!(a.engine().lines.contains("real-dot"), "the poison did not suppress the real dot");
 
@@ -248,7 +260,7 @@ fn blob_verified_pull_holds_then_drains() {
     let merged = b
         .pull_verified(
             |_env, _pt, replica, _c| {
-                if replica == "replica-A" { Verdict::Hold } else { Verdict::Accept }
+                if replica == "replica-A" { tag(Verdict::Hold) } else { tag(Verdict::Accept) }
             },
             no_cover,
         )
@@ -260,7 +272,7 @@ fn blob_verified_pull_holds_then_drains() {
 
     // A membership op has since arrived → the same dot now verifies; the drain folds it.
     let merged = b
-        .pull_verified(|_env, _pt, _replica, _c| Verdict::Accept, no_cover)
+        .pull_verified(|_env, _pt, _replica, _c| tag(Verdict::Accept), no_cover)
         .unwrap();
     assert_eq!(merged, 1, "the drain merges the un-held delta");
     assert_eq!(b.held_count(), 0);
@@ -277,11 +289,11 @@ fn blob_verified_pull_reject_is_final() {
 
     let no_cover = |_e: &[u8], _b: &[u8], _r: &str, _c: u64| {};
     let mut b = blob_client(store.clone(), "replica-B");
-    assert_eq!(b.pull_verified(|_e, _p, _r, _c| Verdict::Reject, no_cover).unwrap(), 0);
+    assert_eq!(b.pull_verified(|_e, _p, _r, _c| tag(Verdict::Reject), no_cover).unwrap(), 0);
     assert_eq!(b.held_count(), 0, "rejected, not held");
     assert!(!b.engine().lines.contains("forged"));
     assert_eq!(
-        b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, no_cover).unwrap(),
+        b.pull_verified(|_e, _p, _r, _c| tag(Verdict::Accept), no_cover).unwrap(),
         0,
         "a reject is final — the frontier advanced, so it is not re-offered"
     );
@@ -334,7 +346,7 @@ fn blob_verified_pull_folds_a_cover_before_classifying_the_delta_it_blesses() {
     let covered = std::cell::RefCell::new(false);
     let classify = |_env: &[u8], pt: &[u8], _r: &str, _c: u64| {
         // Model a removed-member delta: Reject unless a cover for it has already folded (never Hold).
-        if pt == b"blessed" && !*covered.borrow() { Verdict::Reject } else { Verdict::Accept }
+        if pt == b"blessed" && !*covered.borrow() { tag(Verdict::Reject) } else { tag(Verdict::Accept) }
     };
     let fold_cover = |_env: &[u8], body: &[u8], _r: &str, _c: u64| {
         if body == b"cover-for-blessed" {
@@ -367,7 +379,7 @@ fn blob_subsumed_frontier_clamps_to_a_held_dot() {
     a.apply("a2".into()).unwrap();
 
     let mut b = blob_client(store.clone(), "replica-B");
-    b.pull_verified(|_e, _p, _r, c| if c == 1 { Verdict::Hold } else { Verdict::Accept }, NO_COVER)
+    b.pull_verified(|_e, _p, _r, c| if c == 1 { tag(Verdict::Hold) } else { tag(Verdict::Accept) }, NO_COVER)
         .unwrap();
 
     assert_eq!(b.frontier().get("replica-A").copied(), Some(3), "the fetch frontier advanced past all three");
@@ -391,7 +403,7 @@ fn blob_subsumed_frontier_pins_at_a_reject() {
 
     let mut b = blob_client(store.clone(), "replica-B");
     b.pull_verified(
-        |_e, pt, _r, _c| if pt == b"forged" { Verdict::Reject } else { Verdict::Accept },
+        |_e, pt, _r, _c| if pt == b"forged" { tag(Verdict::Reject) } else { tag(Verdict::Accept) },
         NO_COVER,
     )
     .unwrap();
@@ -416,7 +428,7 @@ fn blob_compact_publishes_subsumed_not_pull_frontier() {
 
     let mut b = blob_client(store.clone(), "replica-B");
     b.pull_verified(
-        |_e, pt, _r, _c| if pt == b"held1" { Verdict::Hold } else { Verdict::Accept },
+        |_e, pt, _r, _c| if pt == b"held1" { tag(Verdict::Hold) } else { tag(Verdict::Accept) },
         NO_COVER,
     )
     .unwrap();
@@ -444,7 +456,7 @@ fn blob_bootstrap_verified_does_not_merge_a_rejected_tail() {
 
     let mut c = blob_client(store.clone(), "replica-C");
     c.bootstrap_verified(
-        |_e, pt, _r, _co| if pt == b"forged" { Verdict::Reject } else { Verdict::Accept },
+        |_e, pt, _r, _co| if pt == b"forged" { tag(Verdict::Reject) } else { tag(Verdict::Accept) },
         NO_COVER,
         |_e, _b| Verdict::Accept,
     )
@@ -467,7 +479,7 @@ fn blob_gc_simulation_subsumed_frontier_prevents_loss() {
     b.apply("held".into()).unwrap(); // B:0 — A will HOLD it (its membership op hasn't landed)
 
     // A pulls B's entry but HOLDS it → A's subsumed excludes B, so its snapshot cannot cover B:0.
-    a.pull_verified(|_e, _p, r, _c| if r == "replica-B" { Verdict::Hold } else { Verdict::Accept }, NO_COVER)
+    a.pull_verified(|_e, _p, r, _c| if r == "replica-B" { tag(Verdict::Hold) } else { tag(Verdict::Accept) }, NO_COVER)
         .unwrap();
     a.compact().unwrap();
     let covered = a.subsumed_frontier();
@@ -481,7 +493,7 @@ fn blob_gc_simulation_subsumed_frontier_prevents_loss() {
 
     // A fresh replica bootstraps: snapshot (a0,a1 — A's folded state, NOT "held") + the surviving tail (B:0).
     let mut c = blob_client(store.clone(), "replica-C");
-    c.bootstrap_verified(|_e, _p, _r, _co| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
+    c.bootstrap_verified(|_e, _p, _r, _co| tag(Verdict::Accept), NO_COVER, |_e, _b| Verdict::Accept).unwrap();
     let expected: BTreeSet<String> = ["a0", "a1", "held"].into_iter().map(String::from).collect();
     assert_eq!(
         c.engine().lines,
@@ -500,13 +512,13 @@ fn blob_drain_vanished_dot_is_stalled_not_leaked() {
     a.apply("a1".into()).unwrap(); // A:1
 
     let mut b = blob_client(store.clone(), "replica-B");
-    b.pull_verified(|_e, pt, _r, _c| if pt == b"v0" { Verdict::Hold } else { Verdict::Accept }, NO_COVER)
+    b.pull_verified(|_e, pt, _r, _c| if pt == b"v0" { tag(Verdict::Hold) } else { tag(Verdict::Accept) }, NO_COVER)
         .unwrap();
     assert_eq!(b.held_count(), 1);
 
     // The held object vanishes (reclaimed below a GC floor); a later drain runs.
     store.delete(&log_key("doc", "replica-A", 0), Precondition::Any).unwrap();
-    b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    b.pull_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER).unwrap();
     assert_eq!(b.held_count(), 0, "no longer held");
     assert_eq!(b.stalled_count(), 1, "moved to stalled (Vanished), not dropped");
     assert_eq!(
@@ -529,7 +541,7 @@ fn blob_a_dropped_pre_demote_delta_is_recovered_from_the_authenticated_snapshot(
     b.apply("legit".into()).unwrap(); // B:0
     let mut a = blob_client(store.clone(), "replica-A");
     a.apply("owner-write".into()).unwrap(); // A:0
-    a.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap(); // A folds B:0
+    a.pull_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER).unwrap(); // A folds B:0
     a.compact().unwrap(); // snapshot covers {A:1, B:1}, contains "legit" + "owner-write"
 
     // Replica X first HOLDS B:0 (keyring behind), then — after the demote lands — the drain re-classifies it to
@@ -537,9 +549,9 @@ fn blob_a_dropped_pre_demote_delta_is_recovered_from_the_authenticated_snapshot(
     let demoted = std::cell::Cell::new(false);
     let classify = |_e: &[u8], pt: &[u8], r: &str, _c: u64| {
         if r == "replica-B" && pt == b"legit" {
-            if demoted.get() { Verdict::Drop } else { Verdict::Hold }
+            if demoted.get() { tag(Verdict::Drop) } else { tag(Verdict::Hold) }
         } else {
-            Verdict::Accept
+            tag(Verdict::Accept)
         }
     };
     let mut x = blob_client(store.clone(), "replica-X");
@@ -580,13 +592,13 @@ fn blob_a_forge_above_covered_stays_dropped_without_adoption_churn() {
     let mut b = blob_client(store.clone(), "replica-B");
     b.apply("legit".into()).unwrap(); // B:0 — legit pre-demote
     let mut a = blob_client(store.clone(), "replica-A");
-    a.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap(); // A folds B:0
+    a.pull_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER).unwrap(); // A folds B:0
     a.compact().unwrap(); // covered {B:1} — covers B:0 only
     b.apply("forge".into()).unwrap(); // B:1 — a post-demote forge, ABOVE covered
 
     // X drops every B entry (author demoted): B:0 (below covered) and B:1 (above covered).
     let drop_b =
-        |_e: &[u8], _p: &[u8], r: &str, _c: u64| if r == "replica-B" { Verdict::Drop } else { Verdict::Accept };
+        |_e: &[u8], _p: &[u8], r: &str, _c: u64| if r == "replica-B" { tag(Verdict::Drop) } else { tag(Verdict::Accept) };
     let mut x = blob_client(store.clone(), "replica-X");
     x.pull_verified(&drop_b, NO_COVER).unwrap();
     assert_eq!(x.dropped_count(), 2, "both B dots dropped");
@@ -632,7 +644,7 @@ fn blob_compact_does_not_regress_a_peer_snapshots_covered() {
     );
 
     // After B adopts A's snapshot + folds the tail, B's subsumed dominates → its compact lands (both covered).
-    b.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
+    b.bootstrap_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER, |_e, _b| Verdict::Accept).unwrap();
     b.compact().unwrap();
     let cov = b.snapshot_covered_frontier().unwrap().unwrap();
     assert_eq!(cov.get("replica-A").copied(), Some(2), "A still covered after B dominates");
@@ -651,7 +663,7 @@ fn blob_readmit_and_forget_a_dropped_dot() {
 
     // X drops both of B's entries (B is a since-departed member at X's head).
     let mut x = blob_client(store.clone(), "replica-X");
-    x.pull_verified(|_e, _p, r, _c| if r == "replica-B" { Verdict::Drop } else { Verdict::Accept }, NO_COVER)
+    x.pull_verified(|_e, _p, r, _c| if r == "replica-B" { tag(Verdict::Drop) } else { tag(Verdict::Accept) }, NO_COVER)
         .unwrap();
     assert_eq!(x.dropped_count(), 2);
     assert_eq!(x.dropped_dots().len(), 2, "both trailing edits are in the review queue");
@@ -659,12 +671,12 @@ fn blob_readmit_and_forget_a_dropped_dot() {
     assert!(x.read_dropped("replica-B", 0).unwrap().is_some(), "the raw envelope is readable for review");
 
     // RE-ADMIT B:0 (gate passes) → merged + un-tracked.
-    assert!(x.readmit_dropped("replica-B", 0, |_env, _pt| true).unwrap());
+    assert!(x.readmit_dropped("replica-B", 0, |_env, _pt| Some("did:key:zC".to_owned())).unwrap());
     assert!(x.engine().lines.contains("keep-me"), "a re-admitted trailing edit is folded");
     assert_eq!(x.dropped_count(), 1, "the re-admitted dot leaves the queue");
 
     // A gate that DECLINES leaves the dot dropped + unmerged.
-    assert!(!x.readmit_dropped("replica-B", 1, |_e, _p| false).unwrap());
+    assert!(!x.readmit_dropped("replica-B", 1, |_e, _p| None).unwrap());
     assert!(!x.engine().lines.contains("drop-me"));
     assert_eq!(x.dropped_count(), 1);
 
@@ -672,7 +684,7 @@ fn blob_readmit_and_forget_a_dropped_dot() {
     assert!(x.forget_dropped("replica-B", 1));
     assert!(!x.engine().lines.contains("drop-me"));
     assert_eq!(x.dropped_count(), 0);
-    assert!(!x.readmit_dropped("replica-B", 1, |_e, _p| true).unwrap(), "forgotten dot is no longer admittable");
+    assert!(!x.readmit_dropped("replica-B", 1, |_e, _p| Some("did:key:zC".to_owned())).unwrap(), "forgotten dot is no longer admittable");
 }
 
 /// A `MemoryBlob` whose named keys return `BlobError::Gone` from `get` — models a GC-reaped remote object
@@ -732,7 +744,7 @@ fn blob_mirror_skips_gone_objects_and_carries_the_snapshot() {
 
     // A fresh replica bootstraps from the mirrored store: snapshot (a0,a1,a2) + tail (empty above A:3) = complete.
     let mut c = blob_client(dst.clone(), "replica-C");
-    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
+    c.bootstrap_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER, |_e, _b| Verdict::Accept).unwrap();
     let expected: BTreeSet<String> = ["a0", "a1", "a2"].into_iter().map(String::from).collect();
     assert_eq!(c.engine().lines, expected, "no loss: bootstrap over the reaped hole via the carried snapshot");
 }
@@ -767,7 +779,7 @@ fn blob_maybe_compact_skips_when_a_peer_snapshot_already_covers_us() {
     let etag_before = store.get(&snapshot_key("doc")).unwrap().unwrap().1;
 
     let mut b = blob_client(store.clone(), "replica-B");
-    b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap(); // B's subsumed = {A:2}
+    b.pull_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER).unwrap(); // B's subsumed = {A:2}
     assert!(!b.maybe_compact(&EveryNUpdates(1)).unwrap(), "skips — the snapshot already covers B's subsumed");
     assert_eq!(
         store.get(&snapshot_key("doc")).unwrap().unwrap().1,
@@ -788,7 +800,7 @@ fn blob_needs_snapshot_adoption_signals_missing_state() {
 
     let mut c = blob_client(store.clone(), "replica-C");
     assert!(c.needs_snapshot_adoption().unwrap(), "a fresh client (subsumed 0) must adopt the {{A:2}} snapshot");
-    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
+    c.bootstrap_verified(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER, |_e, _b| Verdict::Accept).unwrap();
     assert!(!c.needs_snapshot_adoption().unwrap(), "after adoption it holds the snapshot's coverage");
 }
 
@@ -801,11 +813,11 @@ fn blob_retry_stalled_clears_a_now_acceptable_dot() {
     a.apply("a0".into()).unwrap();
 
     let mut b = blob_client(store.clone(), "replica-B");
-    b.pull_verified(|_e, _p, _r, _c| Verdict::Reject, NO_COVER).unwrap();
+    b.pull_verified(|_e, _p, _r, _c| tag(Verdict::Reject), NO_COVER).unwrap();
     assert_eq!(b.stalled_count(), 1);
     assert_eq!(b.subsumed_frontier().get("replica-A").copied(), Some(0), "pinned at the rejected dot");
 
-    let cleared = b.retry_stalled(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    let cleared = b.retry_stalled(|_e, _p, _r, _c| tag(Verdict::Accept), NO_COVER).unwrap();
     assert_eq!(cleared, 1);
     assert_eq!(b.stalled_count(), 0, "the stall cleared");
     assert!(b.engine().lines.contains("a0"), "the dot is now merged");

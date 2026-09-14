@@ -33,19 +33,25 @@ pub trait Engine {
 
     /// Apply a local edit; return the delta bytes it produced (empty ⇒ no-op).
     fn apply_local(&mut self, edit: Self::Edit) -> Vec<u8>;
-    /// Merge a remote delta's bytes into local state.
+    /// Merge a remote delta's bytes into local state, attributing AUTHORITY to `committer` — the verified
+    /// envelope author (did:key) of the entry these bytes came from. An unattributed / AEAD-only merge passes
+    /// the local owner; a snapshot passes empty (snapshots carry only Asserts — no moderation ops).
     ///
     /// # Errors
     /// Returns `Self::Error` if `delta` cannot be applied.
-    fn merge(&mut self, delta: &[u8]) -> Result<(), Self::Error>;
+    fn merge(&mut self, delta: &[u8], committer: &str) -> Result<(), Self::Error>;
+    /// This replica's own author (`did:key`) — the committer for an unshared / AEAD-only merge (the local owner
+    /// writes + moderates their own tree).
+    fn author(&self) -> &str;
     /// Full-state snapshot bytes (for compaction).
     fn snapshot(&self) -> Vec<u8>;
-    /// Merge a snapshot's bytes (bootstrap). Defaults to [`merge`](Engine::merge).
+    /// Merge a snapshot's bytes (bootstrap). Defaults to [`merge`](Engine::merge) with an empty committer — a
+    /// snapshot is Asserts only, which carry no authority, so no committer applies.
     ///
     /// # Errors
     /// Returns `Self::Error` if `bytes` isn't a valid snapshot.
     fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.merge(bytes)
+        self.merge(bytes, "")
     }
 }
 
@@ -472,6 +478,9 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         replicas.sort(); // deterministic order (set-union is order-independent; stable keeps it reproducible)
 
         let mut merged = 0;
+        // Unshared / AEAD-only channel (no §B3 verify): only the DEK holder writes, so the local owner is the
+        // committer of every merged op — and the sole moderator of their own tree.
+        let committer = self.engine.author().to_owned();
         for replica in replicas {
             let Some((hb, _etag)) = self.store.get(&head_key(&self.doc, &replica))? else {
                 continue; // head vanished (a concurrent delete) — skip
@@ -487,7 +496,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                     break; // the head ran ahead of a not-yet-written delta — stop; retry next pull
                 };
                 if let Ok(pt) = self.sealer.open(EntryKind::Delta, &bytes) {
-                    if self.engine.merge(&pt).is_ok() {
+                    if self.engine.merge(&pt, &committer).is_ok() {
                         merged += 1;
                     } else {
                         self.quarantined += 1;
@@ -516,7 +525,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// Returns [`SyncError`] if a blob read fails.
     pub fn pull_verified(
         &mut self,
-        mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+        mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> (Verdict, String),
         mut fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
     ) -> Result<usize, SyncError> {
         let mut merged = 0;
@@ -539,10 +548,11 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 self.stalled.insert(dot, StallCause::Unopenable); // un-openable: stop retrying, keep the pin
                 continue;
             };
-            match classify(&env, &pt, &replica, counter) {
+            let (verdict, committer) = classify(&env, &pt, &replica, counter);
+            match verdict {
                 Verdict::Accept => {
                     self.held.remove(&dot);
-                    if self.engine.merge(&pt).is_ok() {
+                    if self.engine.merge(&pt, &committer).is_ok() {
                         merged += 1; // absorbed — no longer a blocker
                     } else {
                         self.quarantined += 1;
@@ -615,9 +625,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         // can never claim coverage over a dot not folded into the engine (the C3 invariant); `dropped` is the
         // only bucket that is NOT a subsumed blocker (a forge, see [`Verdict::Drop`]).
         for (replica, c, env, pt) in deltas {
-            match classify(&env, &pt, &replica, c) {
+            let (verdict, committer) = classify(&env, &pt, &replica, c);
+            match verdict {
                 Verdict::Accept => {
-                    if self.engine.merge(&pt).is_ok() {
+                    if self.engine.merge(&pt, &committer).is_ok() {
                         merged += 1; // absorbed
                     } else {
                         self.quarantined += 1;
@@ -776,7 +787,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         &mut self,
         replica: &str,
         counter: u64,
-        gate: impl FnOnce(&[u8], &[u8]) -> bool,
+        gate: impl FnOnce(&[u8], &[u8]) -> Option<String>,
     ) -> Result<bool, SyncError> {
         let dot = (replica.to_string(), counter);
         if !self.dropped.contains(&dot) {
@@ -789,10 +800,11 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         let Ok(pt) = self.sealer.open(EntryKind::Delta, &env) else {
             return Ok(false); // not a Delta / won't open — not admittable this way
         };
-        if !gate(&env, &pt) {
+        // `gate` returns the COMMITTER (the verified envelope author's did:key) to admit under, or None to refuse.
+        let Some(committer) = gate(&env, &pt) else {
             return Ok(false);
-        }
-        if self.engine.merge(&pt).is_ok() {
+        };
+        if self.engine.merge(&pt, &committer).is_ok() {
             self.dropped.remove(&dot);
             Ok(true)
         } else {
@@ -1003,7 +1015,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// Returns [`SyncError`] if a blob read, an open, or a merge fails.
     pub fn bootstrap_verified(
         &mut self,
-        classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> (Verdict, String),
         fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
         classify_snapshot: impl FnMut(&[u8], &[u8]) -> Verdict,
     ) -> Result<(), SyncError> {
@@ -1025,7 +1037,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// Returns [`SyncError`] if a blob read fails.
     pub fn retry_stalled(
         &mut self,
-        mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+        mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> (Verdict, String),
         mut fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
     ) -> Result<usize, SyncError> {
         let mut cleared = 0;
@@ -1044,8 +1056,9 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             let Ok(pt) = self.sealer.open(EntryKind::Delta, &env) else {
                 continue; // still un-openable — keep the pin
             };
-            match classify(&env, &pt, &replica, counter) {
-                Verdict::Accept if self.engine.merge(&pt).is_ok() => {
+            let (verdict, committer) = classify(&env, &pt, &replica, counter);
+            match verdict {
+                Verdict::Accept if self.engine.merge(&pt, &committer).is_ok() => {
                     self.stalled.remove(&dot);
                     cleared += 1;
                 }

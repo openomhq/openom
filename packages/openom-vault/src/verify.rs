@@ -75,6 +75,13 @@ pub trait MembershipResolver: Send + Sync {
     fn current_member(&self, _member_id: &str) -> bool {
         true
     }
+    /// The `did:key` of `member_id`'s CURRENT author key at head — the committer identity the data-channel
+    /// fold judges op-authority against (encoded exactly as [`crate::membership::moderators`] encodes its
+    /// dids, so a committer intersects the moderator set iff its author currently moderates). `None` if the id
+    /// is not a current member. Defaults to `None` (fail-closed: an unresolvable committer moderates nothing).
+    fn author_did(&self, _member_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// What to do with a pulled entry after §B3 verification.
@@ -304,6 +311,13 @@ pub mod chain {
             has_been_shared(&self.head)
         }
 
+        fn author_did(&self, member_id: &str) -> Option<String> {
+            crate::membership::author_did(
+                &openom_keyring_chain::membership_view(&self.head),
+                member_id,
+            )
+        }
+
         fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing {
             let rev = openom_keyring_chain::decode_governing_ref(governing_ref).unwrap_or(0);
             if rev == 0 {
@@ -400,6 +414,10 @@ pub mod dag {
 
         fn current_member(&self, member_id: &str) -> bool {
             self.view.members.iter().any(|m| m.member_id == member_id)
+        }
+
+        fn author_did(&self, member_id: &str) -> Option<String> {
+            crate::membership::author_did(&self.view, member_id)
         }
 
         fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing {

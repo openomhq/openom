@@ -76,8 +76,9 @@ let person = ChannelItem::Assert(Record::try_from(json!({
 })).unwrap());
 
 a.push_claims(&[person]).unwrap(); // sealed + written as a blob object
-// Pull + fold, accepting every peer delta (the §B3 gate is the caller's classify).
-b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, |_e, _b, _r, _c| {}).unwrap();
+// Pull + fold, accepting every peer delta (the §B3 gate is the caller's classify — it returns the
+// verified committer did:key alongside the verdict, which the fold judges op-authority against).
+b.pull_verified(|_e, _p, _r, _c| (Verdict::Accept, "did:key:z6MkDevice".to_owned()), |_e, _b, _r, _c| {}).unwrap();
 
 assert_eq!(a.live_records().unwrap().len(), b.live_records().unwrap().len());
 ```

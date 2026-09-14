@@ -153,6 +153,12 @@ pub struct Tree {
     /// moderates their own tree. A shared tree calls [`set_moderators`](Tree::set_moderators) with the
     /// keyring's Maintainer+ set on unlock and on every keyring-head change (so a role change re-folds).
     moderators: BTreeSet<String>,
+    /// Who COMMITTED each Op (op id → the did:keys who authenticated an entry carrying it): the fold's
+    /// AUTHORITY basis, distinct from `op.created_by` (attribution). A local mint records this replica's own
+    /// `created_by`; an ingest records the VERIFIED envelope author threaded to [`merge`](Tree::merge). So a
+    /// Maintainer who commits (approves) an editor's op authorizes it while the op keeps `created_by = editor`.
+    /// Rebuilt alongside `items` on every fold — never persisted.
+    committers: BTreeMap<String, BTreeSet<String>>,
     /// Items minted in the current intention, accumulated by [`emit`](Tree::emit) and encoded into one
     /// op-batch by [`flush`](Tree::flush): one settled edit = one sealed entry, so a peer never sees a
     /// half-formed record set (e.g. an event anchor with no type). Applied to `items` immediately.
@@ -169,9 +175,16 @@ impl Tree {
             moderators: BTreeSet::from([created_by.clone()]),
             created_by,
             items: BTreeMap::new(),
+            committers: BTreeMap::new(),
             pending: Vec::new(),
             clock: HlcClock::default(),
         }
+    }
+
+    /// Record that `committer` authenticated an entry carrying op `id` (the AUTHORITY basis). Local mints pass
+    /// this replica's own author; ingests pass the verified envelope author.
+    fn record_committer(&mut self, id: &str, committer: &str) {
+        self.committers.entry(id.to_owned()).or_default().insert(committer.to_owned());
     }
 
     /// The author this replica stamps on its ops.
@@ -193,6 +206,7 @@ impl Tree {
     /// a just-cleared id).
     pub fn clear(&mut self) {
         self.items.clear();
+        self.committers.clear();
         self.pending.clear();
     }
 
@@ -333,7 +347,11 @@ impl Tree {
     /// once by [`flush`](Tree::flush), not here — so a whole edit (e.g. `addMarriage` with its event) is
     /// one sealed entry rather than a train of single-op entries a peer could observe half-formed.
     fn emit(&mut self, items: Vec<ChannelItem>) {
+        let author = self.created_by.clone();
         for item in items {
+            if matches!(item, ChannelItem::Op(_)) {
+                self.record_committer(item.id(), &author); // a local mint: this replica commits its own op
+            }
             self.pending.push(item.clone());
             self.items.insert(item.id().to_owned(), item);
         }
@@ -355,16 +373,21 @@ impl Tree {
 
     // --- ingest / snapshot ----------------------------------------------------------------------
 
-    /// Merge a peer's (or our own replayed) op batch into the set. Returns how many items were
-    /// ingested. Idempotent — re-ingesting the same items re-inserts by id.
+    /// Merge a peer's (or our own replayed) op batch into the set, recording `committer` — the VERIFIED
+    /// envelope author of the entry these bytes came from — as the AUTHORITY basis for every Op in the batch.
+    /// Returns how many items were ingested. Idempotent — re-ingesting the same items re-inserts by id and
+    /// re-adds the committer (a set, so a re-commit or a second committer both hold).
     ///
     /// # Errors
     /// Returns a [`TreeError`] if `bytes` is not a valid op batch.
-    pub fn merge(&mut self, bytes: &[u8]) -> Result<usize, TreeError> {
+    pub fn merge(&mut self, bytes: &[u8], committer: &str) -> Result<usize, TreeError> {
         let items = codec::decode(bytes)?;
         let n = items.len();
         for item in items {
             self.clock.observe(item.created_at());
+            if matches!(item, ChannelItem::Op(_)) {
+                self.record_committer(item.id(), committer);
+            }
             self.items.insert(item.id().to_owned(), item);
         }
         Ok(n)
@@ -461,11 +484,10 @@ impl Tree {
     /// The operations log — every accumulated op as an [`OpView`], ordered as a timeline (by
     /// `created_at`, then id). `effective` is the fold's verdict: an `Assert` is always effective
     /// (adds are add-only, so anyone — including a below-Maintainer role — may contribute a claim); a
-    /// moderation op (remove / supersede / revoke) is effective only when its author currently holds
-    /// moderation authority (Maintainer+, i.e. in `moderators`). So the inert entries are exactly the
-    /// below-Maintainer moderation ops awaiting acceptance — the "see ops from below-maintainer roles"
-    /// substrate. Authority is judged against the *current* moderator set, so a promotion re-activates
-    /// that author's ops on the next read (no re-fold of the caller's own bookkeeping needed).
+    /// moderation op (remove / supersede / revoke) is effective only when a current moderator COMMITTED it
+    /// (its `committers` intersect `moderators`). So the inert entries are exactly the moderation ops no
+    /// current moderator has committed — the "see ops awaiting acceptance" substrate. Authority is judged
+    /// against the *current* moderator set, so a promotion re-activates that committer's ops on the next read.
     #[must_use]
     pub fn oplog(&self) -> Vec<OpView> {
         let mut views: Vec<OpView> = self
@@ -475,7 +497,8 @@ impl Tree {
                 let (kind, effective) = match item {
                     ChannelItem::Assert(_) => ("assert", true),
                     ChannelItem::Op(op) => {
-                        let authorized = self.moderators.contains(&op.created_by);
+                        let authorized =
+                            self.committers.get(&op.id).is_some_and(|c| !c.is_disjoint(&self.moderators));
                         (op_kind_label(&op.kind), authorized)
                     }
                 };
@@ -513,7 +536,7 @@ impl Tree {
     /// The live record set — the `openom-data-crdt` fold over the accumulated ops.
     fn materialized(&self) -> Vec<Record> {
         let items: Vec<ChannelItem> = self.items.values().cloned().collect();
-        materialize(&items, &self.moderators)
+        materialize(&items, &self.committers, &self.moderators)
     }
 }
 

@@ -255,24 +255,35 @@ pub enum CrdtError {
 /// Materialize the live record set from an operations-channel item set — the fold that produces the
 /// snapshot `openom-data-projection` reads.
 ///
-/// Authority is **role-based**: a Remove/Supersede/Revoke governs its target only when its author is in
-/// `moderators` — the did:keys currently at Maintainer or above (derived from the latest keyring; a
-/// solo tree passes its own did, so the owner moderates their own tree). An op by a non-moderator (for
-/// example a since-demoted member's stale op) is a deterministic no-op, so demoting a member and
-/// re-folding the SAME item set resurfaces whatever their ops had hidden — authority is always judged
-/// against the *current* roles, never as-of-authoring. A Supersede's replacement must still be authored
-/// in the acting author's own name (an impersonating replacement is a forgery, dropped) — a moderator
-/// may overrule another's claim, never forge one in their name.
+/// Authority is **committer-based**: a Remove/Supersede/Revoke governs its target only when the entry that
+/// COMMITTED it to the log was sealed by a current moderator — `committers[op.id]` (the did:keys who
+/// authenticated an entry carrying this op, threaded from the verified envelope author at ingest) must
+/// intersect `moderators` (the did:keys currently at Maintainer or above; a solo tree passes its own did, so
+/// the owner moderates their own tree). This decouples AUTHORITY (who committed it) from ATTRIBUTION
+/// (`op.created_by`, who authored it) — so a Maintainer approving an editor's proposal re-seals the editor's
+/// ops under the Maintainer's authority while preserving `created_by = editor`. An op no current moderator
+/// committed (a since-demoted member's stale op, or a not-yet-approved editor op) is a deterministic no-op, so
+/// authority is always judged against the *current* roles, never as-of-authoring. A Supersede's replacement
+/// must still be authored in the acting author's own name (`op.created_by == replacement.created_by` — an
+/// impersonating replacement is a forgery, dropped): a moderator may overrule another's claim, never forge one
+/// in their name.
 ///
 /// `live = (asserted ∪ authorized-supersede-replacements) − { ids named by an authorized, un-revoked
 /// Remove or Supersede }`. Every step is set membership over the *set* of items for a FIXED
-/// `moderators`, so the result is independent of order and duplication — the convergence guarantee (a
-/// set CRDT parameterized by the convergent, hash-chained keyring register).
+/// `moderators`/`committers`, so the result is independent of order and duplication — the convergence guarantee
+/// (a set CRDT parameterized by the convergent, hash-chained keyring register).
 ///
 /// The returned records are cloned once here (the compaction/snapshot fold, not the read hot path).
 /// Output is ordered by id.
 #[must_use]
-pub fn materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record> {
+pub fn materialize(
+    items: &[ChannelItem],
+    committers: &BTreeMap<String, BTreeSet<String>>,
+    moderators: &BTreeSet<String>,
+) -> Vec<Record> {
+    // An op governs only if a CURRENT moderator committed an entry carrying it (committer ∩ moderators ≠ ∅).
+    let authorized = |op: &Op| committers.get(&op.id).is_some_and(|c| !c.is_disjoint(moderators));
+
     // 1. Every asserted record by id (bare Asserts + Supersede replacements in the acting author's own
     //    name — a replacement attributed to someone else is a forgery, dropped, else the projection
     //    would tally a corroborating author out of thin air). First writer of an id wins (a collision
@@ -295,24 +306,24 @@ pub fn materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<
         }
     }
 
-    // 2. Remove ops suppressed by a Revoke from a moderator (a role holder may undo any removal).
+    // 2. Remove ops suppressed by a Revoke a moderator committed (a role holder may undo any removal).
     let mut revoked: BTreeSet<&str> = BTreeSet::new();
     for item in items {
         if let ChannelItem::Op(op) = item {
             if let OpKind::Revoke { removal } = &op.kind {
-                if moderators.contains(op.created_by.as_str()) {
+                if authorized(op) {
                     revoked.insert(removal.as_str());
                 }
             }
         }
     }
 
-    // 3. Dead record ids: an un-revoked Remove or a Supersede BY A MODERATOR kills its named target. An
-    //    op by a non-moderator is skipped entirely — a deterministic no-op on every replica.
+    // 3. Dead record ids: an un-revoked Remove or a Supersede a MODERATOR COMMITTED kills its named target. An
+    //    op no current moderator committed is skipped entirely — a deterministic no-op on every replica.
     let mut dead: BTreeSet<&str> = BTreeSet::new();
     for item in items {
         let ChannelItem::Op(op) = item else { continue };
-        if !moderators.contains(op.created_by.as_str()) {
+        if !authorized(op) {
             continue;
         }
         let target = match &op.kind {

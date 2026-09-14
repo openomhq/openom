@@ -726,23 +726,26 @@ impl<S: BlobStore> AppCore<S> {
         &mut self,
         run: impl FnOnce(
             &mut SyncClient<Arc<S>>,
-            &mut dyn FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+            &mut dyn FnMut(&[u8], &[u8], &str, u64) -> (Verdict, String),
             &mut dyn FnMut(&[u8], &[u8], &str, u64),
             &mut dyn FnMut(&[u8], &[u8]) -> Verdict,
         ) -> R,
     ) -> R {
         use std::cell::{Cell, RefCell};
         let membership = self.membership.as_deref();
+        // This device's own author `did:key` — the committer for the unshared (AEAD-only) accept path, where
+        // there is no membership to resolve a foreign author from and every entry is ours (OPE-360 option a).
+        let own_did = self.client.tree().author().to_owned();
         let covered = RefCell::new(std::mem::take(&mut self.covered));
         let cover_envs = RefCell::new(std::mem::take(&mut self.cover_envelopes));
         let rejected = Cell::new(0_usize);
         let out = {
             let mut classify = |env: &[u8], pt: &[u8], _r: &str, _c: u64| {
-                let v = classify_entry(membership, &covered.borrow(), env, pt);
+                let (v, committer) = classify_entry(membership, &covered.borrow(), env, pt, &own_did);
                 if v == Verdict::Reject {
                     rejected.set(rejected.get() + 1);
                 }
-                v
+                (v, committer)
             };
             let mut fold_cover = |env: &[u8], body: &[u8], _r: &str, _c: u64| {
                 if fold_cover_entry(membership, &mut covered.borrow_mut(), env, body) {
@@ -939,16 +942,19 @@ impl<S: BlobStore> AppCore<S> {
     /// Returns [`CoreError`] if the store read fails.
     pub fn approve_pending(&mut self, replica: &str, counter: u64) -> Result<bool, CoreError> {
         let membership = self.membership.as_deref();
+        // The administrator VOUCHES under their own authority: an approved delta is committed by THIS device's
+        // author (OPE-360 option a — a moderator re-seals a departed member's edit under their own authority),
+        // so any moderation op it carries governs, while `op.created_by` stays the original author. `None`
+        // declines (leaves it suppressed).
+        let own_did = self.client.tree().author().to_owned();
         let approved = self.client.readmit_dropped(replica, counter, |env, pt| {
             let Some(m) = membership else {
-                return true; // solo/unshared — only the DEK holder writes, so an opened entry is trusted
+                return Some(own_did.clone()); // solo/unshared — only the DEK holder writes, so an opened entry is trusted
             };
             let Ok(envelope) = Envelope::decode(env) else {
-                return false;
+                return None;
             };
-            let Some(header) = envelope.header.as_ref() else {
-                return false;
-            };
+            let header = envelope.header.as_ref()?;
             // Re-run §B3 and accept iff the disposition is Accept OR Drop. A dropped dot is governing-valid but
             // head-invalid, so Drop is the expected verdict; both Accept and Drop mean the signature verifies
             // against the author's key at the governing revision — engine-neutral (the chain resolves the
@@ -966,6 +972,7 @@ impl<S: BlobStore> AppCore<S> {
                 ),
                 Disposition::Accept | Disposition::Drop
             )
+            .then(|| own_did.clone())
         })?;
         Ok(approved)
     }
@@ -1210,16 +1217,27 @@ fn classify_entry(
     covered: &BTreeMap<Vec<u8>, String>,
     env: &[u8],
     plaintext: &[u8],
-) -> Verdict {
+    own_did: &str,
+) -> (Verdict, String) {
+    // Unshared (AEAD-only): only the DEK holder can write, so every entry is ours — accept it, committed by
+    // THIS device's own author (the fold's default moderator set is `{own_did}`, so our own moderation ops
+    // govern). No membership to resolve a foreign committer from.
     let Some(membership) = membership else {
-        return Verdict::Accept;
+        return (Verdict::Accept, own_did.to_owned());
     };
     let Ok(envelope) = Envelope::decode(env) else {
-        return Verdict::Reject;
+        return (Verdict::Reject, String::new());
     };
     let Some(header) = envelope.header.as_ref() else {
-        return Verdict::Reject;
+        return (Verdict::Reject, String::new());
     };
+    // The COMMITTER for the fold's op-authority (option a): the verified author's `did:key` at head, or empty
+    // for an author who is not a current member (a since-removed ever-member accepted only via a cover — their
+    // Asserts still fold, but any moderation op they carry is inert, the safe direction). Decoupled from
+    // ATTRIBUTION (`op.created_by`), which the fold preserves separately.
+    let committer = membership
+        .author_did(&header.author_member_id)
+        .unwrap_or_default();
     let verdict = openom_vault::verify_ingest(
         envelope.version,
         membership,
@@ -1246,12 +1264,12 @@ fn classify_entry(
                         info.strongest_role,
                     )
                 }) {
-                    return Verdict::Accept;
+                    return (Verdict::Accept, committer);
                 }
             }
         }
     }
-    disposition_to_verdict(verdict)
+    (disposition_to_verdict(verdict), committer)
 }
 
 /// Verify a `Snapshot` envelope for adoption (OPE-421 Slice 1): route it through the SAME §B3 gate as a Delta

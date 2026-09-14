@@ -59,14 +59,20 @@ impl docsync::Engine for SyncTree {
         // Encode the batch as the delta, then apply it through `Tree::merge` so the clock observes the ops
         // and the live view reflects them immediately; the bytes are what the transport seals.
         let bytes = codec::encode(&edit).expect("op-batch JSON encoding is infallible for valid items");
+        // A local edit is committed by this replica's own author — the same did:key it attributes to.
+        let committer = self.0.author().to_owned();
         self.0
-            .merge(&bytes)
+            .merge(&bytes, &committer)
             .expect("re-merging a freshly-encoded local batch is infallible");
         bytes
     }
 
-    fn merge(&mut self, delta: &[u8]) -> std::result::Result<(), TreeError> {
-        self.0.merge(delta).map(|_| ())
+    fn merge(&mut self, delta: &[u8], committer: &str) -> std::result::Result<(), TreeError> {
+        self.0.merge(delta, committer).map(|_| ())
+    }
+
+    fn author(&self) -> &str {
+        self.0.author()
     }
 
     fn snapshot(&self) -> Vec<u8> {
@@ -317,7 +323,7 @@ impl<S: BlobStore> SyncClient<S> {
     /// Returns an error if a blob read fails.
     pub fn pull_verified(
         &mut self,
-        classify: impl FnMut(&[u8], &[u8], &str, u64) -> docsync::Verdict,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> (docsync::Verdict, String),
         fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
     ) -> Result<usize> {
         self.inner.pull_verified(classify, fold_cover)
@@ -365,7 +371,7 @@ impl<S: BlobStore> SyncClient<S> {
     /// Returns an error if a blob read, open, or merge fails.
     pub fn bootstrap_verified(
         &mut self,
-        classify: impl FnMut(&[u8], &[u8], &str, u64) -> docsync::Verdict,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> (docsync::Verdict, String),
         fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
         classify_snapshot: impl FnMut(&[u8], &[u8]) -> docsync::Verdict,
     ) -> Result<()> {
@@ -381,7 +387,7 @@ impl<S: BlobStore> SyncClient<S> {
     /// Returns an error if a blob read fails.
     pub fn retry_stalled(
         &mut self,
-        classify: impl FnMut(&[u8], &[u8], &str, u64) -> docsync::Verdict,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> (docsync::Verdict, String),
         fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
     ) -> Result<usize> {
         self.inner.retry_stalled(classify, fold_cover)
@@ -445,7 +451,7 @@ impl<S: BlobStore> SyncClient<S> {
         &mut self,
         replica: &str,
         counter: u64,
-        gate: impl FnOnce(&[u8], &[u8]) -> bool,
+        gate: impl FnOnce(&[u8], &[u8]) -> Option<String>,
     ) -> Result<bool> {
         self.inner.readmit_dropped(replica, counter, gate)
     }
@@ -484,7 +490,7 @@ mod tests {
     /// Pull with no §B3 gate (accept every peer delta; ignore covers) — the trusted-DEK path used where a
     /// facade test isn't exercising membership verification (that lives in the app-core tests).
     fn pull_all(c: &mut BlobClient) -> usize {
-        c.pull_verified(|_e, _p, _r, _c| Verdict::Accept, |_e, _b, _r, _c| {})
+        c.pull_verified(|_e, _p, _r, _c| (Verdict::Accept, DEVICE.to_owned()), |_e, _b, _r, _c| {})
             .unwrap()
     }
 
@@ -598,7 +604,10 @@ mod tests {
         let dek = generate_dek().unwrap();
         let mut a = blob_client(b"replica-a", dek.clone(), store.clone());
         let mut b = blob_client(b"replica-b", dek, store.clone());
-        let mods = BTreeSet::from(["did:key:z6MkA".to_string()]);
+        // Authority is committer-based (option a): the moderator is the did that COMMITS the entry — here
+        // DEVICE, the Tree author both replicas seal + `pull_all` attributes as committer. The removed name
+        // is authored by a DIFFERENT member (z6MkA), so this proves a moderator overruling another's claim.
+        let mods = BTreeSet::from([DEVICE.to_string()]);
         a.engine_mut().0.set_moderators(mods.clone());
         b.engine_mut().0.set_moderators(mods);
 
@@ -607,7 +616,7 @@ mod tests {
         pull_all(&mut b);
         assert_eq!(blob_live(&b), set(&[&na]));
 
-        a.apply(vec![remove(&na, "did:key:z6MkA")]).unwrap();
+        a.apply(vec![remove(&na, DEVICE)]).unwrap();
         pull_all(&mut b);
         assert!(blob_empty(&b), "the remove propagated");
         assert!(blob_empty(&a));

@@ -26,8 +26,8 @@ fn two_engines_converge_over_the_same_ops() {
     let na = a.flush().unwrap();
 
     let mut b = Tree::new("did:key:z6MkB"); // a different replica...
-    b.merge(&pa).unwrap();
-    b.merge(&na).unwrap(); // ...that has seen the same ops
+    b.merge(&pa, DID).unwrap();
+    b.merge(&na, DID).unwrap(); // ...that has seen the same ops (committed by A's author)
 
     assert_eq!(a.project(), b.project(), "same op set → same read model");
     assert_eq!(a.project().people.len(), 1);
@@ -65,7 +65,7 @@ fn oplog_marks_below_moderator_ops_ineffective() {
     let mut peer = Tree::new(peer_did);
     peer.remove(&name_id, 2).unwrap();
     let peer_remove = peer.flush().unwrap();
-    a.merge(&peer_remove).unwrap();
+    a.merge(&peer_remove, peer_did).unwrap(); // the peer committed their own remove
 
     // The name is still live — the below-moderator remove is a deterministic no-op...
     assert_eq!(a.project().people[0].names.len(), 1);
@@ -138,8 +138,8 @@ fn ingesting_advances_the_clock_so_a_rebuild_cannot_reuse_a_tombstoned_id() {
     // B is a rebuild — a reload, or the SAME user's second device (createdBy is the vault's stable
     // did:key, so ids collide across a user's replicas). It merges A's log, which tombstones that id.
     let mut b = Tree::new(DID);
-    b.merge(&created).unwrap();
-    b.merge(&removed).unwrap();
+    b.merge(&created, DID).unwrap();
+    b.merge(&removed, DID).unwrap(); // same author (DID) committed both
     assert!(
         b.live_claims_of("pA", NAME).is_empty(),
         "the claim is tombstoned in the rebuilt engine"

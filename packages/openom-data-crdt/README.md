@@ -62,14 +62,14 @@ WSL2/Docker).
 ## Usage
 
 ```rust
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use openom_data_model::envelope::{Claim, Record};
 use openom_data_model::Hlc;
 use openom_data_crdt::{materialize, ChannelItem, Op, OpKind};
 
 let author = "did:key:z6MkA";
-// Authority is role-based: only did:keys currently at Maintainer+ (a solo tree passes its own did)
-// may remove or supersede. An op by anyone else folds to a no-op.
+// Authority is committer-based: an op governs only when a current Maintainer+ COMMITTED the entry carrying
+// it (a solo tree passes its own did). Attribution (`created_by`) is separate. Here author == committer.
 let moderators: BTreeSet<String> = [author.to_string()].into_iter().collect();
 
 // Add a name claim (an add IS the record). createdAt is a Hybrid Logical Clock (see openom_data_model::Hlc).
@@ -86,13 +86,16 @@ let edit = Op::new(Hlc::new(2, 0), author, OpKind::Supersede {
     replacement: Box::new(Record::Claim(better)),
 }).unwrap();
 
-let live = materialize(&[ChannelItem::Assert(name), ChannelItem::Op(edit)], &moderators);
+// Who COMMITTED each op (the verified entry author threaded from ingest): here `author` self-committed.
+let committers: BTreeMap<String, BTreeSet<String>> =
+    [(edit.id.clone(), [author.to_string()].into_iter().collect())].into_iter().collect();
+let live = materialize(&[ChannelItem::Assert(name), ChannelItem::Op(edit)], &committers, &moderators);
 assert_eq!(live.len(), 1);
 assert_eq!(live[0].id(), better_id); // the edited record won; the prior is gone
 ```
 
-Entry points: `materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record>` (the
-role-based fold that produces the snapshot); `ChannelItem` / `Op` / `OpKind` (the operation types);
+Entry points: `materialize(items, committers, moderators) -> Vec<Record>` (the committer-based
+fold that produces the snapshot); `ChannelItem` / `Op` / `OpKind` (the operation types);
 `ContentAddressed` (re-used from `openom-data-model`) for the op id.
 
 ## Deferred (tracked elsewhere, deliberately not here)

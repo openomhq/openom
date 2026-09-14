@@ -33,6 +33,19 @@ pub fn moderators(view: &MembershipView) -> BTreeSet<String> {
         .collect()
 }
 
+/// The `did:key` of one member's author key, in the SAME encoding [`moderators`] uses — the committer
+/// identity the claim-engine fold judges op-authority against. `None` if the id is not in `view` or its
+/// `author_public_key` is not a 32-byte Ed25519 key. A committer resolved here intersects `moderators(view)`
+/// exactly when that member currently moderates, so an op it commits governs iff its author is Maintainer+.
+#[must_use]
+pub fn author_did(view: &MembershipView, member_id: &str) -> Option<String> {
+    view.members
+        .iter()
+        .find(|m| m.member_id == member_id)
+        .and_then(|m| <[u8; 32]>::try_from(m.author_public_key.as_slice()).ok())
+        .map(|pk| did::encode_ed25519(&pk))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

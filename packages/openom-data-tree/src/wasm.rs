@@ -87,9 +87,12 @@ impl WasmTree {
         self.inner.revoke(removal_op_id, now_millis()).map_err(to_js)
     }
 
-    /// Merge a peer's (or replayed) op batch into the set. Returns the number of items ingested.
+    /// Merge a peer's (or replayed) op batch into the set. Returns the number of items ingested. This veneer
+    /// drives the SOLO/demo engine (no shared-tree verify above it), so the local owner is the committer — the
+    /// synced, attributed path runs through openom-app-core, which threads the VERIFIED committer instead.
     pub fn merge(&mut self, bytes: &[u8]) -> Result<usize, JsError> {
-        self.inner.merge(bytes).map_err(to_js)
+        let committer = self.inner.author().to_owned();
+        self.inner.merge(bytes, &committer).map_err(to_js)
     }
 
     /// The live record set as a snapshot batch.
