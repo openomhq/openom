@@ -359,6 +359,18 @@ fn core_commit(state: State<'_, Host>, doc: String) -> Result<(), String> {
     state.commit(&doc).map_err(e)
 }
 
+/// Editor: seal `doc`'s buffered intention as a proposal for a maintainer to review (empty if nothing minted).
+#[tauri::command]
+fn core_propose(state: State<'_, Host>, doc: String) -> Result<Vec<u8>, String> {
+    state.propose(&doc).map_err(e)
+}
+
+/// Maintainer: verify + commit an editor `proposal` as an attributed delta; returns the number of ops committed.
+#[tauri::command]
+fn core_approve_proposal(state: State<'_, Host>, doc: String, proposal: Vec<u8>) -> Result<usize, String> {
+    state.approve_proposal(&doc, &proposal).map_err(e)
+}
+
 /// Fold `doc`'s local store through the §B3 gate; returns how many entries folded.
 #[tauri::command]
 fn core_fold(state: State<'_, Host>, doc: String) -> Result<usize, String> {
@@ -669,6 +681,8 @@ pub fn run() {
             core_bootstrap,
             core_assert_anchor,
             core_commit,
+            core_propose,
+            core_approve_proposal,
             core_fold,
             core_project,
             core_keyring_publish_payload,

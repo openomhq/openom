@@ -1500,6 +1500,27 @@ impl<St: VaultStore> AppCoreHost<St> {
         self.with_core(doc, |c| Ok(c.commit()?))
     }
 
+    /// Editor path: seal `doc`'s buffered intention as a `Kind::Proposal` for a Maintainer to review; returns
+    /// the envelope bytes (EMPTY if nothing was minted). Off the authoritative log — the ops stay optimistically
+    /// applied to the local tree but are not committed. The caller uploads the bytes to the proposals channel.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] if flushing/sealing fails.
+    pub fn propose(&self, doc: &str) -> Result<Vec<u8>, HostError> {
+        self.with_core(doc, |c| Ok(c.propose()?.unwrap_or_default()))
+    }
+
+    /// Maintainer path: verify an editor's `proposal` and commit it as an attributed delta under this member's
+    /// authority (persisted to the local log); returns how many ops were committed. Refuses (errors) a forged or
+    /// misattributed proposal, leaving it untouched for an explicit reject.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] if the proposal fails verification / the
+    /// attribution cross-check, or opening / sealing / appending fails.
+    pub fn approve_proposal(&self, doc: &str, proposal: &[u8]) -> Result<usize, HostError> {
+        self.with_core(doc, |c| Ok(c.approve_proposal(proposal)?))
+    }
+
     /// Fold `doc`'s local store through the §B3 gate — merges own + peer writes into the projection. Returns
     /// how many entries folded.
     ///

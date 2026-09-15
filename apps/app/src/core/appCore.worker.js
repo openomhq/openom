@@ -1047,6 +1047,33 @@ const api = {
     if (c.syncing) c.dirty = true; // a commit during a tick → re-run the data sync
   },
 
+  // --- collaborative writes: editor propose / maintainer approve (OPE-360) ------------------------
+
+  /** Editor path: seal the pending intention as a Kind::Proposal and POST it to the proposals channel for a
+   *  Maintainer to review. Returns `{ id, expiresAt }` (the server-minted proposal), or `null` if nothing was
+   *  minted. The ops stay optimistically applied to the local tree but are NOT committed — a reload (re-fold
+   *  from the durable log) drops them until an approval lands as an authoritative delta. */
+  async proposeEdit(docId) {
+    const transport = transportFor(docId);
+    if (!transport) throw new Error('attach a transport before proposing');
+    const c = core(docId);
+    const bytes = c.handle.propose(); // Uint8Array | undefined
+    if (!bytes) return null; // nothing minted since the last commit/propose
+    return transport.createProposal(c.treeKey, bytes);
+  },
+
+  /** Maintainer path: verify a proposal (already fetched via listProposals) and commit it as an attributed
+   *  delta under this member's authority, then persist + sync so peers receive it. Returns the number of ops
+   *  committed. Throws (leaving the proposal on the server) if the proposal is forged or misattributed — the
+   *  caller deletes it only on success. */
+  async approveProposal(docId, proposalBytes) {
+    const c = core(docId);
+    const committed = c.handle.approveProposal(proposalBytes); // throws on a forged / misattributed proposal
+    await persistBlobs(c);
+    if (transportFor(docId)) await syncData(c);
+    return committed;
+  },
+
   // --- reads --------------------------------------------------------------------------------------
 
   project(docId) {

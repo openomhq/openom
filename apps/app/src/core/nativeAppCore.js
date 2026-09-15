@@ -219,6 +219,22 @@ export function createNativeAppCore() {
     commit: (docId) => call('core_commit', { doc: docId }),
     setModerators: (docId, dids) => call('core_set_moderators', { doc: docId, moderators: dids }),
 
+    // --- collaborative writes: editor propose / maintainer approve (OPE-360) ---
+    /** Editor: seal the pending intention as a proposal and POST it to the proposals channel for a maintainer
+     *  to review. Returns the server-minted `{ id, expiresAt }`, or null if nothing was minted. The ops stay
+     *  optimistically applied locally but are not committed until an approval lands. */
+    async proposeEdit(docId) {
+      const sealed = u8(await call('core_propose', { doc: docId }));
+      if (!sealed || sealed.length === 0) return null;
+      const transport = transports.get(docId);
+      if (!transport) throw makeError('internal', { cause: `proposeEdit: no transport attached for ${docId}` });
+      return transport.createProposal(treeKeys.get(docId), sealed);
+    },
+    /** Maintainer: verify + commit a proposal (fetched via listProposals) as an attributed delta under this
+     *  member's authority; returns the number of ops committed. Throws on a forged/misattributed proposal. */
+    approveProposal: (docId, proposalBytes) =>
+      call('core_approve_proposal', { doc: docId, proposal: bytes(proposalBytes) }),
+
     // --- reads (JSON strings the web code JSON.parses, matching the wasm veneer) ---
     project: (docId) => call('core_project', { doc: docId }),
     oplog: (docId) => call('core_oplog', { doc: docId }),
