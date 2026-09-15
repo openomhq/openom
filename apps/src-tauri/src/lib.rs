@@ -598,9 +598,21 @@ fn core_sync(
     state: State<'_, Host>,
     doc: String,
     remote: Vec<StoredObject>,
+    present: Vec<String>,
     compact_k: u32,
 ) -> Result<SyncOut, String> {
-    state.sync(&doc, &remote, compact_k).map_err(e)
+    state.sync(&doc, &remote, &present, compact_k).map_err(e)
+}
+
+/// From a LIST of the remote's keys, the subset the webview must still FETCH — the host drops immutable log
+/// objects `doc` already pulled (OPE-464) so the webview doesn't re-download the whole retained log each tick.
+#[tauri::command]
+fn core_plan_fetch(
+    state: State<'_, Host>,
+    doc: String,
+    keys: Vec<String>,
+) -> Result<Vec<String>, String> {
+    state.plan_fetch(&doc, &keys).map_err(e)
 }
 
 // ---- media blob store (OPE-435/436): durable content-addressed photos/attachments (apps/…/blobs.js) ----
@@ -726,6 +738,7 @@ pub fn run() {
             core_keyring_publish_payload_at,
             core_has_member_context,
             core_sync,
+            core_plan_fetch,
             blob_put,
             blob_has,
             blob_meta,

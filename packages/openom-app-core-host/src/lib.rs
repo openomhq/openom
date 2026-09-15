@@ -1584,10 +1584,11 @@ impl<St: VaultStore> AppCoreHost<St> {
         &self,
         doc: &str,
         remote: &[StoredObject],
+        present: &[String],
         compact_k: u32,
     ) -> Result<SyncOut, HostError> {
         self.with_core(doc, |c| {
-            let tick = c.sync_tick(remote, compact_k)?;
+            let tick = c.sync_tick(remote, present, compact_k)?;
             Ok(SyncOut {
                 uploads: tick
                     .uploads
@@ -1598,6 +1599,16 @@ impl<St: VaultStore> AppCoreHost<St> {
                 covered: tick.covered,
             })
         })
+    }
+
+    /// From a LIST of the remote's keys, the subset `doc` must still FETCH — it drops immutable log objects it
+    /// already pulled (OPE-464) so the webview doesn't re-download the whole retained log each tick. The webview
+    /// GETs only the returned keys, then passes the fetched bytes + the full LIST (`present`) to [`sync`](Self::sync).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open.
+    pub fn plan_fetch(&self, doc: &str, keys: &[String]) -> Result<Vec<String>, HostError> {
+        self.with_core(doc, |c| Ok(c.plan_fetch(keys)))
     }
 
     /// The live core for `doc` (for the ops not yet surfaced as host methods), if it has been
@@ -1769,11 +1780,12 @@ mod tests {
         host_a.assert_anchor("t", "pAlice", PERSON).unwrap();
         host_a.commit("t").unwrap();
         let remote: Vec<_> =
-            host_a.sync("t", &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
+            host_a.sync("t", &[], &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
         assert!(!remote.is_empty(), "A has objects to push to the remote");
 
         // B pulls the remote + folds → converges on A's mint.
-        host_b.sync("t", &remote, 0).unwrap();
+        let present: Vec<String> = remote.iter().map(|(k, _)| k.clone()).collect();
+        host_b.sync("t", &remote, &present, 0).unwrap();
         assert!(host_b.project("t").unwrap().contains("pAlice"), "B converges on A's mint via native sync");
 
         std::fs::remove_dir_all(&dir_a).ok();
@@ -2031,10 +2043,11 @@ mod tests {
         bob_host.assert_anchor("t", "pBob", PERSON).unwrap();
         bob_host.commit("t").unwrap();
         let remote: Vec<_> =
-            bob_host.sync("t", &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
+            bob_host.sync("t", &[], &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
 
         // The owner pulls bob's write + folds → converges on the member's ATTRIBUTED collaborator write.
-        owner_host.sync("t", &remote, 0).unwrap();
+        let present: Vec<String> = remote.iter().map(|(k, _)| k.clone()).collect();
+        owner_host.sync("t", &remote, &present, 0).unwrap();
         assert!(
             owner_host.project("t").unwrap().contains("pBob"),
             "the owner converges on the joined member's attributed write"
@@ -2091,8 +2104,9 @@ mod tests {
         bob_host.assert_anchor("t", "pBob", PERSON).unwrap();
         bob_host.commit("t").unwrap();
         let remote: Vec<_> =
-            bob_host.sync("t", &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
-        owner_host.sync("t", &remote, 0).unwrap();
+            bob_host.sync("t", &[], &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
+        let present: Vec<String> = remote.iter().map(|(k, _)| k.clone()).collect();
+        owner_host.sync("t", &remote, &present, 0).unwrap();
         assert!(
             owner_host.project("t").unwrap().contains("pBob"),
             "the owner converges on the joined dag member's attributed write"

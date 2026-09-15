@@ -1312,18 +1312,26 @@ async function syncData(c, compactKOverride) {
   const k = compactKOverride === undefined ? compactK : compactKOverride;
   const localPrefix = c.docId + '/'; // the core's own (per-device) keyspace
   const remotePrefix = c.treeKey + '/'; // the shared (per-tree) keyspace on the remote
-  // Fetch the remote's whole snapshot, re-keyed into the core's local namespace for `sync`.
+  // List the remote, re-keyed into the core's local namespace. The core decides which objects we still need to
+  // FETCH (OPE-464): immutable log objects we already pulled are skipped, so a device doesn't re-download the
+  // whole retained log every tick. `present` = the full LIST (a superset of what we fetch) so the core's
+  // upload-diff never re-pushes a log object the remote already holds but we chose not to re-download.
+  const listed = await transport.blobList(remotePrefix);
+  const present = listed.map(({ key }) => localPrefix + key.slice(remotePrefix.length));
+  const toFetch = new Set(c.handle.planFetch(present));
   const remote = [];
-  for (const { key } of await transport.blobList(remotePrefix)) {
+  for (const { key } of listed) {
     if (c.aborted) return;
+    const localKey = localPrefix + key.slice(remotePrefix.length);
+    if (!toFetch.has(localKey)) continue;
     const bytes = await transport.blobGet(key);
-    if (bytes) remote.push({ key: localPrefix + key.slice(remotePrefix.length), bytes });
+    if (bytes) remote.push({ key: localKey, bytes });
   }
   if (c.aborted) return;
   // The tick also compacts once ≥ compactK log objects have accrued since the last snapshot (OPE-409): the
   // fresh snapshot is in `put`, and `covered` is the SUBSUMED frontier to send as the x-openom-covered header
   // on that snapshot upload (the server's GC gate 1 trusts only what a snapshot actually folds).
-  const { put, covered } = c.handle.sync(remote, k); // { put: [{ key, bytes, pointer }], folded, covered }
+  const { put, covered } = c.handle.sync(remote, present, k); // { put: [{ key, bytes, pointer }], folded, covered }
   for (const o of put) {
     if (c.aborted) return;
     // Re-key the core's object back into the shared tree namespace for upload; the snapshot carries the header.

@@ -281,6 +281,15 @@ impl AppCoreHandle {
         self.inner.fold().map_err(to_js)
     }
 
+    /// From the remote LIST keys, the subset this device must still FETCH — it drops immutable log objects it
+    /// has already pulled (OPE-464), so the worker doesn't re-download the whole retained log each tick. The
+    /// worker GETs only the returned keys, then hands the fetched bytes + the full LIST (`present`) to `sync`.
+    #[wasm_bindgen(js_name = planFetch)]
+    #[allow(clippy::needless_pass_by_value)] // wasm-bindgen marshals a JS string[] as an owned Vec<String>
+    pub fn plan_fetch(&self, keys: Vec<String>) -> Vec<String> {
+        self.inner.plan_fetch(&keys)
+    }
+
     /// Reconcile against the shared remote in ONE call — the worker's whole tick. `remote` is `[{ key, bytes }]`:
     /// every object the worker listed + GET from the remote under `{doc}/`. `compactK` triggers compaction as
     /// part of the tick (compact once ≥ K `log/*` objects have accrued since the last snapshot; `0` disables).
@@ -292,12 +301,19 @@ impl AppCoreHandle {
     /// # Errors
     /// Returns a [`JsError`] if an element is malformed, or a store/mirror/compaction step fails.
     #[wasm_bindgen]
-    pub fn sync(&mut self, remote: &Array, compact_k: u32) -> Result<JsValue, JsError> {
+    #[allow(clippy::needless_pass_by_value)] // wasm-bindgen marshals a JS string[] as an owned Vec<String>
+    pub fn sync(
+        &mut self,
+        remote: &Array,
+        present: Vec<String>,
+        compact_k: u32,
+    ) -> Result<JsValue, JsError> {
         // Shared enriched tick (crate SyncTick): the pointer flag + covered frontier come from the core, so this
-        // veneer and the native host build the SAME upload metadata from ONE place.
+        // veneer and the native host build the SAME upload metadata from ONE place. `present` is the full LIST
+        // of remote keys (a superset of `remote`, whose skipped log bytes the caller didn't fetch — OPE-464).
         let tick = self
             .inner
-            .sync_tick(&objects_from_js(remote)?, compact_k)
+            .sync_tick(&objects_from_js(remote)?, &present, compact_k)
             .map_err(to_js)?;
         let put = Array::new();
         for u in tick.uploads {

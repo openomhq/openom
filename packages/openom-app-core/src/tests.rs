@@ -106,7 +106,7 @@ fn sync_against_compacts_and_surfaces_the_snapshot_in_uploads() {
     a.tree_mut().assert_anchor("p1", PERSON, 1).unwrap();
     a.commit().unwrap();
 
-    let (uploads, _folded) = a.sync_against(&[], 1).unwrap();
+    let (uploads, _folded) = a.sync_against(&[], &[], 1).unwrap();
     assert!(uploads.iter().any(|(k, _)| k.ends_with("/snapshot")), "the fresh snapshot is in the uploads");
     assert!(!a.subsumed_frontier().is_empty(), "the covered frontier for the header is available");
 
@@ -114,7 +114,7 @@ fn sync_against_compacts_and_surfaces_the_snapshot_in_uploads() {
     let mut b = core(b"replica-B", generate_dek().unwrap(), Arc::new(MemoryBlob::new()));
     b.tree_mut().assert_anchor("p2", PERSON, 2).unwrap();
     b.commit().unwrap();
-    let (ub, _) = b.sync_against(&[], 0).unwrap();
+    let (ub, _) = b.sync_against(&[], &[], 0).unwrap();
     assert!(!ub.iter().any(|(k, _)| k.ends_with("/snapshot")), "no snapshot when compaction is off");
 }
 
@@ -146,11 +146,56 @@ fn a_straggler_adopts_a_snapshot_when_the_covered_log_was_reaped() {
 
     // A fresh straggler over its own empty store, same DEK. Fold alone sees no log; adoption recovers p.
     let mut b = core(b"replica-b", dek, Arc::new(MemoryBlob::new()));
-    b.sync_against(&remote_view, 0).unwrap();
+    let present: Vec<String> = remote_view.iter().map(|(k, _)| k.clone()).collect();
+    b.sync_against(&remote_view, &present, 0).unwrap();
     assert!(
         live_ids(&b).contains("pReaped"),
         "the straggler adopted the snapshot and recovered the reaped-below-floor state"
     );
+}
+
+#[test]
+fn plan_fetch_skips_already_pulled_log_objects_and_never_re_uploads_them() {
+    // OPE-464: once a device has pulled a peer's log objects, a later tick must NOT re-download them
+    // (`plan_fetch` drops below-own-frontier log keys) and must NOT re-upload them either (they already sit on
+    // the remote). Only mutable snapshot/heads pointers and any new tail stay in the plan. This trusts the
+    // device's OWN pull cursor — no covered claim — so it can't skip an unseen delta.
+    let dek = generate_dek().unwrap();
+    let a_store = Arc::new(MemoryBlob::new());
+    let mut a = core(b"replica-A", dek.clone(), a_store.clone());
+    a.tree_mut().assert_anchor("pA", PERSON, 1).unwrap();
+    a.commit().unwrap();
+    a.tree_mut().assert_anchor("pA2", PERSON, 2).unwrap();
+    a.commit().unwrap();
+
+    // The remote view B pulls: every object A wrote (its log objects + head pointer).
+    let mut remote = Vec::new();
+    for (key, _etag) in a_store.list("tree/").unwrap() {
+        if let Some((bytes, _etag)) = a_store.get(&key).unwrap() {
+            remote.push((key, bytes));
+        }
+    }
+    let present: Vec<String> = remote.iter().map(|(k, _)| k.clone()).collect();
+    assert!(present.iter().filter(|k| k.contains("/log/")).count() >= 2, "A wrote ≥2 log objects");
+
+    // B pulls A's whole log once and folds it.
+    let mut b = core(b"replica-B", dek, Arc::new(MemoryBlob::new()));
+    b.sync_against(&remote, &present, 0).unwrap();
+    assert!(live_ids(&b).contains("pA") && live_ids(&b).contains("pA2"), "B folded A's log");
+
+    // Next tick: B lists the SAME remote. plan_fetch must drop every log object it already pulled.
+    let plan = b.plan_fetch(&present);
+    assert!(plan.iter().all(|k| !k.contains("/log/")), "already-pulled log objects are not re-fetched: {plan:?}");
+
+    // And fetching only the (log-free) plan, B's upload diff must NOT re-push A's remote-present log objects.
+    let fetched: Vec<_> = remote.iter().filter(|(k, _)| plan.contains(k)).cloned().collect();
+    let (uploads, _folded) = b.sync_against(&fetched, &present, 0).unwrap();
+    assert!(
+        uploads.iter().all(|(k, _)| !k.contains("/log/")),
+        "a below-frontier log object already on the remote is never re-uploaded: {:?}",
+        uploads.iter().map(|(k, _)| k).collect::<Vec<_>>()
+    );
+    assert!(live_ids(&b).contains("pA"), "B's state is intact after the skipping tick");
 }
 
 fn live_ids(core: &AppCore<MemoryBlob>) -> BTreeSet<String> {
@@ -170,7 +215,8 @@ fn tick(core: &mut AppCore<MemoryBlob>, remote: &Arc<MemoryBlob>) -> usize {
             snapshot.push((key, bytes));
         }
     }
-    let (uploads, folded) = core.sync_against(&snapshot, 0).unwrap(); // 0 = no compaction in these tests
+    let present: Vec<String> = snapshot.iter().map(|(k, _)| k.clone()).collect();
+    let (uploads, folded) = core.sync_against(&snapshot, &present, 0).unwrap(); // 0 = no compaction in these tests
     for (key, bytes) in uploads {
         let pre = if key.contains("/heads/") || key.ends_with("/snapshot") {
             store_blob::Precondition::Any

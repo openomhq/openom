@@ -161,6 +161,17 @@ fn log_key(doc: &str, replica: &str, counter: u64) -> String {
     format!("{doc}/log/{replica}/{counter}")
 }
 
+/// Recover `(replica, counter)` from a `{doc}/log/{replica}/{counter}` key. `None` for any other key
+/// (a `heads/*` or `snapshot` pointer, or a malformed key) — the inverse of [`log_key`].
+fn parse_log_key(doc: &str, key: &str) -> Option<(String, u64)> {
+    let rest = key.strip_prefix(&format!("{doc}/log/"))?;
+    let (replica, counter) = rest.rsplit_once('/')?;
+    if replica.is_empty() || replica.contains('/') {
+        return None;
+    }
+    Some((replica.to_string(), counter.parse().ok()?))
+}
+
 /// `{doc}/heads/` — the prefix holding one tiny CAS'd pointer per replica. Listing THIS is O(members), not
 /// O(all deltas), so a pull discovers who has written + how far without scanning the whole log — the same
 /// head-pointer model the keyring port uses. It is what keeps a managed backend efficient WITHOUT any
@@ -822,6 +833,28 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// This replica's inbound frontier — the next counter it will pull from each replica.
     pub const fn frontier(&self) -> &Frontier {
         &self.pull_frontier
+    }
+
+    /// Whether a syncing client must still FETCH this listed object, or can skip it because it already holds
+    /// it. An immutable `log/{replica}/{counter}` object is skippable exactly when `counter < pull_frontier`
+    /// for that replica — the pull cursor is gap-free below its value, so those deltas were already
+    /// fetched-and-folded. Everything else (the mutable `snapshot` + `heads/*` pointers, and any log object
+    /// at/above the frontier) must be fetched. This trusts ONLY this client's own prior fetches — never a
+    /// snapshot's covered *claim* — so skipping can't advance the pull cursor over an unseen delta and thus
+    /// can't weaken suppression-resistance or drift gate-2 accounting (§B3 / the OPE-421 bound are untouched).
+    pub fn needs_fetch(&self, key: &str) -> bool {
+        match parse_log_key(&self.doc, key) {
+            Some((replica, counter)) => {
+                counter >= self.pull_frontier.get(&replica).copied().unwrap_or(0)
+            }
+            None => true,
+        }
+    }
+
+    /// Whether `key` is one of this doc's immutable `log/*` delta objects (vs a mutable `snapshot`/`heads/*`
+    /// pointer). Used by the upload diff: a log object already present on the remote is never re-uploaded.
+    pub fn is_log_key(&self, key: &str) -> bool {
+        parse_log_key(&self.doc, key).is_some()
     }
 
     /// Fold current state into a snapshot covering this client's frontier, and CAS it to `{doc}/snapshot`.

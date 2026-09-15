@@ -460,6 +460,22 @@ impl<S: BlobStore> SyncClient<S> {
         self.inner.frontier().clone()
     }
 
+    /// Whether a syncing client must still FETCH this listed object, or can skip it because it already holds it
+    /// (an immutable `log/*` object below its own pull frontier — OPE-464). Delegates to
+    /// [`docsync::BlobSyncClient::needs_fetch`]; trusts only this device's own prior fetches.
+    #[must_use]
+    pub fn needs_fetch(&self, key: &str) -> bool {
+        self.inner.needs_fetch(key)
+    }
+
+    /// Whether `key` is one of this doc's immutable `log/*` delta objects (vs a `snapshot`/`heads/*` pointer) —
+    /// the upload diff never re-pushes a log object the remote already holds. See
+    /// [`docsync::BlobSyncClient::is_log_key`].
+    #[must_use]
+    pub fn is_log_key(&self, key: &str) -> bool {
+        self.inner.is_log_key(key)
+    }
+
     /// How many dots the OPE-421 look-behind has DROPPED and not yet purged. See
     /// [`docsync::BlobSyncClient::dropped_count`].
     #[must_use]

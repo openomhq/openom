@@ -952,6 +952,7 @@ impl<S: BlobStore> AppCore<S> {
     pub fn sync_against(
         &mut self,
         remote: &[StoredObject],
+        present: &[String],
         compact_k: u32,
     ) -> Result<(Vec<StoredObject>, usize), CoreError> {
         // An in-memory view of the remote, seeded from the caller's snapshot.
@@ -974,20 +975,47 @@ impl<S: BlobStore> AppCore<S> {
             self.client.maybe_compact(&EveryNUpdates(u64::from(compact_k)))?;
         }
         docsync::mirror(&self.store, &view, &self.doc)?;
-        // The view now holds the union; whatever it has that the input snapshot didn't (a fresh log object, or
-        // an advanced head/snapshot pointer) is what the remote must be sent.
+        // The view now holds the union; whatever it has that the remote lacks must be pushed. `present` is the
+        // FULL set of keys the remote already holds (from the caller's LIST) — a superset of `remote`, whose
+        // bytes the caller may have SKIPPED fetching for immutable log objects it already had (OPE-464). So the
+        // diff splits by kind: an immutable `log/*` object is uploaded only when the remote lacks the key
+        // outright (never re-uploaded just because we skipped fetching its bytes); a mutable `snapshot`/`heads`
+        // pointer is always fetched, so a byte-compare against `had` correctly re-pushes a changed/absent one.
         let had: std::collections::HashMap<&str, &[u8]> =
             remote.iter().map(|(k, b)| (k.as_str(), b.as_slice())).collect();
+        let on_remote: std::collections::HashSet<&str> = present.iter().map(String::as_str).collect();
         let mut uploads = Vec::new();
         for (key, _etag) in view.list(&format!("{}/", self.doc))? {
             let Some((bytes, _etag)) = view.get(&key)? else {
                 continue;
             };
-            if had.get(key.as_str()) != Some(&bytes.as_slice()) {
+            let upload = if self.client.is_log_key(&key) {
+                !on_remote.contains(key.as_str())
+            } else {
+                had.get(key.as_str()) != Some(&bytes.as_slice())
+            };
+            if upload {
                 uploads.push((key, bytes));
             }
         }
         Ok((uploads, folded))
+    }
+
+    /// From a LIST of the remote's object keys (doc-namespaced), the subset this device must still FETCH — it
+    /// drops immutable `log/*` objects it has already pulled (below its own pull frontier), keeping the
+    /// mutable `snapshot`/`heads/*` pointers and any at/above-frontier log object. The caller GETs only the
+    /// returned keys, then passes the fetched bytes AND the full LIST (as `present`) to [`sync_tick`]. This is
+    /// what stops a device from re-downloading the whole retained log every tick, WITHOUT trusting any covered
+    /// claim: it skips only what it fetched-and-folded itself. See [`BlobSyncClient::needs_fetch`].
+    ///
+    /// [`sync_tick`]: Self::sync_tick
+    /// [`BlobSyncClient::needs_fetch`]: docsync::BlobSyncClient::needs_fetch
+    #[must_use]
+    pub fn plan_fetch(&self, keys: &[String]) -> Vec<String> {
+        keys.iter()
+            .filter(|k| self.client.needs_fetch(k))
+            .cloned()
+            .collect()
     }
 
     /// One sync tick with the FULL per-object write metadata the transport needs: [`sync_against`](Self::sync_against)
@@ -997,8 +1025,13 @@ impl<S: BlobStore> AppCore<S> {
     ///
     /// # Errors
     /// As [`sync_against`](Self::sync_against).
-    pub fn sync_tick(&mut self, remote: &[StoredObject], compact_k: u32) -> Result<SyncTick, CoreError> {
-        let (uploads, folded) = self.sync_against(remote, compact_k)?;
+    pub fn sync_tick(
+        &mut self,
+        remote: &[StoredObject],
+        present: &[String],
+        compact_k: u32,
+    ) -> Result<SyncTick, CoreError> {
+        let (uploads, folded) = self.sync_against(remote, present, compact_k)?;
         let uploads = uploads
             .into_iter()
             .map(|(key, bytes)| {

@@ -30,6 +30,24 @@ test('app-core: two devices converge through the server', async ({ page }) => {
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: a device does not re-download log objects it already pulled', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.fetchSkipsAlreadyPulled());
+
+  expect(r.firstPassPeople).toBe(3); // B folded all three of A's mints on the first pull
+  expect(r.serverLogSize).toBe(3); // the three log objects are still present on the remote (not reaped)
+  // OPE-464: the second tick re-lists the remote but fetches NONE of the already-pulled log objects — the
+  // whole point of the optimization. Only mutable heads/snapshot pointers may be re-fetched.
+  expect(r.secondLogGets, 'no already-pulled log object is re-downloaded').toEqual([]);
+  expect(r.peopleAfterSkip, 'state is intact after the skipping tick').toBe(3);
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: compaction publishes a snapshot with the covered header', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

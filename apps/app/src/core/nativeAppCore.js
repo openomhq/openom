@@ -497,14 +497,22 @@ export function createNativeAppCore() {
         }
         const localPrefix = `${docId}/`;
         const remotePrefix = `${treeKey}/`;
-        // PULL: the shared remote, re-keyed into the core's local namespace.
+        // PULL: list the shared remote, re-keyed into the core's local namespace. The core decides which objects
+        // we still need to FETCH (OPE-464): immutable log objects we already pulled are skipped so we don't
+        // re-download the whole retained log each tick. `present` = the full LIST so the core's upload-diff never
+        // re-pushes a log object the remote already holds but we chose not to re-download.
+        const listed = await transport.blobList(remotePrefix);
+        const present = listed.map(({ key }) => localPrefix + key.slice(remotePrefix.length));
+        const toFetch = new Set(await call('core_plan_fetch', { doc: docId, keys: present }));
         const remote = [];
-        for (const { key } of await transport.blobList(remotePrefix)) {
+        for (const { key } of listed) {
+          const localKey = localPrefix + key.slice(remotePrefix.length);
+          if (!toFetch.has(localKey)) continue;
           const b = await transport.blobGet(key);
-          if (b) remote.push([localPrefix + key.slice(remotePrefix.length), Array.from(b)]);
+          if (b) remote.push([localKey, Array.from(b)]);
         }
         // The core owns the whole keyspace + head-monotonicity decision; this is a dumb ferry.
-        const { uploads, covered } = await call('core_sync', { doc: docId, remote, compactK });
+        const { uploads, covered } = await call('core_sync', { doc: docId, remote, present, compactK });
         // PUSH: re-key each upload back to the shared namespace; the CORE decided pointer; the snapshot carries
         // the covered header (a well-known object key — the one key the worker itself checks, for the header).
         for (const o of uploads) {

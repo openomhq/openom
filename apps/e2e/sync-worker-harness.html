@@ -51,6 +51,7 @@
       // The DATA channel is now a dumb BlobStore keyed by the core's opaque object keys (the server owns no
       // keyspace knowledge — R2/BYO satisfy this with zero compute). One shared store = the shared remote.
       const blobs = new Map(); // key -> Uint8Array
+      const getKeys = []; // every key blobGet fetched since the last _resetGets() (OPE-464 fetch-skip assertion)
       const keyrings = new Map(); // revision -> MembershipEnvelope bytes (the walk's per-revision body)
       let keyringHead = 0;
       let snapshotCovered = null; // the last x-openom-covered header seen on a snapshot PUT (OPE-409)
@@ -75,6 +76,7 @@
           return [...blobs.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key }));
         },
         async blobGet(key) {
+          getKeys.push(key);
           return blobs.get(key) ?? null;
         },
         // The change-history feed (OPE-461): derived from the stored log objects. The fake has no member auth,
@@ -176,6 +178,12 @@
         _reportedFrontier() {
           return reportedFrontier; // the last PULL frontier reported to PUT /frontier (gate-2, {replica:counter})
         },
+        _getKeys() {
+          return [...getKeys]; // every key fetched since the last _resetGets() (OPE-464 fetch-skip assertion)
+        },
+        _resetGets() {
+          getKeys.length = 0;
+        },
       };
     }
 
@@ -217,6 +225,36 @@
           aPeople: aProj.people,
           bPeople: bProj.people,
           reportedFrontier: transport._reportedFrontier(), // OPE-409 gate 2: the pull frontier a tick reported
+        };
+      },
+
+      // OPE-464: a device that already pulled a peer's log objects does NOT re-download them on the next tick.
+      // plan_fetch drops below-own-frontier log keys, so only the mutable heads/snapshot pointers (and any new
+      // tail) are fetched. Compaction off (K=0), so the skip is purely the own-pull-cursor optimization.
+      async fetchSkipsAlreadyPulled() {
+        const transport = makeTransport();
+        const a = await openDevice(spawnWorker(), 0xa1, transport);
+        const b = await openDevice(spawnWorker(), 0xb2, transport);
+        await a.setCompactK(0);
+        await b.setCompactK(0);
+        // A mints three SEPARATE commits (three log objects) + pushes them.
+        for (const id of ['p1', 'p2', 'p3']) {
+          await a.assertAnchor(DOC, id, PERSON);
+          await a.commit(DOC);
+        }
+        await a.syncNow(DOC);
+        // B pulls A's whole log once and folds it.
+        await b.syncNow(DOC);
+        const firstPassPeople = JSON.parse(await b.project(DOC)).people.length;
+        // Second tick: measure exactly which keys B fetches. Already-pulled log objects must be skipped.
+        transport._resetGets();
+        await b.syncNow(DOC);
+        const secondGets = transport._getKeys();
+        return {
+          firstPassPeople,
+          serverLogSize: transport._size(),                              // A's log objects on the remote
+          secondLogGets: secondGets.filter((k) => k.includes('/log/')), // must be [] — no re-download
+          peopleAfterSkip: JSON.parse(await b.project(DOC)).people.length, // state intact after the skipping tick
         };
       },
 
