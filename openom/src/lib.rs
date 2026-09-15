@@ -105,6 +105,9 @@ pub fn app(state: AppState) -> Router {
             "/trees/{tree_id}/blobs/{*sub}",
             get(blobs::get_blob).put(blobs::put_blob),
         )
+        // Change-history feed: per-delta metadata (author/size/time) over the RETAINED log objects (the paid
+        // history window, GC-gated) — the client fetches sealed bytes via the blob GET + renders. Read-gated.
+        .route("/trees/{tree_id}/history", get(blobs::get_history))
         // Seen-frontier report (OPE-398 §4): advisory, client-asserted PLUMBING for the future log-GC
         // floor — nothing consumes it yet to gate deletion.
         .route(

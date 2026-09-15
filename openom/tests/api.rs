@@ -3125,6 +3125,63 @@ async fn gc_retains_deltas_within_the_history_window() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn change_history_feed_lists_authored_deltas() {
+    // The change-history read API (OPE-461): GET /history lists per-delta metadata (author, replica, counter,
+    // size, time) over the retained log objects, in insertion order, read-gated + zero-knowledge (no content).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+    let maint = Uuid::new_v4();
+    grant_role(&db, tree, maint, 3).await;
+
+    // The owner writes two deltas on replica rA; the maintainer writes one on rB.
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rA/0"), b"alpha", owner, true)).await;
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rA/1"), b"beta-long", owner, true)).await;
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/0"), b"gamma", maint, true)).await;
+
+    // The feed lists all three, in insertion order, each attributed to its AUTHOR with the delta coords + size.
+    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/history"), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    let entries = v["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3, "all three deltas in the feed");
+    assert_eq!(entries[0]["member_id"], serde_json::json!(owner.to_string()), "attributed to the author");
+    assert_eq!(entries[0]["replica"], "rA");
+    assert_eq!(entries[0]["counter"], 0);
+    assert_eq!(entries[0]["size"], 5, "size of \"alpha\"");
+    assert!(entries[0]["created_at"].as_str().is_some(), "carries a timestamp");
+    assert_eq!(entries[2]["member_id"], serde_json::json!(maint.to_string()));
+    assert_eq!(entries[2]["replica"], "rB");
+
+    // Read-gated: a viewer may read history; a non-member is forbidden (identical to the blob read gate).
+    let viewer = Uuid::new_v4();
+    grant_role(&db, tree, viewer, 5).await;
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/history"), viewer)).await.0,
+        StatusCode::OK,
+        "a viewer can read history"
+    );
+    let outsider = Uuid::new_v4();
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/history"), outsider)).await.0,
+        StatusCode::FORBIDDEN,
+        "a non-member cannot read history"
+    );
+
+    // Pagination by the seq cursor: limit 2 → first two + a cursor; since=cursor → the remainder.
+    let (_, _, b1) = send(&app, get_as(format!("/v1/trees/{tree}/history?limit=2"), owner)).await;
+    let v1: Value = serde_json::from_slice(&b1).unwrap();
+    assert_eq!(v1["entries"].as_array().unwrap().len(), 2, "page 1 = 2 entries");
+    let cursor = v1["next_cursor"].as_i64().unwrap();
+    let (_, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/history?since={cursor}"), owner)).await;
+    let v2: Value = serde_json::from_slice(&b2).unwrap();
+    assert_eq!(v2["entries"].as_array().unwrap().len(), 1, "page 2 = the remaining entry");
+    assert_eq!(v2["entries"][0]["replica"], "rB", "page 2 continues past the cursor");
+}
+
 /// Build a router whose config has the internal-GC shared secret set (the env var is unset under test), so
 /// the `POST /internal/gc` trigger is enabled and authenticated by it.
 async fn router_with_internal_token(token: &str) -> Router {

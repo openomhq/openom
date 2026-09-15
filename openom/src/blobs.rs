@@ -194,19 +194,24 @@ async fn upsert_index(
     tag: &str,
     size: i64,
     if_absent: bool,
+    member_id: Uuid,
 ) -> Result<u64, ApiError> {
+    // `member_id` = the authenticated uploader (who, for a per-replica `log/` object, is its author). Recorded
+    // so the change-history feed can render authorship; zero-knowledge holds (the server sees who/size/when,
+    // never content). Overwrites (pointers) refresh it to the latest writer.
     let q = if if_absent {
-        "INSERT INTO tree_blob_index (tree_id, key, etag, size_bytes) VALUES ($1, $2, $3, $4)
+        "INSERT INTO tree_blob_index (tree_id, key, etag, size_bytes, member_id) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (tree_id, key) DO NOTHING"
     } else {
-        "INSERT INTO tree_blob_index (tree_id, key, etag, size_bytes) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (tree_id, key) DO UPDATE SET etag = EXCLUDED.etag, size_bytes = EXCLUDED.size_bytes"
+        "INSERT INTO tree_blob_index (tree_id, key, etag, size_bytes, member_id) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (tree_id, key) DO UPDATE SET etag = EXCLUDED.etag, size_bytes = EXCLUDED.size_bytes, member_id = EXCLUDED.member_id"
     };
     Ok(sqlx::query(q)
         .bind(tree_id)
         .bind(key)
         .bind(tag)
         .bind(size)
+        .bind(member_id)
         .execute(&mut **tx)
         .await
         .map_err(internal)?
@@ -282,7 +287,7 @@ async fn put_pointer_blob(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tag = etag_of(body);
-    let rows = upsert_index(&mut tx, cx.tree, sub, &tag, size, if_absent).await?;
+    let rows = upsert_index(&mut tx, cx.tree, sub, &tag, size, if_absent, cx.member).await?;
 
     if if_absent && rows == 0 {
         // Lost a race against a concurrent first-writer between our pre-check and this insert. ROLL BACK: our
@@ -385,7 +390,7 @@ async fn put_log_blob(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tag = etag_of(body);
-    let rows = upsert_index(&mut tx, cx.tree, sub, &tag, size, true).await?;
+    let rows = upsert_index(&mut tx, cx.tree, sub, &tag, size, true, cx.member).await?;
     if rows == 0 {
         tx.rollback().await.map_err(internal)?;
         let winner: (String,) =
@@ -544,7 +549,7 @@ async fn put_snapshot_blob(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tag = etag_of(body);
-    upsert_index(&mut tx, cx.tree, sub, &tag, size, false).await?; // Any overwrite for the snapshot pointer
+    upsert_index(&mut tx, cx.tree, sub, &tag, size, false, cx.member).await?; // Any overwrite for the snapshot pointer
 
     // REPLACE the covered rows, each bound to the new snapshot etag (the ETAG-BINDING).
     sqlx::query("DELETE FROM tree_snapshot_covered WHERE tree_id = $1")
@@ -697,4 +702,82 @@ pub async fn list_blobs(
         .map(|(key, etag)| ListedKey { key, etag })
         .collect();
     Ok((StatusCode::OK, Json(json!({ "keys": keys }))).into_response())
+}
+
+/// Query for `GET /trees/{id}/history` — page the change feed by insertion `seq` (exclusive cursor).
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    since: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// One change in a tree's history: the authenticated author + the delta's coordinates + size + time. The
+/// SEALED bytes are fetched separately via `GET /trees/{id}/blobs/log/{replica}/{counter}` (the client
+/// decrypts + renders); the server never sees content.
+#[derive(Serialize)]
+struct HistoryEntry {
+    member_id: Option<Uuid>,
+    replica: String,
+    counter: i64,
+    size: i64,
+    created_at: String,
+    seq: i64,
+}
+
+const HISTORY_DEFAULT_LIMIT: i64 = 100;
+const HISTORY_MAX_LIMIT: i64 = 1000;
+
+/// `GET /trees/{id}/history?since={seq}&limit={n}` — the paid change-history feed: per-delta metadata
+/// (author, replica, counter, size, time) for every `log/*` object still retained (OPE-460 keeps them within
+/// the plan window), ordered by insertion. Read-gated — any member who can read the tree sees its history;
+/// zero-knowledge — metadata only, the sealed delta bytes come from the blob GET. Distinct from the SYNC pull:
+/// sync bootstraps below-covered state from the snapshot, this reads the retained raw deltas directly.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or a store read fails.
+pub async fn get_history(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path(tree_id): Path<Uuid>,
+    Query(q): Query<HistoryQuery>,
+) -> Result<Response, ApiError> {
+    let _p = crate::prof::span("blobs.history");
+    let owner = resolve_owner(&state, tree_id).await?;
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
+
+    let since = q.since.unwrap_or(0);
+    let limit = q.limit.unwrap_or(HISTORY_DEFAULT_LIMIT).clamp(1, HISTORY_MAX_LIMIT);
+
+    // Every retained `log/{replica}/{counter}` row in insertion order, paged by the stable `seq` cursor.
+    // `created_at::text` avoids a chrono dependency; the numeric-counter filter guards `parse_log_key` below.
+    let rows: Vec<(Option<Uuid>, String, i64, String, i64)> = sqlx::query_as(
+        "SELECT member_id, key, size_bytes, created_at::text, seq
+           FROM tree_blob_index
+          WHERE tree_id = $1
+            AND split_part(key, '/', 1) = 'log'
+            AND split_part(key, '/', 3) ~ '^[0-9]+$'
+            AND seq > $2
+          ORDER BY seq
+          LIMIT $3",
+    )
+    .bind(tree_id)
+    .bind(since)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+
+    let entries: Vec<HistoryEntry> = rows
+        .into_iter()
+        .filter_map(|(member_id, key, size, created_at, seq)| {
+            let (replica, counter) = parse_log_key(&key).ok()?;
+            Some(HistoryEntry { member_id, replica, counter, size, created_at, seq })
+        })
+        .collect();
+    let next_cursor = entries.last().map(|e| e.seq);
+
+    let cx = MeterCtx { account: owner, tree: tree_id, member: identity.member_id };
+    let _ = state.meter.charge_read(&state.db, cx, None).await; // Class B (LIST) op (best-effort)
+
+    Ok((StatusCode::OK, Json(json!({ "entries": entries, "next_cursor": next_cursor }))).into_response())
 }
