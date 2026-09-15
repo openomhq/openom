@@ -1500,6 +1500,15 @@ impl<St: VaultStore> AppCoreHost<St> {
         self.with_core(doc, |c| Ok(c.commit()?))
     }
 
+    /// The write-side role pre-check (a UX guard): whether `doc` may commit directly (solo, or a current
+    /// Maintainer+) or must route its edit to a [`propose`](Self::propose) (an Editor/Viewer on a shared tree).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open.
+    pub fn can_commit_directly(&self, doc: &str) -> Result<bool, HostError> {
+        self.with_core(doc, |c| Ok(c.can_commit_directly()))
+    }
+
     /// Editor path: seal `doc`'s buffered intention as a `Kind::Proposal` for a Maintainer to review; returns
     /// the envelope bytes (EMPTY if nothing was minted). Off the authoritative log — the ops stay optimistically
     /// applied to the local tree but are not committed. The caller uploads the bytes to the proposals channel.

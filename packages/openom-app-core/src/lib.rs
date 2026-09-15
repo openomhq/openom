@@ -672,6 +672,18 @@ impl<S: BlobStore> AppCore<S> {
         Ok(())
     }
 
+    /// The write-side role pre-check (a UX guard, NOT security — the read-side verify already rejects an
+    /// under-authorized commit): whether this device may commit an edit DIRECTLY, or must route it to a
+    /// [`propose`](Self::propose). `true` on a solo/unshared tree (no membership → the owner commits) or when
+    /// this device's author is a current moderator (Maintainer+); `false` for an Editor/Viewer on a shared
+    /// tree, whose direct delta the reader would reject.
+    #[must_use]
+    pub fn can_commit_directly(&self) -> bool {
+        self.membership
+            .as_deref()
+            .is_none_or(|m| m.is_moderator(self.client.tree().author()))
+    }
+
     /// Editor path: seal everything minted since the last commit as a `Kind::Proposal` for a Maintainer to
     /// review, and return the envelope bytes (`None` if nothing was minted). Unlike [`commit`](Self::commit)
     /// this does NOT append to the log or advance any cursor — the ops stay optimistically applied to the local

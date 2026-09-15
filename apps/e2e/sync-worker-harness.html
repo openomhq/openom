@@ -400,15 +400,18 @@
         });
         await member.syncNow(memberDoc); // pull the shared base
 
-        // The editor mints a claim and PROPOSES it (they cannot commit — a delta needs Maintainer).
+        // The editor mints a claim and SUBMITS it — the write-side role pre-check routes an editor to a
+        // PROPOSAL (they cannot commit — a delta needs Maintainer).
         await member.assertAnchor(memberDoc, 'pByEditor', PERSON);
         await member.assertClaim(memberDoc, 'pByEditor', NAME, nameJson('Grace'));
-        const proposed = await member.proposeEdit(memberDoc); // { id, expiresAt }
+        const editorCanCommit = await member.canCommitDirectly(memberDoc);
+        const editorRoute = await member.submitEdit(memberDoc); // { proposed: true, proposal }
+        const proposed = editorRoute.proposal;
 
         // The owner reviews the queue and APPROVES it → committed as an attributed delta, then deleted.
+        const ownerCanCommit = await owner.canCommitDirectly(ownerDoc);
         const pending = await owner.pendingProposals(ownerDoc);
         const committed = await owner.approveProposal(ownerDoc, pending[0].id);
-        const ownerPeople = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
         const afterApprove = await owner.pendingProposals(ownerDoc); // emptied by the delete
         const anchor = JSON.parse(await owner.liveRecords(ownerDoc)).find((r) => r.id === 'pByEditor');
 
@@ -417,13 +420,20 @@
         const rejected = await member.proposeEdit(memberDoc);
         await owner.rejectProposal(ownerDoc, rejected.id);
         const afterReject = await owner.pendingProposals(ownerDoc);
+
+        // The OWNER submits an edit — the pre-check routes a maintainer to a DIRECT commit.
+        await owner.assertAnchor(ownerDoc, 'pByOwner', PERSON);
+        const ownerRoute = await owner.submitEdit(ownerDoc); // { committed: true }
         const ownerPeopleFinal = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
 
         return {
           proposedId: proposed?.id ?? null,
+          editorCanCommit,
+          editorRouted: editorRoute.proposed === true,
+          ownerCanCommit,
+          ownerCommitted: ownerRoute.committed === true,
           pendingCount: pending.length,
           committed,
-          ownerPeople,
           afterApproveCount: afterApprove.length,
           anchorCreatedBy: anchor?.createdBy ?? null,
           editorDid: joined.didKey,

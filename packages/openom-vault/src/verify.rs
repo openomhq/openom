@@ -82,6 +82,12 @@ pub trait MembershipResolver: Send + Sync {
     fn author_did(&self, _member_id: &str) -> Option<String> {
         None
     }
+    /// Whether `author_did` is a current moderator (Maintainer+) at head — the write-side role pre-check a
+    /// client uses to route an edit: a moderator commits directly, anyone below proposes. Defaults to `false`
+    /// (fail-closed: an unresolvable author is not a moderator).
+    fn is_moderator(&self, _author_did: &str) -> bool {
+        false
+    }
 }
 
 /// What to do with a pulled entry after §B3 verification.
@@ -318,6 +324,10 @@ pub mod chain {
             )
         }
 
+        fn is_moderator(&self, author_did: &str) -> bool {
+            crate::membership::is_moderator(&openom_keyring_chain::membership_view(&self.head), author_did)
+        }
+
         fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing {
             let rev = openom_keyring_chain::decode_governing_ref(governing_ref).unwrap_or(0);
             if rev == 0 {
@@ -418,6 +428,10 @@ pub mod dag {
 
         fn author_did(&self, member_id: &str) -> Option<String> {
             crate::membership::author_did(&self.view, member_id)
+        }
+
+        fn is_moderator(&self, author_did: &str) -> bool {
+            crate::membership::is_moderator(&self.view, author_did)
         }
 
         fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing {

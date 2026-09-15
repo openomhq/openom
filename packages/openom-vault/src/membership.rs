@@ -46,6 +46,14 @@ pub fn author_did(view: &MembershipView, member_id: &str) -> Option<String> {
         .map(|pk| did::encode_ed25519(&pk))
 }
 
+/// Whether `author_did` belongs to a current moderator (Maintainer or above) in `view` — the write-side
+/// role pre-check: a moderator commits directly, anyone below must route their edit to a proposal. Same
+/// encoding as [`moderators`] / [`author_did`].
+#[must_use]
+pub fn is_moderator(view: &MembershipView, author_did: &str) -> bool {
+    moderators(view).contains(author_did)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

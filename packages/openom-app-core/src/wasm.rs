@@ -184,6 +184,15 @@ impl AppCoreHandle {
         self.inner.commit().map_err(to_js)
     }
 
+    /// The write-side role pre-check (a UX guard): whether this device may commit directly (solo, or a
+    /// current Maintainer+) or must route its edit to [`propose`](Self::propose) (an Editor/Viewer on a
+    /// shared tree).
+    #[wasm_bindgen(js_name = canCommitDirectly)]
+    #[must_use]
+    pub fn can_commit_directly(&self) -> bool {
+        self.inner.can_commit_directly()
+    }
+
     /// Editor path: seal everything minted since the last commit as a `Kind::Proposal` for a Maintainer to
     /// review, returning the envelope bytes to upload to the proposals channel (`undefined` if nothing was
     /// minted). Unlike [`commit`](Self::commit) it does NOT append to the log — the ops stay optimistically

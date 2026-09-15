@@ -1049,6 +1049,23 @@ const api = {
 
   // --- collaborative writes: editor propose / maintainer approve (OPE-360) ------------------------
 
+  /** The write-side role pre-check (UX guard): whether this device may commit directly (solo, or a current
+   *  Maintainer+) or must route its edit to a proposal (an Editor/Viewer on a shared tree). */
+  canCommitDirectly(docId) {
+    return core(docId).handle.canCommitDirectly();
+  },
+
+  /** Submit a pending edit, routing on role: a maintainer (or solo) commits it directly; an editor's edit
+   *  becomes a proposal for review. Returns `{ committed: true }` or `{ proposed: true, proposal }`. */
+  async submitEdit(docId) {
+    if (core(docId).handle.canCommitDirectly()) {
+      await this.commit(docId);
+      return { committed: true };
+    }
+    const proposal = await this.proposeEdit(docId);
+    return { proposed: true, proposal };
+  },
+
   /** Editor path: seal the pending intention as a Kind::Proposal and POST it to the proposals channel for a
    *  Maintainer to review. Returns `{ id, expiresAt }` (the server-minted proposal), or `null` if nothing was
    *  minted. The ops stay optimistically applied to the local tree but are NOT committed — a reload (re-fold

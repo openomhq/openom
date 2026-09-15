@@ -359,6 +359,12 @@ fn core_commit(state: State<'_, Host>, doc: String) -> Result<(), String> {
     state.commit(&doc).map_err(e)
 }
 
+/// The write-side role pre-check: whether `doc` may commit directly, or must route its edit to a proposal.
+#[tauri::command]
+fn core_can_commit_directly(state: State<'_, Host>, doc: String) -> Result<bool, String> {
+    state.can_commit_directly(&doc).map_err(e)
+}
+
 /// Editor: seal `doc`'s buffered intention as a proposal for a maintainer to review (empty if nothing minted).
 #[tauri::command]
 fn core_propose(state: State<'_, Host>, doc: String) -> Result<Vec<u8>, String> {
@@ -681,6 +687,7 @@ pub fn run() {
             core_bootstrap,
             core_assert_anchor,
             core_commit,
+            core_can_commit_directly,
             core_propose,
             core_approve_proposal,
             core_fold,

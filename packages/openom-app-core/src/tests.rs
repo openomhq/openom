@@ -1079,6 +1079,17 @@ fn an_editor_proposal_is_approved_as_an_attributed_delta() {
 }
 
 #[test]
+fn can_commit_directly_gates_on_the_authors_role() {
+    let s = shared_owner_and_editor();
+    // The owner (Owner role → a moderator) may commit directly; the editor (below Maintainer) must propose.
+    assert!(owner_core(&s).can_commit_directly(), "an owner commits directly");
+    assert!(!editor_core(&s, b"rb").can_commit_directly(), "an editor must route to a proposal");
+    // A solo/unshared core (no membership installed) commits directly — the owner is their own moderator.
+    let solo = core(b"rs", generate_dek().unwrap(), Arc::new(MemoryBlob::new()));
+    assert!(solo.can_commit_directly(), "a solo tree commits directly");
+}
+
+#[test]
 fn approve_refuses_a_forged_proposal() {
     use openom_protocol::v1::Envelope;
     use openom_protocol::Message;

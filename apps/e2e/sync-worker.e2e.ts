@@ -120,7 +120,7 @@ test('app-core: an owner shares a tree and a member joins + verifies through the
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
-test('app-core: an editor proposes an edit and a maintainer approves + rejects through the worker', async ({ page }) => {
+test('app-core: role routes an editor to a proposal a maintainer approves/rejects, owner commits directly', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
 
@@ -129,18 +129,26 @@ test('app-core: an editor proposes an edit and a maintainer approves + rejects t
 
   const r = await page.evaluate(() => (window as any).__syncWorker.proposeApprove());
 
+  // The write-side role pre-check routes by role: the editor cannot commit → submitEdit produced a PROPOSAL;
+  // the owner can → submitEdit committed directly.
+  expect(r.editorCanCommit, 'an editor cannot commit directly').toBe(false);
+  expect(r.editorRouted, "the editor's submitEdit routed to a proposal").toBe(true);
+  expect(r.ownerCanCommit, 'the owner can commit directly').toBe(true);
+  expect(r.ownerCommitted, "the owner's submitEdit committed directly").toBe(true);
   // The editor sealed a proposal (not a committed delta) and it reached the proposals channel.
   expect(r.proposedId, 'the editor sealed + uploaded a proposal').toBeTruthy();
   expect(r.pendingCount, 'the owner sees one pending proposal').toBe(1);
   // The owner verified + committed it as an attributed delta.
   expect(r.committed, 'ops were committed').toBeGreaterThanOrEqual(1);
-  expect(r.ownerPeople, "the editor's proposed person is now live on the owner").toContain('pByEditor');
   expect(r.afterApproveCount, 'the approved proposal was deleted from the channel').toBe(0);
   // Attribution preserved: the committed record's createdBy is the EDITOR (the proposer), not the approver.
   expect(r.anchorCreatedBy, 'createdBy is preserved as the proposer').toBe(r.editorDid);
   // A rejected proposal is discarded without committing.
   expect(r.rejectedId, 'a second proposal was created').toBeTruthy();
   expect(r.afterRejectCount, 'the rejected proposal was deleted from the channel').toBe(0);
+  // Final owner state: the approved editor claim + the owner's own direct commit are live; the reject is not.
+  expect(r.ownerPeopleFinal, "the editor's approved person is live on the owner").toContain('pByEditor');
+  expect(r.ownerPeopleFinal, "the owner's directly-committed person is live").toContain('pByOwner');
   expect(r.ownerPeopleFinal, 'the rejected edit was never committed').not.toContain('pRejected');
   expect(errors, 'no uncaught page errors').toEqual([]);
 });

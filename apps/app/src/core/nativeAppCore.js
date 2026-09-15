@@ -220,6 +220,20 @@ export function createNativeAppCore() {
     setModerators: (docId, dids) => call('core_set_moderators', { doc: docId, moderators: dids }),
 
     // --- collaborative writes: editor propose / maintainer approve (OPE-360) ---
+    /** The write-side role pre-check (UX guard): whether this device may commit directly, or must propose. */
+    canCommitDirectly: (docId) => call('core_can_commit_directly', { doc: docId }),
+
+    /** Submit a pending edit, routing on role: a maintainer (or solo) commits directly; an editor's edit
+     *  becomes a proposal. Returns { committed: true } or { proposed: true, proposal }. */
+    async submitEdit(docId) {
+      if (await call('core_can_commit_directly', { doc: docId })) {
+        await this.commit(docId);
+        return { committed: true };
+      }
+      const proposal = await this.proposeEdit(docId);
+      return { proposed: true, proposal };
+    },
+
     /** Editor: seal the pending intention as a proposal and POST it to the proposals channel for a maintainer
      *  to review. Returns the server-minted `{ id, expiresAt }`, or null if nothing was minted. The ops stay
      *  optimistically applied locally but are not committed until an approval lands. */
