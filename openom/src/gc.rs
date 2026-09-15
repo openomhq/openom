@@ -103,6 +103,16 @@ async fn mark_tree(state: &AppState, tree_id: Uuid, window_secs: i64) -> Result<
         .map_err(internal)?;
     let Some(owner) = owner else { return Ok(0) };
 
+    // The owner's plan history window: raw deltas newer than this survive the reap even below the covered floor
+    // (the change-history feature reads them). 0 (default / free tier) = no retention = reap everything below.
+    let retained_days: i32 = sqlx::query_scalar("SELECT retained_history_days FROM accounts WHERE id = $1")
+        .bind(owner)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?
+        .unwrap_or(0);
+    let retained_secs = f64::from(retained_days) * 86_400.0;
+
     let mut tx = state.db.begin().await.map_err(internal)?;
     // The per-tree lock — shared with the snapshot-PUT ratchet check + the below-floor log write.
     sqlx::query("SELECT 1 FROM trees WHERE id = $1 FOR UPDATE")
@@ -183,11 +193,16 @@ async fn mark_tree(state: &AppState, tree_id: Uuid, window_secs: i64) -> Result<
                             AND split_part(key, '/', 2) = $2
                             AND split_part(key, '/', 3) ~ '^[0-9]+$'
                            THEN split_part(key, '/', 3)::bigint
-                         END) < $3",
+                         END) < $3
+                    -- Retention gate: a below-floor delta INSIDE the plan history window is retained (not marked)
+                    -- for the change-history feature; it is marked only once it ages out. days=0 ⇒ now()-0 ⇒
+                    -- created_at < now() is always true ⇒ no-op (free-tier reap-everything-below-the-floor).
+                    AND created_at < now() - make_interval(secs => $4::double precision)",
             )
             .bind(tree_id)
             .bind(replica)
             .bind(floor_r)
+            .bind(retained_secs)
             .execute(&mut *tx)
             .await
             .map_err(internal)?;

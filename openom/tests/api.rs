@@ -3044,6 +3044,87 @@ async fn gc_sweep_reaps_credits_and_gones() {
     assert_eq!(body_code(&b), "below_gc_floor");
 }
 
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn gc_retains_deltas_within_the_history_window() {
+    // Retention-tier GC (OPE-460): a paid history window keeps raw deltas below the covered floor (so the
+    // change-history feature can read them) instead of reaping them; only deltas aged PAST the window are reaped.
+    let _gc = GC_TEST_LOCK.lock().await;
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+    // A generous paid history window: retain 30 days of raw deltas.
+    sqlx::query("UPDATE accounts SET retained_history_days = 30 WHERE id = $1")
+        .bind(owner)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // Two recent log dots, a head of 2, an in-window frontier, a snapshot covering both (floor advances to 2).
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), b"delta-zero", owner, true)).await;
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rH/1"), b"delta-one", owner, true)).await;
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rH"), b"2", owner, false)).await;
+    send(
+        &app,
+        put_json_as(format!("/v1/trees/{tree}/frontier"), &serde_json::json!({ "frontier": { "rH": 2 } }), owner),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rH", 2)]))],
+        ),
+    )
+    .await;
+
+    // Sweep grace 0: the floor advances to 2, BUT both dots are inside the 30-day window → retained, not reaped.
+    assert_eq!(send(&app, post("/dev/log/gc?deletion_grace_secs=0".into())).await.0, StatusCode::OK, "sweep");
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tree_blob_index WHERE tree_id = $1 AND key LIKE 'log/rH/%'",
+    )
+    .bind(tree)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 2, "in-window deltas are retained below the floor, not reaped");
+    // Still readable (the GET is index-row-authoritative), so the history feature can serve them.
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), owner)).await.0,
+        StatusCode::OK,
+        "a retained (in-window) dot is still served"
+    );
+
+    // Age dot 0 out of the window; re-sweep → only the aged dot reaps, the in-window one survives.
+    sqlx::query("UPDATE tree_blob_index SET created_at = now() - interval '60 days' WHERE tree_id = $1 AND key = 'log/rH/0'")
+        .bind(tree)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(send(&app, post("/dev/log/gc?deletion_grace_secs=0".into())).await.0, StatusCode::OK, "re-sweep");
+    let remaining2: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tree_blob_index WHERE tree_id = $1 AND key LIKE 'log/rH/%'",
+    )
+    .bind(tree)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(remaining2, 1, "the aged-out delta is reaped; the in-window one is retained");
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), owner)).await.0,
+        StatusCode::GONE,
+        "the aged-out (reaped) dot is 410"
+    );
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rH/1"), owner)).await.0,
+        StatusCode::OK,
+        "the still-in-window dot is served"
+    );
+}
+
 /// Build a router whose config has the internal-GC shared secret set (the env var is unset under test), so
 /// the `POST /internal/gc` trigger is enabled and authenticated by it.
 async fn router_with_internal_token(token: &str) -> Router {
