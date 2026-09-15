@@ -184,6 +184,31 @@ impl AppCoreHandle {
         self.inner.commit().map_err(to_js)
     }
 
+    /// Editor path: seal everything minted since the last commit as a `Kind::Proposal` for a Maintainer to
+    /// review, returning the envelope bytes to upload to the proposals channel (`undefined` if nothing was
+    /// minted). Unlike [`commit`](Self::commit) it does NOT append to the log — the ops stay optimistically
+    /// applied locally and become authoritative only when a Maintainer approves.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the batch can't be flushed or sealed.
+    #[wasm_bindgen]
+    pub fn propose(&mut self) -> Result<Option<Vec<u8>>, JsError> {
+        self.inner.propose().map_err(to_js)
+    }
+
+    /// Maintainer path: verify an editor's proposal envelope and, if valid, commit it as an attributed delta
+    /// under this member's authority. Returns the number of ops committed. Refuses (throws) a forged proposal
+    /// (spoofed author / non-member / below-Editor / wrong epoch) or one whose op is attributed to someone
+    /// other than the verified proposer — leaving the proposal on the server for an explicit reject.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the proposal is malformed, fails verification / the attribution cross-check, or
+    /// opening / sealing / appending fails.
+    #[wasm_bindgen(js_name = approveProposal)]
+    pub fn approve_proposal(&mut self, proposal: &[u8]) -> Result<usize, JsError> {
+        self.inner.approve_proposal(proposal).map_err(to_js)
+    }
+
     /// Clear the tree + the local durable store (demo reseed / hard local reset). Keeps the DEK.
     ///
     /// # Errors
