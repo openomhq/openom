@@ -106,6 +106,10 @@ pub async fn create_invite(
     Path(tree_id): Path<Uuid>,
     Json(body): Json<CreateInvite>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Rate-gate per caller-account BEFORE any other work (like POST /trees): invite creation is otherwise a
+    // scriptable DB-load vector beyond the per-tree open cap. A rejected attempt still consumes a token; an
+    // unknown account isn't gated (the authority checks below forbid it anyway).
+    state.meter.charge_create(&state.db, identity.member_id).await?;
     let owner = tree_owner(&state.db, tree_id).await?;
 
     // Field validation up front (fail closed before any authority query).
@@ -456,4 +460,20 @@ pub async fn delete_invite(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Reap consumed + expired invites so `pending_invites` rows don't accumulate: `admit_invite` marks an invite
+/// `admitted` (it no longer deletes it), and expired/lost invites are otherwise inert but never removed.
+/// Physically deletes any invite already `admitted` (consumed) or past its `expiry` (any status). Returns how
+/// many rows were reaped. Driven by the scheduled `/internal/gc` sweep, mirroring the expired-proposals reap.
+///
+/// # Errors
+/// Returns [`ApiError`] if the delete fails.
+pub(crate) async fn sweep_expired_invites(pool: &sqlx::PgPool) -> Result<usize, ApiError> {
+    let res = sqlx::query("DELETE FROM pending_invites WHERE status = 'admitted' OR expiry <= $1")
+        .bind(now_ms())
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(usize::try_from(res.rows_affected()).unwrap_or(usize::MAX))
 }

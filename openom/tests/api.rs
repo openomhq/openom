@@ -3217,3 +3217,217 @@ async fn head_pointer_is_monotonic() {
     // And a further legitimate advance past 5 still works (the guard only blocks going backward).
     assert_eq!(send(&app, put_head("9")).await.0, StatusCode::OK, "advance 5 -> 9");
 }
+
+// -- /invites contract + hardening (OPE-454) --------------------------------------------------------------
+
+/// A base64url (no-pad) 16-byte invite id, from a fresh uuid's bytes.
+fn fresh_invite_id() -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes())
+}
+
+/// A well-formed create-invite body (16-byte id, non-empty pin, 32-byte `meta_mac`, caller-supplied expiry).
+fn invite_body(invite_id: &str, role: &str, engine: &str, expiry_ms: i64) -> Value {
+    serde_json::json!({
+        "invite_id": invite_id,
+        "role": role,
+        "engine": engine,
+        "pin": b64(b"link-secret"),
+        "meta_mac": b64([7u8; 32]),
+        "expiry": expiry_ms,
+    })
+}
+
+fn claim_body(claimer: Uuid) -> Value {
+    serde_json::json!({
+        "member_id": claimer.to_string(),
+        "hpke_public": b64([1u8; 32]),
+        "author_public": b64([2u8; 32]),
+        "tag": b64(b"claim-tag"),
+    })
+}
+
+fn now_ms_test() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn invite_lifecycle_two_accounts() {
+    // The v3 invite contract end to end, across TWO accounts: the owner mints, an invitee fetches meta + claims
+    // (one live claim), the owner reopens the slot and it re-claims, and admit MARKS the invite (never deletes
+    // it -- the joiner still needs /meta to finish). A missing invite is an identical 404.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await; // generous create-token bucket
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let iid = fresh_invite_id();
+    let body = invite_body(&iid, "editor", "chain", now_ms_test() + 3_600_000);
+    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &body, owner)).await;
+    assert_eq!(s, StatusCode::OK, "owner mints an invite");
+
+    // A signed-in invitee fetches the authenticated metadata.
+    let invitee = Uuid::new_v4();
+    let (s, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), invitee)).await;
+    assert_eq!(s, StatusCode::OK, "invitee reads meta");
+    let meta: Value = serde_json::from_slice(&mb).unwrap();
+    assert_eq!(meta["role"], "editor");
+    assert_eq!(meta["engine"], "chain");
+    assert_eq!(meta["status"], "open");
+    // A missing invite is an identical 404 (no distinguishing signal).
+    let (s, _, _) = send(&app, get_as(format!("/v1/invites/{}/meta", fresh_invite_id()), invitee)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "missing invite -> 404");
+
+    // The invitee claims the seat -- and a SECOND claim is refused (one live claim).
+    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "first claim wins");
+    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
+    assert_eq!(s, StatusCode::CONFLICT, "a second claim is refused (one live claim)");
+
+    // The owner REOPENS the slot (claimed -> open) and it can be claimed again.
+    let (s, _, _) = send(&app, post_as(format!("/v1/invites/{iid}/reopen"), owner)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "owner reopens the slot");
+    let (_, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), invitee)).await;
+    assert_eq!(serde_json::from_slice::<Value>(&mb).unwrap()["status"], "open", "reopened -> open");
+    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "the reopened slot re-claims");
+
+    // ADMIT marks the invite admitted but does NOT delete it -- /meta still resolves so the joiner can finish.
+    let (s, _, _) = send(&app, post_as(format!("/v1/invites/{iid}/admit"), owner)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "owner admits");
+    let (s, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), invitee)).await;
+    assert_eq!(s, StatusCode::OK, "admit does not delete -- meta still resolves");
+    assert_eq!(serde_json::from_slice::<Value>(&mb).unwrap()["status"], "admitted");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_invite_enforces_policy_and_role_ceiling() {
+    // Mint authority: the default 'signer' policy admits only owner/co-owner; a Maintainer is refused. And no
+    // signer may mint a role STRONGER than their own (the role ceiling).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    // A Maintainer (role 3) is below owner/co-owner -> the 'signer' policy refuses their mint.
+    let maint = Uuid::new_v4();
+    grant_role(&db, tree, maint, 3).await;
+    let body = invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000);
+    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &body, maint)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a non-signer (Maintainer) cannot mint under the 'signer' policy");
+
+    // A co-owner (role 2) is a signer, but may not mint an OWNER (role 1) -- the role ceiling.
+    let coowner = Uuid::new_v4();
+    grant_role(&db, tree, coowner, 2).await;
+    let over = invite_body(&fresh_invite_id(), "owner", "chain", now_ms_test() + 3_600_000);
+    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &over, coowner)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "may not mint a role stronger than your own");
+    // But the co-owner CAN mint at or below their own rank.
+    let ok = invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000);
+    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &ok, coowner)).await;
+    assert_eq!(s, StatusCode::OK, "a signer mints at/below their own rank");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_invite_clamps_expiry_and_caps_open() {
+    // The expiry is clamped to a bounded max TTL (no immortal invites), and open invites per tree are capped
+    // (DB-bloat / enumeration surface).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 100_000).await; // generous bucket for many creates
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    // A wildly-future expiry is clamped down to <= now + the max TTL (90 days).
+    let far = now_ms_test() + 10_000 * 24 * 3600 * 1000; // ~27 years out
+    let iid = fresh_invite_id();
+    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&iid, "editor", "chain", far), owner)).await;
+    let (_, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), owner)).await;
+    let stored = serde_json::from_slice::<Value>(&mb).unwrap()["expiry"].as_i64().unwrap();
+    let max_ttl_ms: i64 = 90 * 24 * 3600 * 1000;
+    assert!(stored <= now_ms_test() + max_ttl_ms + 60_000, "expiry clamped to the max TTL, not the caller's value");
+
+    // The per-tree open-invite cap: fill to the cap, then the next mint is refused (this invite already used 1).
+    let cap = 50;
+    for _ in 1..cap {
+        let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+        assert_eq!(s, StatusCode::OK, "mint up to the cap");
+    }
+    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "the mint past the open-invite cap is refused");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_invite_rate_limited_per_account() {
+    // The per-account create bucket (OPE-454): invite creation spends a token like create-tree, so it isn't a
+    // scriptable DB-load vector. A tiny bucket lets one mint through, then 429s.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 0.001, 1).await; // burst 1, negligible refill
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    assert_eq!(s, StatusCode::OK, "the first mint spends the single token");
+    let (s, h, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "the empty bucket 429s the next mint");
+    assert!(h.contains_key("retry-after"), "429 carries Retry-After");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn internal_gc_reaps_admitted_and_expired_invites() {
+    // The scheduled sweep reaps CONSUMED (admitted) + EXPIRED invites so `pending_invites` doesn't accumulate
+    // (admit marks, never deletes). Serialized with other GC tests (a global sweep).
+    let _gc = GC_TEST_LOCK.lock().await;
+    let token = "invite-gc-token";
+    let app = router_with_internal_token(token).await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    // Invite A -> claim -> admit (consumed, status='admitted').
+    let a = fresh_invite_id();
+    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&a, "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    let invitee = Uuid::new_v4();
+    send(&app, put_json_as(format!("/v1/invites/{a}/claim"), &claim_body(invitee), invitee)).await;
+    send(&app, post_as(format!("/v1/invites/{a}/admit"), owner)).await;
+
+    // Invite B -> backdate its expiry so it's expired.
+    let b = fresh_invite_id();
+    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&b, "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    sqlx::query("UPDATE pending_invites SET expiry = 0 WHERE invite_id = $1")
+        .bind(&b)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // Run the scheduled sweep -- both A (admitted) and B (expired) are reaped.
+    let (s, _, gb) = send(&app, internal_gc_req(Some(token), &serde_json::json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "scheduled gc runs");
+    assert!(
+        serde_json::from_slice::<Value>(&gb).unwrap()["invites"]["expired"].as_u64().unwrap() >= 2,
+        "swept >=2 invites (the admitted one + the expired one)"
+    );
+    for id in [&a, &b] {
+        let (s, _, _) = send(&app, get_as(format!("/v1/invites/{id}/meta"), invitee)).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "reaped invite is gone");
+    }
+}

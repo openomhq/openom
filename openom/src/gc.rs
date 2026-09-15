@@ -413,6 +413,10 @@ pub async fn internal_gc(
     let (media_deleted, media_expired, proposals_expired) =
         crate::media::sweep_with_defaults(&state, p.tombstone_grace_secs, p.pending_expiry_secs).await?;
 
+    // Reap consumed (admitted) + expired invites so `pending_invites` doesn't accumulate (admit marks, never
+    // deletes). Independent of the log-GC floor, like the media/proposals reaps above.
+    let invites_expired = crate::invites::sweep_expired_invites(&state.db).await?;
+
     let batch = match p.max_trees {
         Some(n) if n > 0 => n,
         _ => DEFAULT_MAX_TREES_PER_RUN,
@@ -433,6 +437,7 @@ pub async fn internal_gc(
         media_deleted,
         media_pending_expired = media_expired,
         proposals_expired,
+        invites_expired,
         batch,
         "scheduled GC sweep"
     );
@@ -443,6 +448,7 @@ pub async fn internal_gc(
             "pending_expired": media_expired,
             "proposals_expired": proposals_expired,
         },
+        "invites": { "expired": invites_expired },
     }))
     .into_response())
 }
