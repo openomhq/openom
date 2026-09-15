@@ -120,6 +120,31 @@ test('app-core: an owner shares a tree and a member joins + verifies through the
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: an editor proposes an edit and a maintainer approves + rejects through the worker', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.proposeApprove());
+
+  // The editor sealed a proposal (not a committed delta) and it reached the proposals channel.
+  expect(r.proposedId, 'the editor sealed + uploaded a proposal').toBeTruthy();
+  expect(r.pendingCount, 'the owner sees one pending proposal').toBe(1);
+  // The owner verified + committed it as an attributed delta.
+  expect(r.committed, 'ops were committed').toBeGreaterThanOrEqual(1);
+  expect(r.ownerPeople, "the editor's proposed person is now live on the owner").toContain('pByEditor');
+  expect(r.afterApproveCount, 'the approved proposal was deleted from the channel').toBe(0);
+  // Attribution preserved: the committed record's createdBy is the EDITOR (the proposer), not the approver.
+  expect(r.anchorCreatedBy, 'createdBy is preserved as the proposer').toBe(r.editorDid);
+  // A rejected proposal is discarded without committing.
+  expect(r.rejectedId, 'a second proposal was created').toBeTruthy();
+  expect(r.afterRejectCount, 'the rejected proposal was deleted from the channel').toBe(0);
+  expect(r.ownerPeopleFinal, 'the rejected edit was never committed').not.toContain('pRejected');
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: an owner removes a member through the worker — rotate, re-unlock, lock out', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

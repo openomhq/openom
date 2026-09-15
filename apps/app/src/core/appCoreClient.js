@@ -113,6 +113,12 @@ export function remoteTransport(remoteStore) {
     // ACL for collaboration features — never the security boundary (the keyring is).
     getAccess: (treeUuid) => remoteStore.getAccess(treeUuid),
     putAccess: (treeUuid, body) => remoteStore.putAccess(treeUuid, body),
+    // The proposals channel (OPE-360): an editor POSTs a sealed proposal bundle; a maintainer lists the open
+    // ones to review and resolves each (approve → commit + delete / reject → delete) by id. The payload is
+    // opaque — the worker verifies + re-authors it; the server never folds it into tree state.
+    createProposal: (treeUuid, sealedBytes) => remoteStore.createProposal(treeUuid, sealedBytes),
+    listProposals: (treeUuid) => remoteStore.listProposals(treeUuid),
+    deleteProposal: (treeUuid, proposalId) => remoteStore.deleteProposal(treeUuid, proposalId),
   };
 }
 

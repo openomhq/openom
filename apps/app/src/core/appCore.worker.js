@@ -1062,16 +1062,38 @@ const api = {
     return transport.createProposal(c.treeKey, bytes);
   },
 
-  /** Maintainer path: verify a proposal (already fetched via listProposals) and commit it as an attributed
-   *  delta under this member's authority, then persist + sync so peers receive it. Returns the number of ops
-   *  committed. Throws (leaving the proposal on the server) if the proposal is forged or misattributed — the
-   *  caller deletes it only on success. */
-  async approveProposal(docId, proposalBytes) {
+  /** Maintainer path: the open proposals to review, as `[{ id, proposer, sizeBytes, createdAt, expiresAt }]`
+   *  (the opaque payload is not surfaced — approve/reject act by id). Empty when there's no transport. */
+  async pendingProposals(docId) {
+    const transport = transportFor(docId);
+    if (!transport) return [];
+    const list = await transport.listProposals(core(docId).treeKey);
+    return list.map(({ id, proposer, sizeBytes, createdAt, expiresAt }) => ({
+      id, proposer, sizeBytes, createdAt, expiresAt,
+    }));
+  },
+
+  /** Maintainer path: verify proposal `proposalId` and commit it as an attributed delta under this member's
+   *  authority, then delete it from the channel and sync so peers receive the delta. Returns the number of ops
+   *  committed. A forged / misattributed proposal throws and is left on the server (never deleted). */
+  async approveProposal(docId, proposalId) {
+    const transport = transportFor(docId);
+    if (!transport) throw new Error('attach a transport before approving');
     const c = core(docId);
-    const committed = c.handle.approveProposal(proposalBytes); // throws on a forged / misattributed proposal
+    const p = (await transport.listProposals(c.treeKey)).find((x) => x.id === proposalId);
+    if (!p) throw new Error('proposal not found');
+    const committed = c.handle.approveProposal(p.payload); // throws on a forged / misattributed proposal → no delete
     await persistBlobs(c);
-    if (transportFor(docId)) await syncData(c);
+    await transport.deleteProposal(c.treeKey, proposalId); // committed → resolve the proposal
+    await syncData(c);
     return committed;
+  },
+
+  /** Reject a proposal (maintainer, or the proposer): delete it from the channel without committing. */
+  async rejectProposal(docId, proposalId) {
+    const transport = transportFor(docId);
+    if (!transport) throw new Error('attach a transport before rejecting');
+    await transport.deleteProposal(core(docId).treeKey, proposalId);
   },
 
   // --- reads --------------------------------------------------------------------------------------

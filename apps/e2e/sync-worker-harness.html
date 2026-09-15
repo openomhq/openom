@@ -58,6 +58,8 @@
       // The advisory membership summary (OPE-293): a faithful in-memory stand-in for the server's /access —
       // generation CAS + an unchanged-check, in the CLIENT shape RemoteStore.getAccess/putAccess use.
       let access = null; // { members: [{memberId, role}], generation, basis }
+      const proposals = new Map(); // proposalId -> { id, proposer, sizeBytes, createdAt, expiresAt, payload }
+      let proposalSeq = 0;
       const canonAccess = (members, basis) => JSON.stringify({
         m: [...members].map((x) => ({ memberId: x.memberId, role: x.role }))
           .sort((a, b) => (a.memberId < b.memberId ? -1 : a.memberId > b.memberId ? 1 : 0)),
@@ -118,6 +120,24 @@
           const generation = (cur ?? 0) + 1;
           access = { members: members.map((m) => ({ ...m })), generation, basis: [...basis] };
           return { generation, unchanged: false };
+        },
+        // The proposals channel (OPE-360): an in-memory stand-in for the server's /proposals, in the CLIENT
+        // shape RemoteStore.createProposal/listProposals/deleteProposal use. `proposer` is display metadata (the
+        // real server derives it from the authenticated POST); approve verifies the payload cryptographically.
+        async createProposal(_tree, sealedBytes) {
+          proposalSeq += 1;
+          const id = `prop-${proposalSeq}`;
+          proposals.set(id, {
+            id, proposer: 'acct-member', sizeBytes: sealedBytes.length,
+            createdAt: '1970-01-01T00:00:00Z', expiresAt: '2999-01-01T00:00:00Z', payload: sealedBytes,
+          });
+          return { id, expiresAt: '2999-01-01T00:00:00Z' };
+        },
+        async listProposals(_tree) {
+          return [...proposals.values()].map((p) => ({ ...p, payload: p.payload }));
+        },
+        async deleteProposal(_tree, id) {
+          proposals.delete(id);
         },
         _access() {
           return access; // { members, generation, basis } or null — for the harness assertions
@@ -339,6 +359,77 @@
           serverKeyringHead: (await transport.readKeyring(ownerDoc, 1)).head,
           // OPE-293: after the share, the owner's addMember asserted the resolved membership to /access.
           access: transport._access(),
+        };
+      },
+
+      // Editor propose → maintainer approve through the real worker (OPE-360): an owner shares a tree with an
+      // EDITOR, who cannot commit directly (a delta needs Maintainer) so mints + PROPOSES. The owner lists the
+      // pending proposal, approves it (verify → commit as an attributed delta → delete → sync), and a second
+      // proposal is REJECTED. Proves the whole App wiring: worker propose/approve/reject over the transport's
+      // proposals channel, attribution preserved (createdBy = the editor), and reject discards without committing.
+      async proposeApprove() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(9);
+        const ownerDoc = `prop-owner-${crypto.randomUUID()}`;
+        const memberDoc = `prop-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        // Owner provisions + shares the tree with an editor; the editor joins via the genesis-walk.
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const pin = await owner.keyringHash(ownerDoc);
+
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
+          newMemberId: 'acct-member', role: 'editor',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
+        });
+
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        const joined = await member.joinAsMember({
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+        });
+        await member.syncNow(memberDoc); // pull the shared base
+
+        // The editor mints a claim and PROPOSES it (they cannot commit — a delta needs Maintainer).
+        await member.assertAnchor(memberDoc, 'pByEditor', PERSON);
+        await member.assertClaim(memberDoc, 'pByEditor', NAME, nameJson('Grace'));
+        const proposed = await member.proposeEdit(memberDoc); // { id, expiresAt }
+
+        // The owner reviews the queue and APPROVES it → committed as an attributed delta, then deleted.
+        const pending = await owner.pendingProposals(ownerDoc);
+        const committed = await owner.approveProposal(ownerDoc, pending[0].id);
+        const ownerPeople = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+        const afterApprove = await owner.pendingProposals(ownerDoc); // emptied by the delete
+        const anchor = JSON.parse(await owner.liveRecords(ownerDoc)).find((r) => r.id === 'pByEditor');
+
+        // A SECOND proposal the owner REJECTS — discarded without committing.
+        await member.assertAnchor(memberDoc, 'pRejected', PERSON);
+        const rejected = await member.proposeEdit(memberDoc);
+        await owner.rejectProposal(ownerDoc, rejected.id);
+        const afterReject = await owner.pendingProposals(ownerDoc);
+        const ownerPeopleFinal = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+
+        return {
+          proposedId: proposed?.id ?? null,
+          pendingCount: pending.length,
+          committed,
+          ownerPeople,
+          afterApproveCount: afterApprove.length,
+          anchorCreatedBy: anchor?.createdBy ?? null,
+          editorDid: joined.didKey,
+          rejectedId: rejected?.id ?? null,
+          afterRejectCount: afterReject.length,
+          ownerPeopleFinal,
         };
       },
 

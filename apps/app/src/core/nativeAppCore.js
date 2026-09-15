@@ -230,10 +230,35 @@ export function createNativeAppCore() {
       if (!transport) throw makeError('internal', { cause: `proposeEdit: no transport attached for ${docId}` });
       return transport.createProposal(treeKeys.get(docId), sealed);
     },
-    /** Maintainer: verify + commit a proposal (fetched via listProposals) as an attributed delta under this
-     *  member's authority; returns the number of ops committed. Throws on a forged/misattributed proposal. */
-    approveProposal: (docId, proposalBytes) =>
-      call('core_approve_proposal', { doc: docId, proposal: bytes(proposalBytes) }),
+    /** Maintainer: the open proposals to review, as [{ id, proposer, sizeBytes, createdAt, expiresAt }]. */
+    async pendingProposals(docId) {
+      const transport = transports.get(docId);
+      if (!transport) return [];
+      const list = await transport.listProposals(treeKeys.get(docId));
+      return list.map(({ id, proposer, sizeBytes, createdAt, expiresAt }) => ({
+        id, proposer, sizeBytes, createdAt, expiresAt,
+      }));
+    },
+
+    /** Maintainer: verify proposal `proposalId` and commit it as an attributed delta, then delete it from the
+     *  channel. Returns the number of ops committed. Throws on a forged/misattributed proposal (not deleted). */
+    async approveProposal(docId, proposalId) {
+      const transport = transports.get(docId);
+      if (!transport) throw makeError('internal', { cause: `approveProposal: no transport attached for ${docId}` });
+      const treeKey = treeKeys.get(docId);
+      const p = (await transport.listProposals(treeKey)).find((x) => x.id === proposalId);
+      if (!p) throw makeError('internal', { cause: `approveProposal: proposal ${proposalId} not found` });
+      const committed = await call('core_approve_proposal', { doc: docId, proposal: bytes(p.payload) });
+      await transport.deleteProposal(treeKey, proposalId);
+      return committed;
+    },
+
+    /** Reject a proposal (maintainer, or the proposer): delete it from the channel without committing. */
+    async rejectProposal(docId, proposalId) {
+      const transport = transports.get(docId);
+      if (!transport) throw makeError('internal', { cause: `rejectProposal: no transport attached for ${docId}` });
+      return transport.deleteProposal(treeKeys.get(docId), proposalId);
+    },
 
     // --- reads (JSON strings the web code JSON.parses, matching the wasm veneer) ---
     project: (docId) => call('core_project', { doc: docId }),
