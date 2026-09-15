@@ -184,6 +184,17 @@ impl AppCoreHandle {
         self.inner.commit().map_err(to_js)
     }
 
+    /// Open a historical delta envelope to its op-batch JSON (the decrypted change) for the change-history
+    /// feed. Throws if the envelope can't be opened (an epoch this member can't reach) — the caller renders it
+    /// as an un-viewable change.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the envelope is out of scope, names an unreachable epoch, or fails to open.
+    #[wasm_bindgen(js_name = openHistoryDelta)]
+    pub fn open_history_delta(&self, envelope: &[u8]) -> Result<String, JsError> {
+        self.inner.open_history_delta(envelope).map_err(to_js)
+    }
+
     /// The write-side role pre-check (a UX guard): whether this device may commit directly (solo, or a
     /// current Maintainer+) or must route its edit to [`propose`](Self::propose) (an Editor/Viewer on a
     /// shared tree).

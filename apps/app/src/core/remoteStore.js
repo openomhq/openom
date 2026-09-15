@@ -549,6 +549,38 @@ export class RemoteStore {
     }));
   }
 
+  /**
+   * The change-history feed (OPE-461): per-delta metadata over the retained log objects, paged by the `seq`
+   * cursor. Returns `{ entries: [{ memberId, replica, counter, size, createdAt, seq }], nextCursor }`. The
+   * sealed delta bytes are fetched separately via `blobGet` and opened by the core — the server sees only
+   * metadata.
+   */
+  async getHistory(id, { since = 0, limit = null } = {}) {
+    const qs = new URLSearchParams();
+    if (since) qs.set('since', String(since));
+    if (limit != null) qs.set('limit', String(limit));
+    const q = qs.toString() ? `?${qs}` : '';
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/history${q}`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
+    const b = await res.json();
+    return {
+      entries: (b.entries ?? []).map((e) => ({
+        memberId: e.member_id,
+        replica: e.replica,
+        counter: e.counter,
+        size: e.size,
+        createdAt: e.created_at,
+        seq: e.seq,
+      })),
+      nextCursor: b.next_cursor ?? null,
+    };
+  }
+
   /** Maintainer (any proposal) or the proposer (own): resolve/withdraw a proposal. Idempotent. */
   async deleteProposal(id, proposalId) {
     let res;

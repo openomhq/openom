@@ -1515,6 +1515,15 @@ impl<St: VaultStore> AppCoreHost<St> {
         self.with_core(doc, |c| Ok(c.commit()?))
     }
 
+    /// Open a historical delta envelope to its op-batch JSON (the decrypted change) for the change-history feed.
+    /// Errors if the epoch is unreachable — the caller renders it as an un-viewable change.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] if the envelope can't be opened.
+    pub fn open_history_delta(&self, doc: &str, envelope: &[u8]) -> Result<String, HostError> {
+        self.with_core(doc, |c| Ok(c.open_history_delta(envelope)?))
+    }
+
     /// The write-side role pre-check (a UX guard): whether `doc` may commit directly (solo, or a current
     /// Maintainer+) or must route its edit to a [`propose`](Self::propose) (an Editor/Viewer on a shared tree).
     ///

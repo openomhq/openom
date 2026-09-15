@@ -119,6 +119,9 @@ export function remoteTransport(remoteStore) {
     createProposal: (treeUuid, sealedBytes) => remoteStore.createProposal(treeUuid, sealedBytes),
     listProposals: (treeUuid) => remoteStore.listProposals(treeUuid),
     deleteProposal: (treeUuid, proposalId) => remoteStore.deleteProposal(treeUuid, proposalId),
+    // The change-history feed (OPE-461): per-delta metadata over the retained log objects; the core fetches +
+    // opens the sealed deltas via blobGet + the sealer to render the activity/diff view on demand.
+    getHistory: (treeUuid, opts) => remoteStore.getHistory(treeUuid, opts),
   };
 }
 

@@ -176,6 +176,24 @@ for (const engine of ['chain', 'dag'] as const) {
   });
 }
 
+test('app-core: change-history feed decrypts each delta into renderable records through the worker', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.changeHistory());
+
+  // The feed returned at least the one committed change, fully decrypted (no un-viewable entries on the own path).
+  expect(r.count, 'the committed delta appears in the history feed').toBeGreaterThanOrEqual(1);
+  expect(r.allViewable, 'the device can decrypt its own history').toBe(true);
+  expect(r.author, 'each change carries an author').toBeTruthy();
+  // The decrypted op-batch carries the minted records — the anchor pA is among them.
+  expect(r.ids, "the decrypted change includes the minted anchor's id").toContain('pA');
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: an owner removes a member through the worker — rotate, re-unlock, lock out', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

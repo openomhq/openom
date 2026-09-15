@@ -274,6 +274,33 @@ export function createNativeAppCore() {
       return transport.deleteProposal(treeKeys.get(docId), proposalId);
     },
 
+    /** The change-history activity feed: per-change records `{ author, createdAt, replica, counter, size,
+     *  viewable, ops }`. The host decrypts each retained delta; an unreachable-epoch delta is viewable: false. */
+    async history(docId, opts = {}) {
+      const transport = transports.get(docId);
+      if (!transport) return { entries: [], nextCursor: null };
+      const treeKey = treeKeys.get(docId);
+      const feed = await transport.getHistory(treeKey, opts);
+      const entries = [];
+      for (const e of feed.entries) {
+        let ops = null;
+        let viewable = false;
+        try {
+          const sealed = u8(await transport.blobGet(`${treeKey}/log/${e.replica}/${e.counter}`));
+          if (sealed && sealed.length) {
+            ops = JSON.parse(await call('core_open_history_delta', { doc: docId, envelope: bytes(sealed) }));
+            viewable = true;
+          }
+        } catch {
+          /* reaped, or an epoch this member can't reach → an un-viewable change */
+        }
+        entries.push({
+          author: e.memberId, createdAt: e.createdAt, replica: e.replica, counter: e.counter, size: e.size, viewable, ops,
+        });
+      }
+      return { entries, nextCursor: feed.nextCursor };
+    },
+
     // --- reads (JSON strings the web code JSON.parses, matching the wasm veneer) ---
     project: (docId) => call('core_project', { doc: docId }),
     oplog: (docId) => call('core_oplog', { doc: docId }),

@@ -365,6 +365,12 @@ fn core_can_commit_directly(state: State<'_, Host>, doc: String) -> Result<bool,
     state.can_commit_directly(&doc).map_err(e)
 }
 
+/// Open a historical delta envelope to its op-batch JSON (the decrypted change) for the change-history feed.
+#[tauri::command]
+fn core_open_history_delta(state: State<'_, Host>, doc: String, envelope: Vec<u8>) -> Result<String, String> {
+    state.open_history_delta(&doc, &envelope).map_err(e)
+}
+
 /// Editor: seal `doc`'s buffered intention as a proposal for a maintainer to review (empty if nothing minted).
 #[tauri::command]
 fn core_propose(state: State<'_, Host>, doc: String) -> Result<Vec<u8>, String> {
@@ -688,6 +694,7 @@ pub fn run() {
             core_assert_anchor,
             core_commit,
             core_can_commit_directly,
+            core_open_history_delta,
             core_propose,
             core_approve_proposal,
             core_fold,

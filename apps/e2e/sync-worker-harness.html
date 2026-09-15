@@ -77,6 +77,26 @@
         async blobGet(key) {
           return blobs.get(key) ?? null;
         },
+        // The change-history feed (OPE-461): derived from the stored log objects. The fake has no member auth,
+        // so it stamps a placeholder author (the real server records the authenticated uploader); the WORKER
+        // half under test is the fetch + DECRYPT of each delta, not the server-side attribution.
+        async getHistory(tree, { since = 0, limit = null } = {}) {
+          // Return the CLIENT shape (like RemoteStore.getHistory), since this fake stands in for the whole transport.
+          const entries = [];
+          let seq = 0;
+          for (const [key, bytes] of blobs) {
+            const m = key.match(new RegExp(`^${tree}/log/([^/]+)/(\\d+)$`));
+            if (!m) continue;
+            seq += 1;
+            if (seq <= since) continue;
+            entries.push({
+              memberId: 'acct-owner', replica: m[1], counter: Number(m[2]),
+              size: bytes.length, createdAt: '1970-01-01T00:00:00Z', seq,
+            });
+            if (limit && entries.length >= limit) break;
+          }
+          return { entries, nextCursor: entries.length ? entries[entries.length - 1].seq : null };
+        },
         // `pointer` (heads/snapshot) overwrites; an immutable log object is written only if absent (idempotent
         // re-push is a no-op), mirroring R2 If-None-Match.
         async blobPut(key, bytes, pointer, covered) {
@@ -500,6 +520,26 @@
           memberSees: proj.map((p) => p.id),
           sawPreShare: proj.some((p) => p.id === 'pPreShare'),
           preShareNames: proj.find((p) => p.id === 'pPreShare')?.names?.length ?? 0,
+        };
+      },
+
+      // Change-history read (OPE-463): a device mints + commits, pushes the delta, then history() fetches the
+      // feed and DECRYPTS each delta through the core — returning per-change records the UI renders directly.
+      async changeHistory() {
+        const transport = makeTransport();
+        const a = await openDevice(spawnWorker(), 0xc1, transport);
+        await a.assertAnchor(DOC, 'pA', PERSON);
+        await a.assertClaim(DOC, 'pA', NAME, nameJson('Ada'));
+        await a.commit(DOC);
+        await a.syncNow(DOC); // push the delta
+
+        const hist = await a.history(DOC);
+        const ops = hist.entries.flatMap((e) => e.ops ?? []);
+        return {
+          count: hist.entries.length,
+          allViewable: hist.entries.every((e) => e.viewable),
+          author: hist.entries[0]?.author ?? null,
+          ids: ops.map((it) => it.id).filter(Boolean),
         };
       },
 

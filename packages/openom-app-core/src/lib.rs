@@ -553,6 +553,19 @@ impl<S: BlobStore> AppCore<S> {
         Ok(self.client.open_media(sealed)?)
     }
 
+    /// Open a historical `Kind::Delta` envelope to its op-batch — the decrypted change, for the change-history
+    /// feed. The plaintext IS the sealed op-batch (a JSON array of channel items, `openom-data-crdt`'s codec),
+    /// returned as-is for the caller to render; the AEAD open already authenticated it. Fails if the envelope
+    /// can't be opened — an epoch this member can't reach (before they joined, or rotated away) — which the
+    /// caller surfaces as an un-viewable change, not an error.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if the envelope is out of scope, names an unreachable epoch, or fails to open.
+    pub fn open_history_delta(&self, envelope: &[u8]) -> Result<String, CoreError> {
+        let plaintext = self.client.try_open_delta(envelope)?;
+        Ok(String::from_utf8_lossy(&plaintext).into_owned())
+    }
+
     /// Retain the member's epoch-adopt secret (OPE-393) — set by the wasm veneer at a MEMBER unlock so the
     /// running core can adopt a later epoch on sync. Never exposed to JS.
     pub fn set_member_epoch_secret(&mut self, secret: openom_vault::sharing::MemberEpochSecret) {

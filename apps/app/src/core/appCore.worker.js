@@ -1133,6 +1133,35 @@ const api = {
     await transport.deleteProposal(core(docId).treeKey, proposalId);
   },
 
+  /** The change-history activity feed: per-change records the UI renders directly — `{ author, createdAt,
+   *  replica, counter, size, viewable, ops }`. For each retained delta the core fetches the sealed bytes and
+   *  DECRYPTS them (its ops as JSON); a delta under an epoch this member can't reach is surfaced as
+   *  `viewable: false` (ops null), not an error. `{ since, limit }` page the feed. */
+  async history(docId, opts = {}) {
+    const transport = transportFor(docId);
+    if (!transport) return { entries: [], nextCursor: null };
+    const c = core(docId);
+    const feed = await transport.getHistory(c.treeKey, opts);
+    const entries = [];
+    for (const e of feed.entries) {
+      let ops = null;
+      let viewable = false;
+      try {
+        const sealed = await transport.blobGet(`${c.treeKey}/log/${e.replica}/${e.counter}`);
+        if (sealed) {
+          ops = JSON.parse(c.handle.openHistoryDelta(sealed)); // decrypt + decode the op-batch
+          viewable = true;
+        }
+      } catch {
+        /* reaped, or an epoch this member can't reach → an un-viewable change */
+      }
+      entries.push({
+        author: e.memberId, createdAt: e.createdAt, replica: e.replica, counter: e.counter, size: e.size, viewable, ops,
+      });
+    }
+    return { entries, nextCursor: feed.nextCursor };
+  },
+
   // --- reads --------------------------------------------------------------------------------------
 
   project(docId) {
