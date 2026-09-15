@@ -167,8 +167,12 @@ pub struct MemberToAdd {
 /// peers + the joiner can pull it). The owner's running core has already been re-opened in place on the shared
 /// keyring (so its sealer now signs). Publish keyring FIRST, then the advisory summary (OPE-293 add ordering).
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AddedMember {
     pub keyring: Vec<u8>,
+    /// Whether this add flipped solo→shared — the caller seals + pushes a signed base of the owner's pre-share
+    /// history on the first share so a joiner can bootstrap the whole tree (OPE-360 §5).
+    pub first_share: bool,
 }
 
 /// The result of [`AppCoreHost::remove_member`] — the opaque ROTATED keyring revision for the webview to
@@ -634,6 +638,9 @@ impl<St: VaultStore> AppCoreHost<St> {
             .load_keyring(doc)
             .map_err(HostError::Store)?
             .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        // Whether THIS add flips solo→shared (read from the OLD keyring, before the rotation) — so the owner's
+        // own pre-share history is folded as trusted BEFORE the §B3 gate goes live (OPE-360 §5).
+        let first_share = !openom_vault::sharing::keyring_has_been_shared(self.engine, &keyring)?;
         let floor = openom_vault::sharing::chain_watermark_floor(
             &self.store.watermark(doc).map_err(HostError::Store)?,
         );
@@ -669,15 +676,23 @@ impl<St: VaultStore> AppCoreHost<St> {
         )?;
         let mut new_core = re.core;
         let resolver = openom_vault::resolver_from(self.engine, &added.keyring, &retained)?;
-        new_core.set_membership(resolver)?;
-        new_core.bootstrap()?;
+        if first_share {
+            // Fold the owner's OWN pre-share history (trusted; solo-era, their own device log) BEFORE the §B3
+            // gate goes live — else the re-fold rejects the owner's own unsigned solo entries and loses their
+            // tree (and the first-share base seal would snapshot nothing). Subsequent re-shares stay gated.
+            new_core.bootstrap()?;
+            new_core.set_membership(resolver)?;
+        } else {
+            new_core.set_membership(resolver)?;
+            new_core.bootstrap()?;
+        }
         // Candidate good → NOW persist retention + the keyring (the sole commit point).
         self.retain_revision(doc, new_rev, &added.keyring)?;
         self.store
             .commit_keyring(doc, &added.keyring, &added.watermark)
             .map_err(HostError::Store)?;
         *guard = new_core; // in-place swap under the held lock
-        Ok(AddedMember { keyring: added.keyring })
+        Ok(AddedMember { keyring: added.keyring, first_share })
     }
 
     /// Remove a member (owner action) with FORWARD-SECURE revocation: pin the departing member's landed history

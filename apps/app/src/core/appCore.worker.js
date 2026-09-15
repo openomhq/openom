@@ -40,6 +40,7 @@ import init, {
   recoveryConfirmed as wasmRecoveryConfirmed,
   keyringSummary as wasmKeyringSummary,
   keyringCovers as wasmKeyringCovers,
+  keyringHasBeenShared as wasmKeyringHasBeenShared,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
@@ -687,6 +688,9 @@ const api = {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const eng = head.engine || engine;
+    // Whether THIS add flips solo→shared (the first member) — so we seal a base only on that transition, never
+    // on a re-share. Read from the OLD keyring, before the add rotates it.
+    const firstShare = !wasmKeyringHasBeenShared(eng, head.bytes);
     // Anti-rollback floor = the CURRENT keyring revision (from the stored watermark), computed here rather than
     // taken from the caller — matching the native host. It used to default to 0 (no floor at all). OPE-443.
     const minRevision = chainRevision(await loadWatermark(docId));
@@ -707,13 +711,29 @@ const api = {
     try {
       await saveWatermark(docId, re.watermark);
       const nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
-      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
-      await installMembership(nc, docId, eng, change.keyring); // the tree is now shared → verify goes live
-      await hydrate(nc);
+      if (firstShare) {
+        // First share (solo→shared): fold the owner's OWN pre-share history FIRST — it is trusted (their own
+        // device log, authored solo), so it must not be dropped by the §B3 gate — THEN install the gate for
+        // subsequent (peer) folds. The base seal below compacts this into a member-signed snapshot (OPE-360 §5).
+        await hydrate(nc);
+        await installMembership(nc, docId, eng, change.keyring);
+      } else {
+        // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
+        await installMembership(nc, docId, eng, change.keyring); // the tree is now shared → verify goes live
+        await hydrate(nc);
+      }
       try { c.handle.free(); } catch { /* old handle already gone */ }
       cores.set(docId, nc);
     } finally {
       re.free();
+    }
+    // First-share ordered base seal (OPE-360 §5). A solo owner's pre-share history is UNSIGNED, so a member
+    // joining a now-shared tree rejects those raw deltas (shared + unattributed → Reject) and would see an EMPTY
+    // tree until the owner next compacts. Seal + push a member-SIGNED snapshot of the current state BEFORE
+    // publishing the keyring, so by the time a join can read the keyring the authenticated base is already on the
+    // server. Only on the solo→shared transition, and only if a transport is attached (else a later tick reseals).
+    if (firstShare && transportFor(docId)) {
+      try { await syncData(core(docId), 1); } catch { /* best-effort; the next tick re-seals + pushes */ }
     }
     // Publish the shared keyring so a member's join can fetch it. Best-effort: if no transport is attached yet,
     // the owner publishes on the next explicit publish / sync — the local state stands. Chain publishes the

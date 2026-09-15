@@ -153,6 +153,29 @@ test('app-core: role routes an editor to a proposal a maintainer approves/reject
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+for (const engine of ['chain', 'dag'] as const) {
+  test(`app-core: a joining member sees the owner's pre-share history via the first-share base seal (${engine})`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+
+    await page.goto('/e2e/sync-worker-harness.html');
+    await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+    const r = await page.evaluate((eng) => (window as any).__syncWorker.preShareVisibility(eng), engine);
+
+    // The owner keeps their OWN pre-share history through the solo→shared re-fold (it is folded as trusted
+    // before the §B3 gate goes live — not dropped as an unsigned forgery).
+    expect(r.ownerSeesAfterShare, `owner keeps their pre-share tree on ${engine}`).toContain('pPreShare');
+    // The first-share base seal pushed a signed snapshot carrying that state.
+    expect(r.snapAfterShare, 'a base snapshot was sealed + pushed at first share').toBe(true);
+    // The joining member sees the owner's pre-share history + its name claim — authenticated via the signed
+    // base, NOT lost to the shared-tree unsigned-reject rule.
+    expect(r.sawPreShare, `member sees the owner's pre-share person on ${engine}`).toBe(true);
+    expect(r.preShareNames, 'and its pre-share name claim').toBeGreaterThan(0);
+    expect(errors, 'no uncaught page errors').toEqual([]);
+  });
+}
+
 test('app-core: an owner removes a member through the worker — rotate, re-unlock, lock out', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

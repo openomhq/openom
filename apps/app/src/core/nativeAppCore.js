@@ -337,6 +337,12 @@ export function createNativeAppCore() {
         member: { memberId: newMemberId, role, authorPublicKey: bytes(memberAuthorPublic), hpkePublicKey: bytes(memberHpkePublic) },
       });
       await publishAfterMembership(docId, false); // add: keyring-first, then advisory
+      // First-share ordered base seal (OPE-360 §5): on the solo→shared transition, force a compacting data sync
+      // so the owner's pre-share history is sealed into a member-signed base snapshot + pushed — else a joiner
+      // rejects the raw unsigned pre-share deltas and sees an empty tree. Best-effort: a later tick re-seals.
+      if (out.firstShare && transports.get(docId)) {
+        try { await this.syncNow(docId, 1); } catch { /* best-effort; the next tick compacts + pushes the base */ }
+      }
       return { keyring: u8(out.keyring) };
     },
     async removeMember(docId, { passphrase, treeId, ownerMemberId, removeMemberId }) {
@@ -413,7 +419,7 @@ export function createNativeAppCore() {
     // missing tail + advisory — both derived from local-head vs server-head in one readKeyring, no marker. So a
     // shared tree's members adopt rotations AND an owner's first-share / retried publish converge on sync, like
     // the web. (Dag adoption on the tick is the anchor-merge path, not wired — a dag keyring call rejects, caught.)
-    async syncNow(docId) {
+    async syncNow(docId, compactK = 8) {
       const transport = transports.get(docId);
       const treeKey = treeKeys.get(docId);
       if (!transport || !treeKey) return { state: 'no-transport' };
@@ -471,7 +477,7 @@ export function createNativeAppCore() {
           if (b) remote.push([localPrefix + key.slice(remotePrefix.length), Array.from(b)]);
         }
         // The core owns the whole keyspace + head-monotonicity decision; this is a dumb ferry.
-        const { uploads, covered } = await call('core_sync', { doc: docId, remote, compactK: 8 });
+        const { uploads, covered } = await call('core_sync', { doc: docId, remote, compactK });
         // PUSH: re-key each upload back to the shared namespace; the CORE decided pointer; the snapshot carries
         // the covered header (a well-known object key — the one key the worker itself checks, for the header).
         for (const o of uploads) {

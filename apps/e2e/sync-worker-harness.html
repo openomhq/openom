@@ -443,6 +443,66 @@
         };
       },
 
+      // First-share base seal (OPE-360 §5): can a joining member see the owner's PRE-share (solo-era, unsigned)
+      // history? The owner builds a tree SOLO, then shares. A solo owner's deltas are unsigned; on the now-shared
+      // tree a member rejects the raw deltas (shared + unattributed → Reject), so the pre-share state is carried
+      // across ONLY by the owner's member-signed base snapshot (sealed at first share, after folding the owner's
+      // own trusted history). Also checks the owner keeps their own tree through the transition. chain AND dag.
+      async preShareVisibility(engine) {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(engine === 'dag' ? 11 : 12);
+        const ownerDoc = `pre-owner-${crypto.randomUUID()}`;
+        const memberDoc = `pre-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const chainPin = engine === 'chain' ? await owner.keyringHash(ownerDoc) : null; // pin genesis before the add
+
+        // PRE-SHARE: the owner builds their tree while SOLO — these deltas are unsigned (solo era) — and pushes them.
+        await owner.assertAnchor(ownerDoc, 'pPreShare', PERSON);
+        await owner.assertClaim(ownerDoc, 'pPreShare', NAME, nameJson('Ada'));
+        await owner.commit(ownerDoc);
+        await owner.syncNow(ownerDoc);
+
+        // Owner SHARES with a maintainer — the first-share base seal fires inside addMember.
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner',
+          newMemberId: 'acct-member', role: 'maintainer',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey, engine,
+        });
+        const dagPin = engine === 'dag' ? await owner.dagAnchorPin(ownerDoc) : null;
+        const snapAfterShare = transport._hasSnapshot(); // the first-share base seal pushed a signed snapshot
+        // The OWNER must still see their own pre-share history after the solo→shared re-fold (it is not dropped).
+        const ownerSeesAfterShare = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+
+        // Member JOINS and syncs — does it see the owner's pre-share history?
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        await member.joinAsMember(
+          engine === 'dag'
+            ? { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member', memberKdfParams: acct.kdfParams, pin: dagPin }
+            : { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member', memberKdfParams: acct.kdfParams, pinnedRevision: chainPin.revision, pinnedHash: chainPin.hash },
+        );
+        await member.syncNow(memberDoc);
+        const proj = JSON.parse(await member.project(memberDoc)).people;
+        return {
+          engine,
+          snapAfterShare,
+          ownerSeesAfterShare,
+          memberSees: proj.map((p) => p.id),
+          sawPreShare: proj.some((p) => p.id === 'pPreShare'),
+          preShareNames: proj.find((p) => p.id === 'pPreShare')?.names?.length ?? 0,
+        };
+      },
+
       // THE removeMember lifecycle through the real worker (chain): an owner shares a tree, a member joins and
       // sees the shared write, then the owner REMOVES the member — rotating the keyring (a forward-secret
       // re-epoch), re-unlocking the owner under the new epoch, and publishing the rotated revision. Proves live:
