@@ -62,6 +62,10 @@ pub enum CoreError {
     /// A vault crypto error — e.g. a member's epoch adopt over a malformed keyring (OPE-393).
     #[error(transparent)]
     Vault(#[from] openom_vault::VaultError),
+    /// An editor proposal that failed the approve gate — malformed, failed §B3 verification, or attributed to
+    /// someone other than the verified proposer. The proposal is left untouched so the caller can reject it.
+    #[error("proposal rejected: {0}")]
+    Proposal(&'static str),
 }
 
 /// One tree's Rust core: the engine + sealer + the `docsync::BlobSyncClient` loop over a LOCAL device
@@ -666,6 +670,90 @@ impl<S: BlobStore> AppCore<S> {
         let batch = self.client.tree_mut().flush()?;
         self.client.push_delta(&batch)?;
         Ok(())
+    }
+
+    /// Editor path: seal everything minted since the last commit as a `Kind::Proposal` for a Maintainer to
+    /// review, and return the envelope bytes (`None` if nothing was minted). Unlike [`commit`](Self::commit)
+    /// this does NOT append to the log or advance any cursor — the ops stay optimistically applied to the local
+    /// tree (the editor sees their edit), and become authoritative only when a Maintainer
+    /// [`approve_proposal`](Self::approve_proposal)s them. The caller uploads the bytes to the proposals channel.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if the batch can't be flushed or sealed.
+    pub fn propose(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
+        let batch = self.client.tree_mut().flush()?;
+        if batch.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.client.seal_proposal(&batch)?))
+    }
+
+    /// Maintainer path: verify an editor's proposal and, if valid, commit it as an attributed delta under THIS
+    /// member's authority. Returns how many ops were committed. The R6-sensitive gate — proposals bypass the
+    /// log-verify path, so this is the ONLY place a forged proposal is caught:
+    ///
+    /// 1. **Open + verify** the proposal envelope through the same §B3 gate as an ingested delta
+    ///    ([`verify_ingest`](openom_vault::verify_ingest)): a spoofed envelope author, a non-member, an author
+    ///    below Editor, or a wrong epoch all fail — the proposal is REFUSED, never re-authored.
+    /// 2. **Cross-check attribution:** every op's `created_by` must equal the VERIFIED proposer's `did:key`
+    ///    (resolved from our membership, [`MembershipResolver::author_did`]). Else a malicious editor could
+    ///    propose ops attributed to a VICTIM that would land as the victim's claims on approval.
+    /// 3. **Fold + re-author:** fold the batch under this member's author (committer = this Maintainer, per the
+    ///    committer-based fold) and re-seal it as a `Kind::Delta` appended to the log — each op's
+    ///    `created_by = proposer` is preserved (content-addressed), the envelope author is the vouching
+    ///    Maintainer.
+    ///
+    /// On any verify / cross-check failure returns [`CoreError::Proposal`] and the proposal is left untouched
+    /// (the caller keeps it on the server for an explicit reject, never a silent delete).
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Proposal`] if the proposal is malformed, fails verification, or its attribution
+    /// doesn't match the proposer; [`CoreError`] if opening / sealing / appending fails.
+    pub fn approve_proposal(&mut self, proposal: &[u8]) -> Result<usize, CoreError> {
+        // Approving foreign content requires a membership to verify it against; a solo/unshared tree has no
+        // proposals channel, so fail closed rather than commit unverified bytes (the R6 hole).
+        let Some(membership) = self.membership.as_deref() else {
+            return Err(CoreError::Proposal("approve requires a shared tree"));
+        };
+        // 1. Open + verify the proposal envelope — the sole forged-proposal gate. An envelope we can't even
+        //    open (tampered, wrong scope/epoch, or a foreign DEK) is refused as a bad proposal, not surfaced as
+        //    an infra error — approve either commits or returns `Proposal`.
+        let plaintext = self
+            .client
+            .open_proposal(proposal)
+            .map_err(|_| CoreError::Proposal("could not open the proposal envelope"))?;
+        let envelope =
+            Envelope::decode(proposal).map_err(|_| CoreError::Proposal("undecodable envelope"))?;
+        let header = envelope
+            .header
+            .as_ref()
+            .ok_or(CoreError::Proposal("envelope has no header"))?;
+        let disposition = openom_vault::verify_ingest(
+            envelope.version,
+            membership,
+            header,
+            &header.governing_ref,
+            &header.key_id,
+            || Ok::<_, ()>(plaintext.clone()),
+        );
+        if disposition != Disposition::Accept {
+            return Err(CoreError::Proposal("failed §B3 verification"));
+        }
+        // 2. Cross-check every op's createdBy against the verified proposer's did:key.
+        let proposer = membership
+            .author_did(&header.author_member_id)
+            .ok_or(CoreError::Proposal("proposer is not a current member"))?;
+        let items = openom_data_crdt::codec::decode(&plaintext)
+            .map_err(|_| CoreError::Proposal("undecodable op-batch"))?;
+        if items.iter().any(|it| it.created_by() != proposer.as_str()) {
+            return Err(CoreError::Proposal(
+                "an op is attributed to someone other than the proposer",
+            ));
+        }
+        // 3. Fold under this Maintainer's author (committer = us) + re-seal as a Delta appended to the log.
+        let committed = items.len();
+        self.client.push_claims(&items)?;
+        Ok(committed)
     }
 
     /// Clear the tree AND the local durable store — the engine side of a demo reseed / hard local reset.

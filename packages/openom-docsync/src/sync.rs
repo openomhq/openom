@@ -246,6 +246,48 @@ impl<S: BlobStore> SyncClient<S> {
             .map_err(|e| SyncError::Sealer(Box::new(e)))
     }
 
+    /// Seal an op-batch as a `Kind::Proposal` envelope under this member's OWN author — an Editor's proposed
+    /// edit for a Maintainer to review, NOT a log entry. Off the authoritative log entirely: no replica dot, no
+    /// chain link, never appended (the server mints the proposal id; the batch becomes authoritative only when a
+    /// Maintainer re-authors it as a `Kind::Delta`). The envelope still carries the member's author signature +
+    /// `governing_ref`, so the approver can `verify_ingest` it. `batch` is an encoded op-batch (from
+    /// [`Tree::flush`](openom_data_tree::Tree::flush)).
+    ///
+    /// # Errors
+    /// Returns [`SyncError::Sealer`] if sealing fails (e.g. the sealer carries no author on an unshared tree).
+    pub fn seal_proposal(&self, batch: &[u8]) -> Result<Vec<u8>> {
+        let ctx = SealContext {
+            kind: EntryKind::Proposal,
+            format: codec::FORMAT,
+            compression: Compression::None,
+            replica_counter: 0,
+            prev_ciphertext_hash: Vec::new(),
+            covers_through_seq: 0,
+            blob_id: Vec::new(),
+        };
+        self.inner
+            .sealer()
+            .0
+            .seal_entry(&ctx, batch)
+            .map(|out| out.envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
+    /// Open a `Kind::Proposal` envelope to its op-batch plaintext without merging — for the approver's
+    /// `verify_ingest` + `createdBy` cross-check before re-authoring it as a delta. Routes across epochs like
+    /// any open, so a proposal sealed under the current epoch opens for any member holding that DEK.
+    ///
+    /// # Errors
+    /// Returns [`SyncError::Sealer`] if the envelope is out of scope, names an unreachable epoch, is the wrong
+    /// kind, or fails to AEAD-open.
+    pub fn open_proposal(&self, envelope: &[u8]) -> Result<Vec<u8>> {
+        self.inner
+            .sealer()
+            .0
+            .open_entry(EntryKind::Proposal, envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
     /// Seal a batch of channel items as one `Kind::Delta` / `Format::OpenomOps` entry, apply it to the
     /// local set, queue it, and flush. Seal + chain-advance happen exactly once; a failed flush leaves the
     /// sealed envelope queued for a byte-identical retry.

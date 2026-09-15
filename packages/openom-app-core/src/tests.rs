@@ -958,3 +958,183 @@ fn fresh_owner_replica(
 fn json_name(given: &str) -> serde_json::Value {
     serde_json::json!({ "parts": { "given": given } })
 }
+
+// ── OPE-360 step 1: editor propose / maintainer approve ─────────────────────────────────────────────────
+//
+// A shared chain tree with an owner (Maintainer/Owner) and bob (Editor). An Editor can't commit a Delta (it
+// fails the role gate), so their edit is a PROPOSAL a Maintainer verifies + re-authors as an attributed delta.
+
+const TREE_BYTES: &[u8] = b"tree-uuid-16byte";
+
+/// The reusable shared-tree fixture: an owner + bob (Editor) admitted at revision 2. Fields are all
+/// nameable types so tests assemble fresh cores/sealers from them (an unlock consumes its sealer).
+struct SharedTree {
+    tree: TreeId,
+    owner_pass: openom_crypto::Passphrase,
+    owner_id: openom_protocol::ids::MemberId,
+    owner_author: [u8; 32],
+    rev1: Vec<u8>,
+    rev2: Vec<u8>,
+    bob_kdf: Vec<u8>,
+    bob_pass: openom_crypto::Passphrase,
+}
+
+fn shared_owner_and_editor() -> SharedTree {
+    use openom_crypto::Passphrase;
+    use openom_keyring_api::EngineKind;
+    use openom_protocol::ids::MemberId;
+    use openom_vault::{sharing, vault};
+
+    let tree = TreeId::new(TREE_BYTES.to_vec());
+    let owner_id = MemberId::new("acct-owner");
+    let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
+    let prov = vault::provision(&owner_pass, &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    let owner_author = prov.did_key.to_public_key();
+    let rev1 = prov.keyring.clone();
+
+    let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
+    let bob = vault::provision_member(&bob_pass).unwrap();
+    let added = sharing::add_member(
+        EngineKind::Chain, &rev1, &owner_pass, TREE_BYTES, "acct-owner", b"ro", 1, "acct-bob", "editor",
+        &bob.author_public_key, &bob.hpke_public_key,
+    )
+    .unwrap();
+    SharedTree {
+        tree,
+        owner_pass,
+        owner_id,
+        owner_author,
+        rev1,
+        rev2: added.keyring.clone(),
+        bob_kdf: keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        bob_pass,
+    }
+}
+
+/// A chain resolver retaining both governing revisions (rev 2 head + rev 1 genesis).
+fn chain_res(s: &SharedTree) -> Box<dyn MembershipResolver> {
+    use openom_vault::ChainMembershipResolver;
+    Box::new(ChainMembershipResolver::new(&s.rev2, &[(1u32, s.rev1.clone()), (2u32, s.rev2.clone())]).unwrap())
+}
+
+/// The owner's core, re-unlocked on the shared keyring (a signing Maintainer sealer) with membership set.
+fn owner_core(s: &SharedTree) -> AppCore<MemoryBlob> {
+    let ou = openom_vault::vault::unlock(
+        &s.rev2, &s.owner_pass, &s.tree, &s.owner_id, &ReplicaId::new(b"ro".to_vec()),
+    )
+    .unwrap();
+    let mut c = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
+    c.set_membership(chain_res(s)).unwrap();
+    c
+}
+
+/// Bob's member unlock on `replica` → his `did:key` + signing Editor sealer.
+fn editor_sealer(s: &SharedTree, replica: &[u8]) -> (String, SealerSet) {
+    use openom_keyring_api::EngineKind;
+    let bu = openom_vault::sharing::unlock_as_member(
+        EngineKind::Chain, &s.rev2, &s.bob_pass, &s.bob_kdf, TREE_BYTES, "acct-bob", &s.owner_author, replica, 2,
+    )
+    .unwrap();
+    (bu.did_key, bu.sealer)
+}
+
+/// Bob's core: his signing Editor sealer + membership.
+fn editor_core(s: &SharedTree, replica: &[u8]) -> AppCore<MemoryBlob> {
+    let (did, sealer) = editor_sealer(s, replica);
+    let mut c = AppCore::new(did, sealer, Arc::new(MemoryBlob::new()), DOC, replica);
+    c.set_membership(chain_res(s)).unwrap();
+    c
+}
+
+#[test]
+fn an_editor_proposal_is_approved_as_an_attributed_delta() {
+    let s = shared_owner_and_editor();
+    let remote = Arc::new(MemoryBlob::new());
+
+    // Bob (Editor) mints locally and PROPOSES — he cannot commit (a Delta needs Maintainer).
+    let mut bob = editor_core(&s, b"rb");
+    let bob_did = bob.tree().author().to_owned();
+    bob.tree_mut().assert_anchor("pBob", PERSON, 1).unwrap();
+    let proposal = bob.propose().unwrap().expect("a non-empty intention seals a proposal");
+
+    // The owner (Maintainer) verifies + approves → it commits as an attributed delta.
+    let mut owner = owner_core(&s);
+    let committed = owner.approve_proposal(&proposal).unwrap();
+    assert!(committed >= 1, "the approved ops are committed");
+    assert!(live_ids(&owner).contains("pBob"), "the approved claim is live on the owner");
+
+    // Attribution preserved: createdBy stays the proposer (bob), not the approving maintainer.
+    let anchor = owner
+        .live_records()
+        .unwrap()
+        .into_iter()
+        .find(|r| r["id"] == "pBob")
+        .expect("the anchor is live on the owner");
+    assert_eq!(anchor["createdBy"], serde_json::json!(bob_did), "createdBy is preserved as the proposer");
+
+    // And it syncs: the owner pushes, bob pulls, and now sees his own claim as authoritative.
+    push(&owner, &remote);
+    pull(&mut bob, &remote);
+    assert!(live_ids(&bob).contains("pBob"), "the proposer sees the approved claim after sync");
+}
+
+#[test]
+fn approve_refuses_a_forged_proposal() {
+    use openom_protocol::v1::Envelope;
+    use openom_protocol::Message;
+
+    let s = shared_owner_and_editor();
+    // Bob seals a legit proposal; it is then TAMPERED to claim a different envelope author (the owner). The
+    // forged author fails the §B3 gate (AAD / signature) — proposals bypass the log verify path, so this
+    // approve gate is the only thing standing between a forged proposal and a commit.
+    let mut bob = editor_core(&s, b"rb");
+    bob.tree_mut().assert_anchor("pForged", PERSON, 1).unwrap();
+    let proposal = bob.propose().unwrap().unwrap();
+    let mut env = Envelope::decode(proposal.as_slice()).unwrap();
+    env.header.as_mut().unwrap().author_member_id = "acct-owner".to_string();
+    let forged = env.encode_to_vec();
+
+    let mut owner = owner_core(&s);
+    assert!(
+        matches!(owner.approve_proposal(&forged), Err(super::CoreError::Proposal(_))),
+        "a spoofed-author proposal is refused"
+    );
+    assert!(!live_ids(&owner).contains("pForged"), "nothing was committed from the forged proposal");
+}
+
+#[test]
+fn approve_refuses_a_proposal_misattributed_to_a_victim() {
+    use openom_data_crdt::{codec, ChannelItem};
+    use openom_data_model::envelope::{Claim, Record};
+    use openom_data_model::Hlc;
+    use openom_protocol::v1::{Compression, Format};
+    use openom_sealer::{EntryKind, SealContext};
+
+    let s = shared_owner_and_editor();
+    // Bob (a legit Editor) signs a proposal whose INNER op is attributed to a VICTIM (createdBy != bob). The
+    // envelope verifies (bob really is an Editor), but the createdBy cross-check refuses it — else the victim's
+    // claim would be manufactured out of thin air on approval.
+    let (bob_did, bob_sealer) = editor_sealer(&s, b"rb");
+    let victim = "did:key:z6MkVictimNotBob";
+    assert_ne!(victim, bob_did, "the fixture's victim must differ from the proposer");
+    let mut claim = Claim::new("pVictim", NAME, json_name("Eve"), victim, Hlc::new(5, 0));
+    claim.compute_id().unwrap();
+    let batch = codec::encode(&[ChannelItem::Assert(Record::Claim(claim))]).unwrap();
+    let ctx = SealContext {
+        kind: EntryKind::Proposal,
+        format: Format::OpenomOps,
+        compression: Compression::None,
+        replica_counter: 0,
+        prev_ciphertext_hash: Vec::new(),
+        covers_through_seq: 0,
+        blob_id: Vec::new(),
+    };
+    let spoofed = bob_sealer.seal_entry(&ctx, &batch).unwrap().envelope;
+
+    let mut owner = owner_core(&s);
+    assert!(
+        matches!(owner.approve_proposal(&spoofed), Err(super::CoreError::Proposal(_))),
+        "a proposal whose op is attributed to someone other than the proposer is refused"
+    );
+    assert!(!live_ids(&owner).contains("pVictim"), "the victim's claim was never committed");
+}
