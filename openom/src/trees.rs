@@ -1,28 +1,17 @@
-//! Tree envelope PUT/GET — the V1 write/read path.
+//! Tree-row creation.
 //!
-//! A tree is one encrypted snapshot Envelope stored in R2, pointed at by a Postgres
-//! row. The server is a zero-knowledge blob store: it validates the envelope's
-//! *self-consistency* (hash, kind, tree binding) and enforces the log contract
-//! (§9), but never decrypts. Concurrency is **compare-and-swap on a Postgres-held
-//! opaque version token** (§9.7), surfaced to the client as an HTTP `ETag` +
-//! `If-Match` — deliberately *not* S3 `If-Match`, the least portable S3 feature.
-//!
-//! Write order (§9.7): write the new snapshot to a fresh R2 key, *then* CAS the
-//! pointer. A CAS loss orphans the just-written object, which we delete immediately
-//! (and a sweep would catch anyway).
+//! A tree's encrypted state lives entirely on the blob data channel (`blobs.rs`);
+//! this module mints the owning Postgres `trees` row. `POST /trees/{tree_id}` is the
+//! ONE place a row is created: it is entitlement-gated on the owner's `max_trees`
+//! and makes the caller owner. The server never decrypts — it only owns the row.
 
-use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, RETRY_AFTER};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use openom_protocol::v1::{Envelope, Kind};
-use openom_protocol::{Message, ENVELOPE_VERSION};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::Identity;
-use crate::authz::Access;
 use crate::AppState;
 
 /// Per-object ceiling.
@@ -32,172 +21,16 @@ use crate::AppState;
 /// proxy. Media (large) takes the presigned path instead, never this one.
 pub const MAX_OBJECT_BYTES: usize = 6 * 1024 * 1024;
 
-/// The envelope fields the metadata row mirrors, extracted after validation.
-struct Validated {
-    aead: i16,
-    ciphertext_hash: Vec<u8>,
-    covers_through_seq: i64,
-}
-
-/// Validate an uploaded snapshot envelope against the V1 contract (§9.2–§9.6):
-/// decodable, supported version, `KIND_SNAPSHOT`, bound to *this* tree, and a
-/// `ciphertext_hash` the keyless server can — and must — recompute.
-fn validate_snapshot(
-    body: &[u8],
-    tree_id: Uuid,
-    reject_dev_key: bool,
-) -> Result<Validated, ApiError> {
-    let env = Envelope::decode(body)
-        .map_err(|_| ApiError::BadRequest("not a valid envelope".into()))?;
-    if env.version != ENVELOPE_VERSION {
-        return Err(ApiError::BadRequest(format!(
-            "unsupported envelope version {} (server speaks {ENVELOPE_VERSION})",
-            env.version
-        )));
-    }
-    let header = env
-        .header
-        .as_ref()
-        .ok_or_else(|| ApiError::BadRequest("envelope has no header".into()))?;
-    if header.kind() != Kind::Snapshot {
-        return Err(ApiError::BadRequest(
-            "V1 accepts only KIND_SNAPSHOT on the tree path".into(),
-        ));
-    }
-    // The header's opaque tree_id (16 raw UUID bytes) must match the URL, or the
-    // client is filing this tree's bytes under another tree's coordinates.
-    if header.tree_id.as_slice() != tree_id.as_bytes() {
-        return Err(ApiError::BadRequest(
-            "header tree_id does not match the url".into(),
-        ));
-    }
-    // §16: the reserved dev key_id can never seal real user data. Refuse it in
-    // production so a misconfigured dev client can't write with the well-known dev DEK.
-    if reject_dev_key && header.key_id.as_slice() == openom_crypto::DEV_KEY_ID {
-        return Err(ApiError::BadRequest(
-            "dev key_id refused under STORAGE=cloud (§16)".into(),
-        ));
-    }
-    // ciphertext_hash is a hash of *ciphertext*, so the keyless server verifies it.
-    let computed = Sha256::digest(&env.ciphertext);
-    if header.ciphertext_hash.as_slice() != computed.as_slice() {
-        return Err(ApiError::BadRequest(
-            "ciphertext_hash does not match the ciphertext".into(),
-        ));
-    }
-    Ok(Validated {
-        aead: i16::try_from(header.aead).unwrap_or(i16::MAX),
-        ciphertext_hash: header.ciphertext_hash.clone(),
-        covers_through_seq: i64::try_from(header.covers_through_seq).unwrap_or(i64::MAX),
-    })
-}
-
-/// `PUT /trees/{tree_id}` — upload a new snapshot. `If-Match: "<version>"` names the
-/// snapshot the edit was based on (CAS); its absence means "create, must not exist".
-///
-/// # Errors
-/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
-pub async fn put_tree(
-    State(state): State<AppState>,
-    identity: Identity,
-    Path(tree_id): Path<Uuid>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let _p = crate::prof::span("tree.put");
-    let valid = validate_snapshot(&body, tree_id, state.config.storage_is_cloud())?;
-    let expected = if_match(&headers);
-
-    // New opaque version + fresh key; the object is written before the pointer CAS.
-    let version = Uuid::new_v4().to_string();
-    let object_key = crate::storage::keys::snapshot(tree_id, &version);
-    let size = i64::try_from(body.len()).unwrap_or(i64::MAX);
-
-    state
-        .storage
-        .put_object(&object_key, body.to_vec())
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    let snap = SnapshotWrite {
-        object_key: &object_key,
-        version: &version,
-        size,
-        valid: &valid,
-    };
-    let outcome = match &expected {
-        None => cas_create(&state, tree_id, identity.member_id, &snap).await,
-        Some(exp) => cas_update(&state, tree_id, identity.member_id, &snap, exp).await,
-    };
-
-    match outcome {
-        Ok(()) => Ok((StatusCode::OK, [(ETAG, etag(&version))]).into_response()),
-        Err(err) => {
-            // GC the orphan we wrote before the failed CAS (best effort).
-            if let Err(e) = state.storage.delete_object(&object_key).await {
-                tracing::warn!(%e, key = %object_key, "could not delete orphaned snapshot object");
-            }
-            Err(err)
-        }
-    }
-}
-
-/// `GET /trees/{tree_id}` — the current snapshot bytes + its `ETag` version.
-///
-/// # Errors
-/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
-pub async fn get_tree(
-    State(state): State<AppState>,
-    identity: Identity,
-    Path(tree_id): Path<Uuid>,
-) -> Result<Response, ApiError> {
-    let _p = crate::prof::span("tree.get");
-    let row: Option<(Uuid, String, Option<String>)> =
-        sqlx::query_as("SELECT owner_id, object_key, snapshot_version FROM trees WHERE id = $1")
-            .bind(tree_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(internal)?;
-
-    let (owner_id, object_key, version) = row.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(
-        &state.db,
-        tree_id,
-        owner_id,
-        identity.member_id,
-        Access::Read,
-    )
-    .await?;
-    let version = version.ok_or(ApiError::NotFound)?; // row exists but no snapshot yet
-
-    let bytes = state
-        .storage
-        .get_object(&object_key)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::NotFound)?; // pointer present, object gone → graceful 404
-
-    Ok((
-        StatusCode::OK,
-        [
-            (ETAG, etag(&version)),
-            (CONTENT_TYPE, "application/octet-stream".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
-}
-
 /// `POST /trees/{tree_id}` — explicitly create the tree row (OPE-407, decision 3-B), entitlement-gated on
 /// the owner's `max_trees`; the caller becomes owner. This is the ONE place a `trees` row is minted for the
-/// data-channel path — `put_blob` no longer mints (it `404`s on a missing tree). The row carries placeholder
-/// scalar-snapshot columns (empty `object_key`, no `snapshot_version`), which `get_tree` renders as a
-/// graceful `404` via its `version.ok_or(NotFound)` check, so a data-channel tree and a scalar-snapshot tree
-/// don't collide.
+/// data-channel path — `put_blob` no longer mints (it `404`s on a missing tree). The row carries zeroed
+/// placeholder columns (empty `object_key`, zeroed `aead` / `size_bytes` / `covers_through_seq`) purely to
+/// satisfy the `trees` schema's NOT NULL constraints; nothing reads them — the tree's encrypted state lives
+/// entirely on the blob data channel.
 ///
 /// Idempotent for the owner: a re-provision / returning device that already minted this tree gets a `2xx`
 /// (`200`), not an error — the client provisioning flow may call it more than once. A tree that already
-/// exists under a DIFFERENT owner is refused (`403`), mirroring `cas_create`'s "exists, not mine"
+/// exists under a DIFFERENT owner is refused (`403`), the standard "exists, not mine"
 /// convention. Over `max_trees` → [`ApiError::QuotaExceeded`] (`403`, a countable product signal).
 ///
 /// # Errors
@@ -220,8 +53,8 @@ pub async fn create_tree(
     // check-and-insert. A bare `count(*) < max_trees` guard then INSERT races under READ COMMITTED: two
     // concurrent creates of DIFFERENT ids by the same owner each read the pre-insert count and both pass,
     // busting the entitlement. The row lock makes the gate atomic w.r.t. a sibling create (different owners
-    // lock different rows, so they don't contend) — the same row-atomic discipline `log.rs` uses for the
-    // byte meter. Requires an explicit tx: an autocommit `FOR UPDATE` would release the lock immediately.
+    // lock different rows, so they don't contend) — the same row-atomic discipline the blob byte meter uses.
+    // Requires an explicit tx: an autocommit `FOR UPDATE` would release the lock immediately.
     let mut tx = state.db.begin().await.map_err(internal)?;
     sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
         .bind(caller)
@@ -229,8 +62,8 @@ pub async fn create_tree(
         .await
         .map_err(internal)?;
 
-    // Entitlement-gated create-only insert (count < max_trees, ON CONFLICT DO NOTHING), minus the snapshot
-    // columns `cas_create` sets — a data-channel tree has no scalar snapshot yet.
+    // Entitlement-gated create-only insert (count < max_trees, ON CONFLICT DO NOTHING); the snapshot columns
+    // are zeroed placeholders — a data-channel tree has no scalar snapshot.
     let res = sqlx::query(
         "INSERT INTO trees (id, owner_id, object_key, envelope_version, aead, size_bytes, covers_through_seq)
          SELECT $1, $2, '', 0, 0, 0, 0
@@ -250,7 +83,7 @@ pub async fn create_tree(
     }
 
     // 0 rows: the tree already exists, or the entitlement/account gate blocked the insert. Disambiguate
-    // inside the same locked tx, exactly as `cas_create` does for the no-If-Match create.
+    // inside the same locked tx.
     let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree_id)
         .fetch_optional(&mut *tx)
@@ -284,170 +117,6 @@ pub async fn create_tree(
     };
     tx.commit().await.map_err(internal)?;
     outcome
-}
-
-/// The freshly-written snapshot a CAS points the tree row at: the R2 `object_key`, its opaque `version`
-/// token, byte `size`, and the `Validated` envelope facts (aead / `ciphertext_hash` / `covers_through_seq`).
-struct SnapshotWrite<'a> {
-    object_key: &'a str,
-    version: &'a str,
-    size: i64,
-    valid: &'a Validated,
-}
-
-/// First snapshot for a tree: insert the row iff the tree is new *and* the owner is
-/// under their `max_trees` entitlement (§9). 0 rows → disambiguate the reason.
-async fn cas_create(
-    state: &AppState,
-    tree_id: Uuid,
-    owner: Uuid,
-    snap: &SnapshotWrite<'_>,
-) -> Result<(), ApiError> {
-    // Lock the accounts row so the `count(*) < max_trees` check-and-insert is atomic w.r.t. a concurrent
-    // create for this owner (a bare guard-then-insert races under READ COMMITTED — see `create_tree`). An
-    // explicit tx is required to hold the `FOR UPDATE` lock across both statements.
-    let mut tx = state.db.begin().await.map_err(internal)?;
-    sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
-        .bind(owner)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(internal)?;
-
-    let res = sqlx::query(
-        "INSERT INTO trees
-             (id, owner_id, object_key, snapshot_version, envelope_version, aead,
-              size_bytes, ciphertext_hash, covers_through_seq)
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
-         WHERE (SELECT count(*) FROM trees WHERE owner_id = $2)
-             < (SELECT max_trees FROM accounts WHERE id = $2)
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(tree_id)
-    .bind(owner)
-    .bind(snap.object_key)
-    .bind(snap.version)
-    .bind(i32::try_from(ENVELOPE_VERSION).unwrap_or(i32::MAX))
-    .bind(snap.valid.aead)
-    .bind(snap.size)
-    .bind(&snap.valid.ciphertext_hash)
-    .bind(snap.valid.covers_through_seq)
-    .execute(&mut *tx)
-    .await
-    .map_err(internal)?;
-
-    if res.rows_affected() == 1 {
-        tx.commit().await.map_err(internal)?;
-        return Ok(());
-    }
-
-    // 0 rows: the tree already exists, or the entitlement/account gate blocked it. Disambiguate in the same
-    // locked tx.
-    let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
-        .bind(tree_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(internal)?;
-    let outcome = match existing {
-        // Exists and is ours → the client should have sent If-Match.
-        Some(o) if o == owner => {
-            tracing::info!(
-                event = "snapshot_cas_conflict",
-                reason = "exists_no_if_match"
-            );
-            Err(ApiError::Conflict)
-        }
-        Some(_) => Err(ApiError::Forbidden),
-        // Doesn't exist → the entitlement gate blocked it. Separate over-quota (a
-        // countable product signal, §9.9) from an unknown account.
-        None => {
-            let limits: Option<(i64, i32)> = sqlx::query_as(
-                "SELECT (SELECT count(*) FROM trees WHERE owner_id = $1), a.max_trees
-                   FROM accounts a WHERE a.id = $1",
-            )
-            .bind(owner)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(internal)?;
-            match limits {
-                Some((count, max)) if count >= i64::from(max) => {
-                    tracing::info!(event = "quota_rejected", resource = "trees", %owner);
-                    Err(ApiError::QuotaExceeded)
-                }
-                None => Err(ApiError::Forbidden), // unknown account
-                Some(_) => Err(ApiError::Conflict), // guard passed yet insert lost — retry
-            }
-        }
-    };
-    tx.commit().await.map_err(internal)?;
-    outcome
-}
-
-/// Replace an existing snapshot under CAS: match the expected version and never let
-/// `covers_through_seq` regress (§9.6). 0 rows → not found / not owner / stale.
-async fn cas_update(
-    state: &AppState,
-    tree_id: Uuid,
-    caller: Uuid,
-    snap: &SnapshotWrite<'_>,
-    expected: &str,
-) -> Result<(), ApiError> {
-    // Authorize through the seam on the tree's REAL owner, not the caller. A snapshot PUT is a
-    // *commit*, so under B3 this widens to Maintainer+ by changing authorize() alone — previously the
-    // owner check was inlined as `owner_id = caller` in the CAS predicate, which would have 403'd every
-    // non-owner committer no matter what the seam said. Resolving the owner up front also lets the CAS
-    // key purely on the version.
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
-        .bind(tree_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    let owner = owner.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, caller, Access::Commit).await?;
-
-    let res = sqlx::query(
-        "UPDATE trees
-            SET object_key = $1, snapshot_version = $2, envelope_version = $3, aead = $4,
-                size_bytes = $5, ciphertext_hash = $6, covers_through_seq = $7,
-                updated_at = now()
-          WHERE id = $8 AND snapshot_version = $9
-            AND $7 >= covers_through_seq",
-    )
-    .bind(snap.object_key)
-    .bind(snap.version)
-    .bind(i32::try_from(ENVELOPE_VERSION).unwrap_or(i32::MAX))
-    .bind(snap.valid.aead)
-    .bind(snap.size)
-    .bind(&snap.valid.ciphertext_hash)
-    .bind(snap.valid.covers_through_seq)
-    .bind(tree_id)
-    .bind(expected)
-    .execute(&state.db)
-    .await
-    .map_err(internal)?;
-
-    if res.rows_affected() == 1 {
-        return Ok(());
-    }
-    // Owner + existence already confirmed above, so a 0-row now is a stale version or a
-    // covers_through_seq regression — the common concurrency case (§9.7).
-    tracing::info!(event = "snapshot_cas_conflict", reason = "stale_version");
-    Err(ApiError::Conflict)
-}
-
-/// Read `If-Match`, unwrapping the `ETag` quoting. `None` (or `*`) means "create".
-fn if_match(headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(IF_MATCH)?.to_str().ok()?.trim();
-    let v = raw.trim_matches('"');
-    if v.is_empty() || v == "*" {
-        None
-    } else {
-        Some(v.to_string())
-    }
-}
-
-/// A quoted (strong) `ETag` header value from an opaque version token.
-fn etag(version: &str) -> String {
-    format!("\"{version}\"")
 }
 
 // A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
@@ -577,42 +246,5 @@ impl IntoResponse for ApiError {
             }
         }
         resp
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use openom_protocol::v1::Header;
-
-    // A validly-hashed snapshot envelope sealed under the reserved dev key_id (§16).
-    fn dev_envelope(tree: Uuid) -> Vec<u8> {
-        let ciphertext = b"opaque-dev-ciphertext".to_vec();
-        let header = Header {
-            kind: Kind::Snapshot as i32,
-            tree_id: tree.as_bytes().to_vec(),
-            key_id: openom_crypto::DEV_KEY_ID.to_vec(),
-            ciphertext_hash: Sha256::digest(&ciphertext).to_vec(),
-            ..Default::default()
-        };
-        Envelope {
-            version: ENVELOPE_VERSION,
-            header: Some(header),
-            ciphertext,
-        }
-        .encode_to_vec()
-    }
-
-    #[test]
-    fn dev_key_refused_in_production_only() {
-        let tree = Uuid::new_v4();
-        let body = dev_envelope(tree);
-        // Production (reject_dev_key = true) refuses the dev key_id.
-        assert!(matches!(
-            validate_snapshot(&body, tree, true),
-            Err(ApiError::BadRequest(_))
-        ));
-        // Local dev (reject_dev_key = false) accepts it.
-        assert!(validate_snapshot(&body, tree, false).is_ok());
     }
 }

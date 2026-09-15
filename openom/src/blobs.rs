@@ -43,6 +43,9 @@ const MAX_PREFIX_LEN: usize = 512;
 /// The `heads/{replica}` pointer is one small encoded counter (`docsync::encode_count`, ASCII decimal) —
 /// a tiny fixed ceiling catches anything obviously wrong without per-object accounting (§1).
 const HEADS_MAX_BYTES: usize = 4 * 1024;
+/// Per-object cap for a `log/` data-channel delta object — an immutable delta is a bounded payload. (Formerly
+/// `log::MAX_DELTA_BYTES`, kept here after the §B1 delta-log route was retired, OPE-448.)
+const MAX_DELTA_BYTES: usize = 1024 * 1024;
 
 /// The mandatory plaintext covered-frontier header on a snapshot PUT (OPE-409, the ETAG-BINDING D1 slice):
 /// base64 of a JSON `{replica: counter}` map — the SUBSUMED frontier the client's snapshot folds. Bounds
@@ -89,7 +92,7 @@ fn cap_for(namespace: &str) -> usize {
     match namespace {
         "snapshot" => crate::trees::MAX_OBJECT_BYTES,
         "heads" => HEADS_MAX_BYTES,
-        _ => crate::log::MAX_DELTA_BYTES,
+        _ => MAX_DELTA_BYTES,
     }
 }
 
