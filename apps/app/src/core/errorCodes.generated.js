@@ -20,6 +20,7 @@ export const ERROR_CODES = Object.freeze({
   sign_in_failed: Object.freeze({ domain: 'auth', title: 'Sign-in failed', retriable: false, action: null, args: Object.freeze([]) }),
   sign_up_failed: Object.freeze({ domain: 'auth', title: 'Sign-up failed', retriable: false, action: null, args: Object.freeze([]) }),
   email_taken: Object.freeze({ domain: 'auth', title: 'Email already registered', retriable: false, action: null, args: Object.freeze([]) }),
+  recipient_pin_mismatch: Object.freeze({ domain: 'auth', title: 'This invite is for a different email', retriable: false, action: 'reauth', args: Object.freeze([]) }),
   wrong_passphrase: Object.freeze({ domain: 'vault', title: 'Wrong passphrase', retriable: false, action: null, args: Object.freeze([]) }),
   tampered_anchor: Object.freeze({ domain: 'vault', title: 'Tree verification failed', retriable: false, action: 'contact', args: Object.freeze([]) }),
   revision_rollback: Object.freeze({ domain: 'vault', title: 'Version rollback detected', retriable: false, action: null, args: Object.freeze([]) }),

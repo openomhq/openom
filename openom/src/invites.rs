@@ -265,18 +265,31 @@ pub async fn claim_invite(
     if hpke.len() != 32 || author.len() != 32 {
         return Err(ApiError::BadRequest("keys must be 32 bytes".into()));
     }
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, expiry FROM pending_invites WHERE invite_id = $1")
+    let row: Option<(String, i64, Option<String>)> =
+        sqlx::query_as("SELECT status, expiry, recipient_pin FROM pending_invites WHERE invite_id = $1")
             .bind(&invite_id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let (status, expiry) = row.ok_or(ApiError::NotFound)?;
+    let (status, expiry, recipient_pin) = row.ok_or(ApiError::NotFound)?;
     if status != "open" {
         return Err(ApiError::Conflict); // already claimed — one live claim
     }
     if now_ms() > expiry {
         return Err(ApiError::Forbidden); // expired
+    }
+    // Recipient pin (OPE-451): an invite MINTED with a `recipient_pin` may be claimed ONLY by the caller whose
+    // provider-VERIFIED email matches it — closes the "leaked link / discovered id lets any signed-in account
+    // burn the seat" hole. Opt-in per invite: a pin-less bearer invite skips this entirely. Honest-server
+    // hardening only (a compromised server owns this endpoint), never the confidentiality boundary.
+    if let Some(pin) = &recipient_pin {
+        let pin = pin.trim().to_lowercase();
+        if identity.verified_email.as_deref() != Some(pin.as_str()) {
+            return Err(ApiError::forbidden(
+                crate::error_codes::RECIPIENT_PIN_MISMATCH,
+                "this invite is pinned to a different verified email",
+            ));
+        }
     }
     // CAS the claim in (WHERE status='open' so a race resolves to exactly one claimant).
     let done = sqlx::query(

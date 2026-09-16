@@ -168,6 +168,18 @@ impl ApiError {
         }
     }
 
+    /// A `403 Forbidden` with a typed `code` — a denial the client should discriminate on (e.g. a pinned
+    /// invite claimed by the wrong verified email, `recipient_pin_mismatch`).
+    #[must_use]
+    pub fn forbidden(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::Coded {
+            status: StatusCode::FORBIDDEN,
+            code,
+            detail: detail.into(),
+            args: serde_json::Value::Null,
+        }
+    }
+
     /// A `410 Gone` with a typed `code` — a reaped (GC-reclaimed) blob (`below_gc_floor`, action BOOTSTRAP).
     #[must_use]
     pub fn reaped(detail: impl Into<String>) -> Self {

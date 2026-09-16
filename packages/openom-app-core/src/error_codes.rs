@@ -30,6 +30,7 @@ pub const SESSION_EXPIRED: &str = "session_expired";
 pub const SIGN_IN_FAILED: &str = "sign_in_failed";
 pub const SIGN_UP_FAILED: &str = "sign_up_failed";
 pub const EMAIL_TAKEN: &str = "email_taken";
+pub const RECIPIENT_PIN_MISMATCH: &str = "recipient_pin_mismatch";
 pub const WRONG_PASSPHRASE: &str = "wrong_passphrase";
 pub const TAMPERED_ANCHOR: &str = "tampered_anchor";
 pub const REVISION_ROLLBACK: &str = "revision_rollback";
@@ -62,6 +63,7 @@ pub const ERROR_CODES: &[CodeMeta] = &[
     CodeMeta { code: "sign_in_failed", domain: "auth", title: "Sign-in failed", retriable: false, action: None },
     CodeMeta { code: "sign_up_failed", domain: "auth", title: "Sign-up failed", retriable: false, action: None },
     CodeMeta { code: "email_taken", domain: "auth", title: "Email already registered", retriable: false, action: None },
+    CodeMeta { code: "recipient_pin_mismatch", domain: "auth", title: "This invite is for a different email", retriable: false, action: Some("reauth") },
     CodeMeta { code: "wrong_passphrase", domain: "vault", title: "Wrong passphrase", retriable: false, action: None },
     CodeMeta { code: "tampered_anchor", domain: "vault", title: "Tree verification failed", retriable: false, action: Some("contact") },
     CodeMeta { code: "revision_rollback", domain: "vault", title: "Version rollback detected", retriable: false, action: None },

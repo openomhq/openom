@@ -22,8 +22,23 @@ use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 struct Claims {
-    /// Subject — the account id (a UUID). The only claim we read; everything else is validated.
+    /// Subject — the account id (a UUID).
     sub: String,
+    /// The caller's email, if the provider includes it. Only trusted when `email_verified` is true.
+    #[serde(default)]
+    email: Option<String>,
+    /// Whether the provider has VERIFIED that email. An unverified `email` is worthless for the invite
+    /// recipient pin — anyone can put any address on an unverified signup (OPE-451).
+    #[serde(default)]
+    email_verified: Option<bool>,
+}
+
+/// What the verifier extracts from a valid token: the member id (`sub`) and, only when the provider asserts a
+/// VERIFIED email, that email (trimmed + lowercased for a stable compare). `verified_email` is `None` unless
+/// `email_verified` is true.
+pub struct VerifiedClaims {
+    pub member_id: Uuid,
+    pub verified_email: Option<String>,
 }
 
 /// The provider-neutral verifier. Built once from config; shared across requests (the JWKS cache has
@@ -64,16 +79,16 @@ impl JwtVerifier {
     ///
     /// # Errors
     /// Returns an error string if the token is malformed, expired, or its signature doesn't verify.
-    pub async fn verify(&self, token: &str) -> Result<Uuid, &'static str> {
+    pub async fn verify(&self, token: &str) -> Result<VerifiedClaims, &'static str> {
         match self {
-            Self::Hs256 { key, validation } => decode_sub(token, key, validation),
+            Self::Hs256 { key, validation } => decode_claims(token, key, validation),
             Self::Jwks { cache, audience, issuer } => {
                 let header = decode_header(token).map_err(|_| "invalid token header")?;
                 let kid = header.kid.ok_or("token has no kid (JWKS verification requires one)")?;
                 // The algorithm comes from the resolved KEY, not the header — no alg confusion.
                 let (key, alg) = cache.key(&kid).await?;
                 let validation = validation(alg, audience.as_deref(), issuer.as_deref());
-                decode_sub(token, &key, &validation)
+                decode_claims(token, &key, &validation)
             }
         }
     }
@@ -96,9 +111,19 @@ fn validation(alg: Algorithm, audience: Option<&str>, issuer: Option<&str>) -> V
     v
 }
 
-fn decode_sub(token: &str, key: &DecodingKey, validation: &Validation) -> Result<Uuid, &'static str> {
+fn decode_claims(
+    token: &str,
+    key: &DecodingKey,
+    validation: &Validation,
+) -> Result<VerifiedClaims, &'static str> {
     let data = decode::<Claims>(token, key, validation).map_err(|_| "invalid token")?;
-    Uuid::parse_str(&data.claims.sub).map_err(|_| "sub is not a uuid")
+    let member_id = Uuid::parse_str(&data.claims.sub).map_err(|_| "sub is not a uuid")?;
+    // Trust the email ONLY when the provider verified it; normalize for a stable compare against the pin.
+    let verified_email = match (data.claims.email, data.claims.email_verified) {
+        (Some(e), Some(true)) => Some(e.trim().to_lowercase()),
+        _ => None,
+    };
+    Ok(VerifiedClaims { member_id, verified_email })
 }
 
 /// A JWKS key cache: `kid → (DecodingKey, Algorithm)`, populated by fetching the JWKS URL.
@@ -224,8 +249,37 @@ mod tests {
     #[tokio::test]
     async fn hs256_accepts_a_matching_audience() {
         let v = JwtVerifier::hs256("test-secret", Some("authenticated"), None);
-        let id = v.verify(&hs_token(HS_SECRET, MEMBER, "authenticated")).await.expect("valid aud accepted");
-        assert_eq!(id, Uuid::parse_str(MEMBER).unwrap());
+        let c = v.verify(&hs_token(HS_SECRET, MEMBER, "authenticated")).await.expect("valid aud accepted");
+        assert_eq!(c.member_id, Uuid::parse_str(MEMBER).unwrap());
+        assert_eq!(c.verified_email, None, "no email claim → no verified email");
+    }
+
+    #[tokio::test]
+    async fn hs256_extracts_a_verified_email_only_when_verified() {
+        let v = JwtVerifier::hs256("test-secret", Some("authenticated"), None);
+        let tok = |claims: serde_json::Value| {
+            encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(HS_SECRET)).unwrap()
+        };
+        // A VERIFIED email is extracted, trimmed + lowercased.
+        let verified = tok(serde_json::json!({
+            "sub": MEMBER, "aud": "authenticated", "exp": 4_102_444_800usize,
+            "email": "Grandma@Family.Example ", "email_verified": true,
+        }));
+        assert_eq!(
+            v.verify(&verified).await.unwrap().verified_email.as_deref(),
+            Some("grandma@family.example"),
+        );
+        // An UNVERIFIED email is dropped — anyone can claim an address at signup.
+        let unverified = tok(serde_json::json!({
+            "sub": MEMBER, "aud": "authenticated", "exp": 4_102_444_800usize,
+            "email": "grandma@family.example", "email_verified": false,
+        }));
+        assert_eq!(v.verify(&unverified).await.unwrap().verified_email, None, "unverified email dropped");
+        // An email with no `email_verified` claim is likewise untrusted.
+        let no_flag = tok(serde_json::json!({
+            "sub": MEMBER, "aud": "authenticated", "exp": 4_102_444_800usize, "email": "x@y.z",
+        }));
+        assert_eq!(v.verify(&no_flag).await.unwrap().verified_email, None, "email without the verified flag dropped");
     }
 
     #[tokio::test]
@@ -270,7 +324,7 @@ mod tests {
     async fn jwks_rs256_accepts_a_token_signed_by_a_cached_key() {
         let v = jwks_verifier(Some("authenticated"), Some("https://issuer.example"));
         let id = v.verify(RS_JWT).await.expect("valid RS256 token accepted");
-        assert_eq!(id, Uuid::parse_str(RS_SUB).unwrap());
+        assert_eq!(id.member_id, Uuid::parse_str(RS_SUB).unwrap());
     }
 
     #[tokio::test]

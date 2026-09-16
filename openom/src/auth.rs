@@ -13,10 +13,13 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-/// The authenticated caller. Just the account id for now.
-#[derive(Debug, Clone, Copy)]
+/// The authenticated caller: the account id, plus the provider-VERIFIED email when one is present (OPE-451).
+/// `verified_email` is `Some` only when the JWT carried `email_verified == true` (or, in dev, an explicit
+/// dev-email header) — it is what the invite `recipient_pin` is checked against, and never a bare `email` claim.
+#[derive(Debug, Clone)]
 pub struct Identity {
     pub member_id: Uuid,
+    pub verified_email: Option<String>,
 }
 
 impl FromRequestParts<AppState> for Identity {
@@ -47,7 +50,15 @@ impl FromRequestParts<AppState> for Identity {
                     "dev account provisioning failed",
                 )
             })?;
-            return Ok(Self { member_id: id });
+            // Dev-only: an `x-openom-dev-email` header stands in for a provider-verified email, so a pinned
+            // invite (OPE-451) is exercisable in local/dev + tests. Ignored entirely outside dev mode.
+            let verified_email = parts
+                .headers
+                .get("x-openom-dev-email")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty());
+            return Ok(Self { member_id: id, verified_email });
         }
 
         let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token"))?;
@@ -55,10 +66,10 @@ impl FromRequestParts<AppState> for Identity {
             StatusCode::INTERNAL_SERVER_ERROR,
             "jwt verifier not configured",
         ))?;
-        let member_id = verifier
+        let claims = verifier
             .verify(token)
             .await
             .map_err(|msg| (StatusCode::UNAUTHORIZED, msg))?;
-        Ok(Self { member_id })
+        Ok(Self { member_id: claims.member_id, verified_email: claims.verified_email })
     }
 }

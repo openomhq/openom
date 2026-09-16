@@ -1437,6 +1437,19 @@ fn put_json_as(uri: String, json: &Value, member: Uuid) -> Request<Body> {
         .unwrap()
 }
 
+/// As `put_json_as`, but also carrying the dev-only `x-openom-dev-email` header — the local stand-in for a
+/// provider-verified email (OPE-451), used to exercise the recipient-pin gate.
+fn put_json_with_email_as(uri: String, json: &Value, member: Uuid, email: &str) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {member}"))
+        .header("x-openom-dev-email", email)
+        .body(Body::from(json.to_string()))
+        .unwrap()
+}
+
 /// A summary body: opaque basis tokens, the CAS `expected_generation`, and `(member_id, role)` pairs.
 fn summary_body(basis: &[&str], expected: Option<i64>, members: &[(Uuid, i16)]) -> Value {
     serde_json::json!({
@@ -2900,6 +2913,12 @@ fn invite_body(invite_id: &str, role: &str, engine: &str, expiry_ms: i64) -> Val
     })
 }
 
+fn invite_body_pinned(invite_id: &str, role: &str, engine: &str, expiry_ms: i64, pin_email: &str) -> Value {
+    let mut b = invite_body(invite_id, role, engine, expiry_ms);
+    b["recipient_pin"] = serde_json::Value::String(pin_email.to_string());
+    b
+}
+
 fn claim_body(claimer: Uuid) -> Value {
     serde_json::json!({
         "member_id": claimer.to_string(),
@@ -2969,6 +2988,55 @@ async fn invite_lifecycle_two_accounts() {
     let (s, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), invitee)).await;
     assert_eq!(s, StatusCode::OK, "admit does not delete -- meta still resolves");
     assert_eq!(serde_json::from_slice::<Value>(&mb).unwrap()["status"], "admitted");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn recipient_pinned_invite_is_claimable_only_by_the_matching_verified_email() {
+    // OPE-451: a recipient-pinned invite may be claimed ONLY by a caller whose VERIFIED email matches the pin.
+    // A pin-less bearer invite is unaffected. (Dev auth stands in the verified email via x-openom-dev-email.)
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    // A PINNED invite for grandma@family.example.
+    let iid = fresh_invite_id();
+    let body = invite_body_pinned(&iid, "editor", "chain", now_ms_test() + 3_600_000, "grandma@family.example");
+    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &body, owner)).await;
+    assert_eq!(s, StatusCode::OK, "owner mints a pinned invite");
+
+    // No verified email -> refused with the typed code.
+    let invitee = Uuid::new_v4();
+    let (s, _, b) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a claimant with no verified email is refused");
+    assert_eq!(body_code(&b), "recipient_pin_mismatch");
+
+    // A DIFFERENT verified email -> still refused.
+    let (s, _, _) = send(
+        &app,
+        put_json_with_email_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee, "someone@else.example"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a mismatched verified email is refused");
+
+    // The MATCHING verified email (case-insensitive) -> the claim wins.
+    let (s, _, _) = send(
+        &app,
+        put_json_with_email_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee, "Grandma@Family.Example"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "the matching verified email claims the seat");
+
+    // A pin-LESS bearer invite is unaffected: no email needed.
+    let bare = fresh_invite_id();
+    let bb = invite_body(&bare, "editor", "chain", now_ms_test() + 3_600_000);
+    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &bb, owner)).await;
+    let other = Uuid::new_v4();
+    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{bare}/claim"), &claim_body(other), other)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "an unpinned bearer invite claims with no email");
 }
 
 #[tokio::test]
