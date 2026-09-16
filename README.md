@@ -2,7 +2,7 @@
 
 <img src="assets/tree.svg" alt="openom logo — a tree" width="120" align="right">
 
-[![desktop](https://github.com/mbe24/openom/actions/workflows/desktop.yml/badge.svg)](https://github.com/mbe24/openom/actions/workflows/desktop.yml)
+[![desktop](https://github.com/openomhq/openom/actions/workflows/desktop.yml/badge.svg)](https://github.com/openomhq/openom/actions/workflows/desktop.yml)
 [![Docs](https://readthedocs.org/projects/openom/badge/?version=latest)](https://openom.readthedocs.io/)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue.svg)](LICENSE)
 
