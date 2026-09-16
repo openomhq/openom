@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       packages:
-        description: 'Crates to mutate (space-separated; empty = the default set below). All must already have real test coverage.'
+        description: 'Crates to mutate (space-separated; leave empty for the default security-critical set — crypto/keyring/CRDT + pure core). All must already have real test coverage.'
         default: ''
       timeout:
         description: 'Per-mutant test timeout in seconds (empty = 120). Bounds a mutant that loops forever.'
