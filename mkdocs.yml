@@ -1,8 +1,8 @@
 site_name: openom
 site_description: A local-first, end-to-end-encrypted family tree — one Rust core across desktop, mobile, and the browser
 site_url: https://openom.readthedocs.io/
-repo_url: https://github.com/mbe24/openom
-repo_name: mbe24/openom
+repo_url: https://github.com/openomhq/openom
+repo_name: openomhq/openom
 edit_uri: edit/main/docs/
 docs_dir: docs
 strict: true
