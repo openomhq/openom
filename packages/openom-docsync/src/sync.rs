@@ -246,6 +246,36 @@ impl<S: BlobStore> SyncClient<S> {
             .map_err(|e| SyncError::Sealer(Box::new(e)))
     }
 
+    /// Seal arbitrary client-owned secret bytes under this tree's write-epoch DEK (OPE-453) — a general
+    /// "seal an app secret at rest" primitive, used for the owner's durable invite mint record. Off-band like
+    /// media: no chain state, never an op-log entry, never synced. Returns the wire envelope the caller stores.
+    ///
+    /// # Errors
+    /// Returns [`SyncError::Sealer`] if sealing fails.
+    pub fn seal_app_secret(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.inner
+            .sealer()
+            .0
+            .seal_entry(&SealContext::app_secret(), plaintext)
+            .map(|out| out.envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
+    /// Open an app-secret envelope sealed by [`seal_app_secret`](Self::seal_app_secret), routing across epochs
+    /// so a secret sealed before a key rotation still opens. The `AppSecret` kind check rejects any envelope
+    /// that isn't an app secret (an on-wire entry can never be opened here, nor vice versa).
+    ///
+    /// # Errors
+    /// Returns [`SyncError::Sealer`] if the envelope is out of scope, names an unreachable epoch, is the wrong
+    /// kind, or fails to AEAD-open.
+    pub fn open_app_secret(&self, envelope: &[u8]) -> Result<Vec<u8>> {
+        self.inner
+            .sealer()
+            .0
+            .open_entry(EntryKind::AppSecret, envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
     /// Seal an op-batch as a `Kind::Proposal` envelope under this member's OWN author — an Editor's proposed
     /// edit for a Maintainer to review, NOT a log entry. Off the authoritative log entirely: no replica dot, no
     /// chain link, never appended (the server mints the proposal id; the batch becomes authoritative only when a

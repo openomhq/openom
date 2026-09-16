@@ -48,6 +48,25 @@ test('app-core: a device does not re-download log objects it already pulled', as
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: the durable invite mint record is DEK-sealed at rest', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.inviteSealsMintRecord());
+
+  expect(r.storedByteLen, 'a mint record was persisted').toBeGreaterThan(0);
+  // OPE-453: the at-rest bytes are the sealed envelope, not the plaintext record — they must not parse as the
+  // JSON object carrying sMacClaim.
+  expect(r.looksPlaintext, 'the at-rest bytes are ciphertext, not the plaintext record').toBe(false);
+  // ...yet admit still OPENS the sealed record under the DEK and verifies the claimant's MAC end-to-end.
+  expect(r.admitError, 'admit opened the sealed record without error').toBeNull();
+  expect(r.admitted, 'the seal → store → open round-trip completed through the real worker').toBe(true);
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: compaction publishes a snapshot with the covered header', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

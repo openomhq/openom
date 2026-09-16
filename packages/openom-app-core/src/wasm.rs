@@ -195,6 +195,27 @@ impl AppCoreHandle {
         self.inner.open_history_delta(envelope).map_err(to_js)
     }
 
+    /// Seal arbitrary client-owned secret bytes under this doc's tree DEK (OPE-453), returning the wire
+    /// envelope the worker stores in place of the plaintext (e.g. the durable invite mint record). The DEK
+    /// never leaves the core; only sealed bytes cross to JS.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if sealing fails.
+    #[wasm_bindgen(js_name = sealAppSecret)]
+    pub fn seal_app_secret(&self, plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.inner.seal_app_secret(plaintext).map_err(to_js)
+    }
+
+    /// Open an app-secret envelope sealed by [`seal_app_secret`](Self::seal_app_secret). Throws if it isn't a
+    /// valid app secret for this tree (wrong kind, out of scope, or an unreachable epoch).
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the envelope is the wrong kind/scope/epoch or fails to open.
+    #[wasm_bindgen(js_name = openAppSecret)]
+    pub fn open_app_secret(&self, sealed: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.inner.open_app_secret(sealed).map_err(to_js)
+    }
+
     /// The write-side role pre-check (a UX guard): whether this device may commit directly (solo, or a
     /// current Maintainer+) or must route its edit to [`propose`](Self::propose) (an Editor/Viewer on a
     /// shared tree).

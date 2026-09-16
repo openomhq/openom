@@ -98,6 +98,11 @@ enum Kind {
   KIND_MEDIA = 3;
   KIND_PROPOSAL = 4;
   KIND_COVER = 5;
+  // APP_SECRET is an at-rest wrapper for arbitrary client-owned secret bytes sealed under
+  // the tree DEK (OPE-453) — e.g. the owner's durable invite mint record. It is off-band:
+  // never a log entry, never synced, never projected. The distinct kind domain-separates it
+  // in the AEAD AAD, so an app-secret ciphertext can never open as a snapshot/delta/media/proposal.
+  KIND_APP_SECRET = 6;
 }
 
 // The decrypted body of a KIND_COVER entry (OPE-382 self-heal): the set of entries this cover blesses. Each

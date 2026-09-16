@@ -1457,6 +1457,25 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(Some(BlobData { bytes, mime }))
     }
 
+    /// Seal arbitrary client-owned secret bytes under `doc`'s tree DEK (OPE-453), returning the wire envelope
+    /// the webview stores in place of the plaintext (the durable invite mint record — OPE-447 native parity).
+    /// Unlike media, nothing is persisted here: the caller owns the sealed bytes.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if `doc` is locked/closed; [`HostError::Core`] on a seal failure.
+    pub fn seal_app_secret(&self, doc: &str, bytes: &[u8]) -> Result<Vec<u8>, HostError> {
+        self.with_core(doc, |c| Ok(c.seal_app_secret(bytes)?))
+    }
+
+    /// Open an app-secret envelope sealed by [`seal_app_secret`](Self::seal_app_secret) under `doc`'s DEK.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if `doc` is locked/closed; [`HostError::Core`] if the envelope is the wrong
+    /// kind/scope/epoch or fails to open.
+    pub fn open_app_secret(&self, doc: &str, sealed: &[u8]) -> Result<Vec<u8>, HostError> {
+        self.with_core(doc, |c| Ok(c.open_app_secret(sealed)?))
+    }
+
     /// Whether `doc` has a blob for `hash` (no decryption).
     ///
     /// # Errors

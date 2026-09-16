@@ -191,22 +191,23 @@ function core(docId) {
 // refresh must NOT orphan outstanding invites — admit hard-fails without the record, and the flow spans
 // hours-to-days (mint → out-of-band delivery → claim → owner admits later). The record holds `s_mac_claim` (to
 // verify the claimant's MAC at admit) + role/engine/expiry + the mint-time signer `fp` (the chain admit gate).
-// `s_mac_claim` is UNSEALED at rest for now — DEK-sealing needs a seal primitive (OPE-453); the risk is bounded
-// (owner-device-at-rest, one invite's claim-forgeability, the DEK plaintext is not on disk). NEVER sent to the
-// server; the joiner never holds a mint record.
+// The whole serialized record is DEK-SEALED at rest under the tree DEK (OPE-453, sealAppSecret) — `s_mac_claim`
+// is a secret (it forges that invite's claim MAC), so the ciphertext, not the plaintext, lands in IndexedDB.
+// NEVER sent to the server; the joiner never holds a mint record.
 const MINT_KEY = (inviteId) => `invite-mint::${inviteId}`;
 const encJson = (o) => new TextEncoder().encode(JSON.stringify(o));
 const decJson = (u8) => JSON.parse(new TextDecoder().decode(u8));
 
-async function saveMintRecord(rec) {
+async function saveMintRecord(handle, rec) {
   const wire = { ...rec, sMacClaim: Array.from(rec.sMacClaim) }; // Uint8Array → array for JSON
+  const sealed = handle.sealAppSecret(encJson(wire)); // OPE-453: seal the record bytes under the tree DEK
   const prev = await store().readSnapshot(MINT_KEY(rec.inviteId));
-  await store().putSnapshot(MINT_KEY(rec.inviteId), encJson(wire), prev?.version ?? null);
+  await store().putSnapshot(MINT_KEY(rec.inviteId), sealed, prev?.version ?? null);
 }
-async function loadMintRecord(inviteId) {
+async function loadMintRecord(handle, inviteId) {
   const s = await store().readSnapshot(MINT_KEY(inviteId));
   if (!s) return null;
-  const r = decJson(s.bytes);
+  const r = decJson(handle.openAppSecret(s.bytes)); // OPE-453: unseal under the tree DEK
   return { ...r, sMacClaim: Uint8Array.from(r.sMacClaim) };
 }
 async function deleteMintRecord(inviteId) {
@@ -922,7 +923,7 @@ const api = {
       uuid: docId, role, engine, pin, recipientPin,
       ...(ttlMs ? { ttlMs } : {}), ...(base ? { base } : {}),
     });
-    await saveMintRecord({ ...minted.record, signerIds: mintSigners }); // durable; `record.engine` set by mint()
+    await saveMintRecord(core(docId).handle, { ...minted.record, signerIds: mintSigners }); // durable + DEK-sealed
     return { inviteId: minted.inviteId, link: minted.link, pending: minted.pending };
   },
 
@@ -937,7 +938,7 @@ const api = {
    * deletes — the joiner still needs `/meta` to finish). `opts`: { passphrase, treeId, ownerMemberId, inviteId, claim }.
    */
   async admitMember(docId, { passphrase, treeId, ownerMemberId, inviteId, claim }) {
-    const record = await loadMintRecord(inviteId);
+    const record = await loadMintRecord(core(docId).handle, inviteId);
     if (!record) throw new Error('no local mint record for this invite — admit on the minting device');
     if (Date.now() > record.expiry) throw new Error('invite expired');
     const head = await keyringStore().loadHead(docId);

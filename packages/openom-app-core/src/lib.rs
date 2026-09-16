@@ -553,6 +553,26 @@ impl<S: BlobStore> AppCore<S> {
         Ok(self.client.open_media(sealed)?)
     }
 
+    /// Seal arbitrary client-owned secret bytes under this tree's DEK (OPE-453) — a general "seal an app secret
+    /// at rest" primitive. The caller (the worker / native host) stores the returned envelope in place of the
+    /// plaintext; the durable invite mint record is the first user. Off-band: no op-log, no sync frontier.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if sealing fails.
+    pub fn seal_app_secret(&self, plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
+        Ok(self.client.seal_app_secret(plaintext)?)
+    }
+
+    /// Open an app-secret envelope sealed by [`seal_app_secret`](Self::seal_app_secret), routing across epochs
+    /// so a secret sealed before a rotation still opens. The `AppSecret` kind check rejects any other envelope.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if the envelope is out of scope, names an unreachable epoch, is the wrong kind, or
+    /// fails to open.
+    pub fn open_app_secret(&self, sealed: &[u8]) -> Result<Vec<u8>, CoreError> {
+        Ok(self.client.open_app_secret(sealed)?)
+    }
+
     /// Open a historical `Kind::Delta` envelope to its op-batch — the decrypted change, for the change-history
     /// feed. The plaintext IS the sealed op-batch (a JSON array of channel items, `openom-data-crdt`'s codec),
     /// returned as-is for the caller to render; the AEAD open already authenticated it. Fails if the envelope

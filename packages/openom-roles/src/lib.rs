@@ -54,13 +54,14 @@ impl Access {
 ///
 /// Snapshot & Delta are commits (Maintainer+); Proposal and Media are Editor+. Cover is the self-heal
 /// marker — a Maintainer+ act (it blesses a removed member's data, an authority a mere Editor lacks).
-/// `None` for a kind that can't be role-gated (unspecified).
+/// `None` for a kind that can't be role-gated: `Unspecified`, or `AppSecret` (a local at-rest wrapper that is
+/// never authored to a shared channel — OPE-453).
 #[must_use]
 pub const fn required_role_for_kind(kind: Kind) -> Option<i16> {
     match kind {
         Kind::Snapshot | Kind::Delta | Kind::Cover => Some(ROLE_MAINTAINER),
         Kind::Proposal | Kind::Media => Some(ROLE_EDITOR),
-        Kind::Unspecified => None,
+        Kind::Unspecified | Kind::AppSecret => None,
     }
 }
 

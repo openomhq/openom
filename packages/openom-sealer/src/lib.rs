@@ -30,6 +30,10 @@ pub enum EntryKind {
     /// of covered ciphertext-hashes (each with the author key that signed it), blessing a since-removed
     /// member's entries so they still verify on a fresh replay. Projection-inert — never folded as a claim.
     Cover,
+    /// Arbitrary client-owned secret bytes sealed at rest under the tree DEK (OPE-453): the owner's durable
+    /// invite mint record and any future app secret. Off-band — never a log entry, never synced, never
+    /// projected. Its distinct kind domain-separates it in the AEAD AAD from every on-wire entry.
+    AppSecret,
 }
 
 impl EntryKind {
@@ -40,6 +44,7 @@ impl EntryKind {
             Self::Media => Kind::Media,
             Self::Proposal => Kind::Proposal,
             Self::Cover => Kind::Cover,
+            Self::AppSecret => Kind::AppSecret,
         }
     }
 
@@ -50,6 +55,7 @@ impl EntryKind {
             Kind::Media => Some(Self::Media),
             Kind::Proposal => Some(Self::Proposal),
             Kind::Cover => Some(Self::Cover),
+            Kind::AppSecret => Some(Self::AppSecret),
             Kind::Unspecified => None,
         }
     }
@@ -126,6 +132,23 @@ impl SealContext {
             prev_ciphertext_hash: Vec::new(),
             covers_through_seq: 0,
             blob_id,
+        }
+    }
+
+    /// An at-rest app-secret wrapper (OPE-453): opaque [`Format::RawBytes`] sealed under the write epoch, with
+    /// NO chain state (off the op-log entirely) and no `blob_id`. The opened envelope still checks
+    /// `(tree_id, key_id)` scope + the `AppSecret` kind, so a secret sealed under one tree's DEK can never open
+    /// under another's, and it can never be confused with a snapshot/delta/media/proposal on that tree.
+    #[must_use]
+    pub const fn app_secret() -> Self {
+        Self {
+            kind: EntryKind::AppSecret,
+            format: Format::RawBytes,
+            compression: Compression::None,
+            replica_counter: 0,
+            prev_ciphertext_hash: Vec::new(),
+            covers_through_seq: 0,
+            blob_id: Vec::new(),
         }
     }
 }
@@ -620,6 +643,33 @@ mod tests {
         // A proposal must not open as a delta (domain separation via the kind AAD binding).
         assert!(matches!(
             s.open_entry(EntryKind::Delta, &pout.envelope),
+            Err(SealerError::WrongKind)
+        ));
+    }
+
+    #[test]
+    fn round_trips_an_app_secret_and_is_domain_separated() {
+        // OPE-453: an at-rest app secret round-trips under the DEK, and its distinct kind AAD-binding means it
+        // can neither open as an on-wire entry nor be opened by one — a snapshot/media can't masquerade as it.
+        let s = sealer();
+        let out = s.seal_entry(&SealContext::app_secret(), b"s_mac_claim-bytes").unwrap();
+        assert_eq!(
+            s.open_entry(EntryKind::AppSecret, &out.envelope).unwrap(),
+            b"s_mac_claim-bytes"
+        );
+        // An app secret must not open as a snapshot or media (domain separation via the kind AAD binding)...
+        assert!(matches!(
+            s.open_entry(EntryKind::Snapshot, &out.envelope),
+            Err(SealerError::WrongKind)
+        ));
+        assert!(matches!(
+            s.open_entry(EntryKind::Media, &out.envelope),
+            Err(SealerError::WrongKind)
+        ));
+        // ...and a snapshot must not open as an app secret.
+        let snap = s.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"tree").unwrap();
+        assert!(matches!(
+            s.open_entry(EntryKind::AppSecret, &snap.envelope),
             Err(SealerError::WrongKind)
         ));
     }

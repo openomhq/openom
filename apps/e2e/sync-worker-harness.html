@@ -12,6 +12,23 @@
   <div id="status">loading…</div>
   <script type="module">
     import * as Comlink from '../app/src/vendor/comlink.js';
+    import { claim as buildClaim, parseLink } from '../app/src/core/invite.js';
+
+    // Read a raw row from the worker's IndexedDB (same origin) — used to inspect the at-rest mint record bytes.
+    function readIdbSnapshot(key) {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open('openom');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            const g = db.transaction('snapshots', 'readonly').objectStore('snapshots').get(key);
+            g.onsuccess = () => { db.close(); resolve(g.result ? g.result.bytes : null); };
+            g.onerror = () => { db.close(); reject(g.error); };
+          } catch (e) { db.close(); reject(e); }
+        };
+      });
+    }
 
     const enc = new TextEncoder();
     const DID = 'did:key:z6MkHarness';
@@ -418,6 +435,53 @@
           // OPE-293: after the share, the owner's addMember asserted the resolved membership to /access.
           access: transport._access(),
         };
+      },
+
+      // OPE-453: the owner's durable invite mint record is DEK-sealed at rest. Minting stores CIPHERTEXT (not the
+      // plaintext s_mac_claim) in IndexedDB, and admit still OPENS it to verify the claimant's MAC — proving the
+      // seal/open round-trip through the real worker + wasm (sealAppSecret/openAppSecret).
+      async inviteSealsMintRecord() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(5);
+        const ownerDoc = `invite-owner-${crypto.randomUUID()}`;
+        const memberDoc = `invite-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+
+        // Mint an invite → seals + durably stores the mint record.
+        const { inviteId, link } = await owner.inviteMember(ownerDoc, { role: 'editor' });
+
+        // The at-rest bytes must be CIPHERTEXT — not the plaintext JSON record (which would parse + carry sMacClaim).
+        const storedBytes = await readIdbSnapshot(`invite-mint::${inviteId}`);
+        const asText = new TextDecoder().decode(new Uint8Array(storedBytes ?? []));
+        let looksPlaintext = false;
+        try { looksPlaintext = Object.hasOwn(JSON.parse(asText), 'sMacClaim'); } catch { looksPlaintext = false; }
+
+        // Member provisions an account, builds a claim from the link; owner admits → OPENS the sealed record.
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        const parsed = parseLink(link);
+        const claimObj = await buildClaim({
+          s: parsed.s, inviteId, uuid: ownerDoc, role: 'editor',
+          memberId: 'acct-member', hpkePublicKey: acct.hpkePublicKey, authorPublicKey: acct.authorPublicKey,
+        });
+        let admitted = false; let admitError = null;
+        try {
+          await owner.admitMember(ownerDoc, {
+            passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', inviteId, claim: claimObj,
+          });
+          admitted = true;
+        } catch (e) { admitError = String(e?.cause ?? e?.message ?? e); }
+
+        return { storedByteLen: storedBytes?.length ?? 0, looksPlaintext, admitted, admitError };
       },
 
       // Editor propose → maintainer approve through the real worker (OPE-360): an owner shares a tree with an

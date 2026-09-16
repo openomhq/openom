@@ -160,6 +160,7 @@ pub enum Kind {
     Media = 3,
     Proposal = 4,
     Cover = 5,
+    AppSecret = 6,
 }
 impl Kind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -174,6 +175,7 @@ impl Kind {
             Self::Media => "KIND_MEDIA",
             Self::Proposal => "KIND_PROPOSAL",
             Self::Cover => "KIND_COVER",
+            Self::AppSecret => "KIND_APP_SECRET",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -185,6 +187,7 @@ impl Kind {
             "KIND_MEDIA" => Some(Self::Media),
             "KIND_PROPOSAL" => Some(Self::Proposal),
             "KIND_COVER" => Some(Self::Cover),
+            "KIND_APP_SECRET" => Some(Self::AppSecret),
             _ => None,
         }
     }

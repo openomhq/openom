@@ -654,6 +654,19 @@ fn blob_delete(state: State<'_, Host>, doc: String, hash: String) -> Result<(), 
     state.blob_delete(&doc, &hash).map_err(e)
 }
 
+/// Seal arbitrary client-owned secret bytes under `doc`'s tree DEK (OPE-453) — the durable invite mint record.
+/// Returns the wire envelope the webview stores in place of the plaintext; the DEK stays native.
+#[tauri::command]
+fn core_seal_app_secret(state: State<'_, Host>, doc: String, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    state.seal_app_secret(&doc, &bytes).map_err(e)
+}
+
+/// Open an app-secret envelope sealed by `core_seal_app_secret` under `doc`'s DEK.
+#[tauri::command]
+fn core_open_app_secret(state: State<'_, Host>, doc: String, sealed: Vec<u8>) -> Result<Vec<u8>, String> {
+    state.open_app_secret(&doc, &sealed).map_err(e)
+}
+
 #[tauri::command]
 fn blob_list(state: State<'_, Host>, doc: String) -> Result<Vec<String>, String> {
     state.blob_list(&doc).map_err(e)
@@ -744,7 +757,9 @@ pub fn run() {
             blob_meta,
             blob_get,
             blob_delete,
-            blob_list
+            blob_list,
+            core_seal_app_secret,
+            core_open_app_secret
         ])
         .run(tauri::generate_context!())
         .expect("error while running openom");

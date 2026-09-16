@@ -85,19 +85,23 @@ export function createNativeAppCore() {
   // Owner-local DURABLE invite mint records (invite model v3), keyed by invite_id in the webview's localStorage —
   // a refresh must not orphan outstanding invites (admit hard-fails without the record; the flow spans
   // hours-days). Holds `s_mac_claim` + role/engine/expiry + the mint-time flat signer set (the chain admit gate).
-  // `s_mac_claim` is UNSEALED at rest for now (OPE-453; bounded owner-device-at-rest risk). NEVER sent to the host
-  // or the server. Mirrors the web worker's IndexedDB mint record — different store (main thread), same purpose.
+  // The whole serialized record is DEK-SEALED at rest under the tree DEK (OPE-453, core_seal_app_secret) —
+  // `s_mac_claim` is a secret (it forges that invite's claim MAC), so localStorage holds the ciphertext (as a
+  // JSON byte array), never the plaintext. NEVER sent to the host over the wire in the clear or to the server.
+  // Mirrors the web worker's IndexedDB mint record — different store (main thread), same purpose.
   const MINT_KEY = (inviteId) => `openom:invite-mint:${inviteId}`;
-  const saveMintRecord = (rec) => {
-    try { lstore()?.setItem(MINT_KEY(rec.inviteId), JSON.stringify({ ...rec, sMacClaim: Array.from(rec.sMacClaim) })); } catch { /* no storage */ }
+  const saveMintRecord = async (docId, rec) => {
+    const plaintext = new TextEncoder().encode(JSON.stringify({ ...rec, sMacClaim: Array.from(rec.sMacClaim) }));
+    const sealed = u8(await call('core_seal_app_secret', { doc: docId, bytes: bytes(plaintext) }));
+    try { lstore()?.setItem(MINT_KEY(rec.inviteId), JSON.stringify(Array.from(sealed))); } catch { /* no storage */ }
   };
-  const loadMintRecord = (inviteId) => {
-    try {
-      const raw = lstore()?.getItem(MINT_KEY(inviteId));
-      if (!raw) return null;
-      const o = JSON.parse(raw);
-      return { ...o, sMacClaim: Uint8Array.from(o.sMacClaim) };
-    } catch { return null; }
+  const loadMintRecord = async (docId, inviteId) => {
+    let raw;
+    try { raw = lstore()?.getItem(MINT_KEY(inviteId)); } catch { return null; }
+    if (!raw) return null;
+    const plaintext = u8(await call('core_open_app_secret', { doc: docId, sealed: JSON.parse(raw) }));
+    const o = JSON.parse(new TextDecoder().decode(plaintext));
+    return { ...o, sMacClaim: Uint8Array.from(o.sMacClaim) };
   };
   const deleteMintRecord = (inviteId) => { try { lstore()?.removeItem(MINT_KEY(inviteId)); } catch { /* best-effort */ } };
 
@@ -335,7 +339,7 @@ export function createNativeAppCore() {
         uuid: docId, role, engine: material.engine, pin: u8(material.pin), recipientPin,
         ...(ttlMs ? { ttlMs } : {}), ...(base ? { base } : {}),
       });
-      saveMintRecord({ ...minted.record, signerIds: mintSigners });
+      await saveMintRecord(docId, { ...minted.record, signerIds: mintSigners });
       return { inviteId: minted.inviteId, link: minted.link, pending: minted.pending };
     },
     // Owner: admit a claimed invite — durable record + local expiry re-check + the anti-substitution admit gate
@@ -343,7 +347,7 @@ export function createNativeAppCore() {
     // removed co-owner pre-minting an invite for themselves; tolerate signers ADDED since mint), then verify the
     // claim MAC + addMember at the record's role. The caller MARKS the server invite admitted.
     async admitMember(docId, { passphrase, treeId, ownerMemberId, inviteId, claim }) {
-      const record = loadMintRecord(inviteId);
+      const record = await loadMintRecord(docId, inviteId);
       if (!record) throw makeError('internal', { cause: 'no local mint record for this invite — admit on the minting device' });
       if (Date.now() > record.expiry) throw makeError('internal', { cause: 'invite expired' });
       const summary = JSON.parse(await call('core_membership_summary', { doc: docId }));

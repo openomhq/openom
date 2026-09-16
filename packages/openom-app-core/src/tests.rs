@@ -198,6 +198,24 @@ fn plan_fetch_skips_already_pulled_log_objects_and_never_re_uploads_them() {
     assert!(live_ids(&b).contains("pA"), "B's state is intact after the skipping tick");
 }
 
+#[test]
+fn app_secret_round_trips_through_the_core_and_is_kind_separated() {
+    // OPE-453: the general seal-app-secret primitive round-trips arbitrary bytes under the tree DEK (used for
+    // the durable invite mint record), and the AppSecret kind keeps it disjoint from the media channel.
+    let dek = generate_dek().unwrap();
+    let a = core(b"replica-A", dek, Arc::new(MemoryBlob::new()));
+    let secret = b"the invite mint record's s_mac_claim".to_vec();
+
+    let sealed = a.seal_app_secret(&secret).unwrap();
+    assert_ne!(sealed, secret, "the stored bytes are ciphertext, not the plaintext secret");
+    assert_eq!(a.open_app_secret(&sealed).unwrap(), secret, "it opens back to the plaintext");
+
+    // A media envelope must NOT open as an app secret (wrong kind), and vice versa — no cross-channel confusion.
+    let (_hash, media) = a.seal_media(&secret).unwrap();
+    assert!(a.open_app_secret(&media).is_err(), "a media envelope can't open as an app secret");
+    assert!(a.open_media(&sealed).is_err(), "an app secret can't open as media");
+}
+
 fn live_ids(core: &AppCore<MemoryBlob>) -> BTreeSet<String> {
     core.live_records()
         .unwrap()
