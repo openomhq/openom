@@ -20,7 +20,8 @@ const REGISTRY_VOLUME = 'openom-cargo-registry';
 const TRIPLE = (() => {
   if (process.platform === 'win32') return 'x86_64-pc-windows-msvc';
   if (process.platform === 'darwin') return process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
-  return process.arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
+  // wasm-bindgen publishes the Linux binaries as MUSL (static) — there is no x86_64 linux-gnu asset.
+  return process.arch === 'arm64' ? 'aarch64-unknown-linux-musl' : 'x86_64-unknown-linux-musl';
 })();
 const BINDGEN_BIN = process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen';
 const TARGET_SUBDIR = 'target-wasm';
