@@ -1,7 +1,8 @@
 name: Deploy to GitHub Pages
 
-# Publishes the web app to GitHub Pages. There is nothing to build — app/ ships
-# exactly as Tauri loads it; only %SITE_URL% is filled in.
+# Publishes the web app to GitHub Pages. The app ships as Tauri loads it — no bundler — but it loads ONE
+# gitignored build artifact, the openom-app-core wasm, which CI must compile before assembling the site.
+# Then %SITE_URL% / %DEMO% are filled in.
 
 on:
   workflow_dispatch:
@@ -31,6 +32,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # Build the one wasm module the app loads (openom-app-core) — it's a gitignored artifact, absent on a
+      # fresh checkout. The script compiles Rust→wasm in Docker (pre-installed on the runner) and runs
+      # wasm-bindgen (version-pinned to Cargo.lock) natively. Uncached, ~several minutes — fine for a manual deploy.
+      - name: Build the app-core wasm
+        run: node scripts/build-app-core.mjs
 
       # Visitors land in the app, not in a preview page. The device frames sit
       # next to it under /preview.html.

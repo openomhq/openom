@@ -14,7 +14,15 @@ const CRATE = path.join(REPO, 'packages', 'openom-app-core');
 const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 
-const TRIPLE = 'x86_64-pc-windows-msvc';
+// The HOST triple for the wasm-bindgen CLI download — the Rust build runs in Docker (Linux), but the
+// bindings generator runs natively on THIS machine, so it must match the host OS/arch. Covers a Windows dev
+// box and the Linux CI runner (the Pages build) alike.
+const TRIPLE = (() => {
+  if (process.platform === 'win32') return 'x86_64-pc-windows-msvc';
+  if (process.platform === 'darwin') return process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+  return process.arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
+})();
+const BINDGEN_BIN = process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen';
 const TARGET_SUBDIR = 'target-wasm';
 const CONTAINER_TARGET = `/work/packages/openom-app-core/${TARGET_SUBDIR}`;
 const PROFILE = process.env.WASM_PROFILE || 'wasm-release';
@@ -66,7 +74,7 @@ function resolvedBindgenVersion() {
 
 async function ensureWasmBindgen(ver) {
   const dir = path.join(TOOLS_DIR, `wasm-bindgen-${ver}-${TRIPLE}`);
-  const exe = path.join(dir, 'wasm-bindgen.exe');
+  const exe = path.join(dir, BINDGEN_BIN);
   if (fs.existsSync(exe)) return exe;
   const name = `wasm-bindgen-${ver}-${TRIPLE}`;
   const url = `https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${ver}/${name}.tar.gz`;
@@ -78,7 +86,7 @@ async function ensureWasmBindgen(ver) {
   await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tarball));
   run('tar', ['-xzf', path.basename(tarball)], { cwd: TOOLS_DIR });
   fs.rmSync(tarball, { force: true });
-  if (!fs.existsSync(exe)) throw new Error(`wasm-bindgen.exe not found after extracting ${name}`);
+  if (!fs.existsSync(exe)) throw new Error(`${BINDGEN_BIN} not found after extracting ${name}`);
   console.log(`[✓] Installed wasm-bindgen CLI to ${path.relative(REPO, dir)}`);
   return exe;
 }
