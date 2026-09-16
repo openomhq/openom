@@ -18,13 +18,10 @@ on:
       packages:
         description: 'Crates to mutate (space-separated; leave empty for the default security-critical set — crypto/keyring/CRDT + pure core). All must already have real test coverage.'
         default: ''
-      timeout:
-        description: 'Per-mutant test timeout in seconds (empty = 120). Bounds a mutant that loops forever.'
-        default: ''
   schedule:
     # Weekly deep run — Monday 03:13 UTC (≈ 04:13 CET winter / 05:13 CEST summer). At ~2h it finishes
     # ~06–07am German, a wide buffer before 9 even if GitHub delays the scheduled start. Cron has NO
-    # workflow_dispatch inputs, so the run step falls back to DEFAULT_PACKAGES / DEFAULT_TIMEOUT below.
+    # workflow_dispatch inputs, so the run step falls back to DEFAULT_PACKAGES below.
     - cron: '13 3 * * 1'
 
 env:
@@ -32,7 +29,6 @@ env:
   # The canonical default set (one source of truth for both the cron run and a no-input dispatch): the
   # security-critical crypto / envelope / keyring / CRDT crates + the PURE crates from the OPE-243 audit.
   DEFAULT_PACKAGES: 'edsign openom-crypto keyeo-crypto openom-sealer openom-data-crdt keyeo-chain keyeo-dag openom-keyring-chain openom-keyring-dag openom-protocol openom-roles did format-jcs format-edtf openom-data-model openom-data-projection'
-  DEFAULT_TIMEOUT: '120'
 
 jobs:
   mutants:
@@ -64,13 +60,18 @@ jobs:
       - name: cargo mutants
         run: |
           set -euo pipefail
-          # Dispatch inputs override; empty (a no-input dispatch, or ANY scheduled run) falls back to the
-          # DEFAULT_* env above — without this a cron run would pass no --package and mutate the whole workspace.
+          # The packages input overrides; empty (a no-input dispatch, or ANY scheduled run) falls back to
+          # DEFAULT_PACKAGES — without this a cron run would pass no --package and mutate the whole workspace.
           pkgs="${{ github.event.inputs.packages }}"; pkgs="${pkgs:-$DEFAULT_PACKAGES}"
-          to="${{ github.event.inputs.timeout }}"; to="${to:-$DEFAULT_TIMEOUT}"
           args=()
           for p in $pkgs; do args+=("--package" "$p"); done
-          cargo mutants -vV --in-place --timeout "$to" "${args[@]}"
+          # --baseline=skip so the fixed --timeout bounds ONLY per-mutant tests (one crate, a few seconds), not
+          # the whole-suite unmutated baseline (~51s across all 16 crates) — a baseline that exceeds --timeout is
+          # FATAL (exit 4), unlike a per-mutant timeout which is just recorded and skipped. The tree's green state
+          # is already verified by the web/desktop/integration workflows, so skipping the baseline check is safe.
+          # 20s clears any single crate's real test time yet kills a runaway-allocation mutant at ~2 GB — far below
+          # the ~110s point where such a mutant fills RAM and OOM-kills the whole runner.
+          cargo mutants -vV --in-place --baseline=skip --timeout 20 "${args[@]}"
 
       - uses: actions/upload-artifact@v4
         if: always()
