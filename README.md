@@ -58,8 +58,8 @@ one app, two shells.
 | `desktop.yml` | push to `main` / PR / manual | Clippy gate (runs first, blocks the matrix), then the Tauri build on Windows/macOS/Linux + the store-conformance suite (MemoryStore ≡ SqliteStore) |
 | `integration.yml` | push to `main` / PR / manual | The server contract suite (`openom/tests/api.rs` + storage checksum) against a live Postgres + MinIO — the `#[ignore]`d tests the unit jobs skip |
 | `pages.yml` | manual | Publishes the web app to GitHub Pages |
-| `mobile.yml` | manual | Android APK + unsigned iOS-simulator build (unsigned `--debug` build-check artifacts — the SDKs are slow, no signing pipeline yet) |
-| `mutants.yml` | manual | Mutation testing (`cargo-mutants`) over the security-critical crypto/keyring/CRDT crates + the pure-core crates — surfaces test gaps a green suite hides |
+| `mobile.yml` | manual / weekly ×2 (Mon + Thu) | Android APK + unsigned iOS-simulator build (unsigned `--debug` build-check artifacts — the SDKs are slow, no signing pipeline yet) |
+| `mutants.yml` | manual / weekly (Mon) | Mutation testing (`cargo-mutants`) over the security-critical crypto/keyring/CRDT crates + the pure-core crates — surfaces test gaps a green suite hides |
 
 ## Brand
 
