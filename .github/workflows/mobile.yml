@@ -27,7 +27,14 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # `packages: platform-tools` drops the action's default `tools` (the obsolete "SDK Tools" package, removed
+      # from the SDK — `sdkmanager tools` now fails with "Failed to find package 'tools'"). We only need
+      # platform-tools here; the Gradle build fetches the required platform + build-tools itself (licenses are
+      # pre-accepted). `log-accepted-android-sdk-licenses: false` suppresses the auto-accepted-license wall.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
 
       - name: Android NDK
         run: sdkmanager --install "ndk;26.1.10909125"
