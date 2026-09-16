@@ -7,6 +7,11 @@ name: mobile
 
 on:
   workflow_dispatch:
+  # Otherwise never triggered automatically. A twice-weekly build-check (Mon + Thu) catches mobile-build drift
+  # (Android SDK / Tauri / Rust) without waiting for a manual run. Cron is UTC: 04:20 ≈ 05:20 German winter
+  # (CET) / 06:20 summer (CEST) — early morning. macOS/iOS minutes are pricey, so twice a week, not per-push.
+  schedule:
+    - cron: '20 4 * * 1,4'
 
 jobs:
   android:
