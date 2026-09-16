@@ -79,13 +79,16 @@ export function gateView(app) {
 }
 
 function welcomeScreen(app) {
-  const kids = [
-    mark(),
-    title(t('gate-welcome-title')),
-    primary(t('gate-start'), { type: 'button', onClick: () => app.startCreate() }),
-  ];
-  // The demo is dev/marketing only (build-time flag); a production user never sees it.
-  if (app.demoEnabled) kids.push(ghost(t('gate-demo'), () => app.startDemo()));
+  const kids = [mark(), title(t('gate-welcome-title'))];
+  // On a DEMO/preview deploy (dev/marketing build-time flag, no managed server → local-only) we lead with —
+  // and only offer — the demo: it opens the FULL app on a sample tree with zero friction. Surfacing "start a
+  // real tree" here would only mint fragile local-only data on a throwaway domain; the real get-started CTA
+  // belongs on the shipped apps. A production build (flag off) shows the real "start your family tree" flow.
+  if (app.demoEnabled) {
+    kids.push(primary(t('gate-demo'), { type: 'button', onClick: () => app.startDemo() }));
+  } else {
+    kids.push(primary(t('gate-start'), { type: 'button', onClick: () => app.startCreate() }));
+  }
   return shell(...kids);
 }
 

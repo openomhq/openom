@@ -46,10 +46,13 @@ jobs:
 
       # Absolute origin for the social-preview meta. The deploy knows its own
       # URL, so .env.demo is only the fallback for local and fork runs.
+      # This Pages deploy is a public DEMO/preview (no managed server wired → local-only), so turn the demo
+      # affordance ON. Production builds that want the no-demo state simply don't set DEMO.
       - name: Fill in SITE_URL
         working-directory: apps
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
+          DEMO: "true"
         run: node scripts/site-url.mjs ../_site
 
       - uses: actions/upload-pages-artifact@v3
