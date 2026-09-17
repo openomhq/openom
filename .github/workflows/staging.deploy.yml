@@ -1,0 +1,99 @@
+name: staging.deploy
+
+# Server deploy to staging: assume the OIDC deploy role (no static AWS keys), build the Lambda once
+# with cargo-lambda, upload a SHA-keyed artifact, run migrations out-of-band against the DIRECT Neon
+# URL, terraform-apply (which publishes a new Lambda version + moves the `live` alias the Function URL
+# serves), then smoke /health. Rollback = re-point the alias to the prior version.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'openom/**'
+      - 'packages/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'infra/terraform/**'
+      - '.github/workflows/staging.deploy.yml'
+
+concurrency:
+  group: staging.deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # OIDC federation to AWS
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 30
+    env:
+      AWS_REGION: eu-central-1
+      ARTIFACTS_BUCKET: openom-staging-artifacts-841547768414
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      # cargo-lambda cross-compiles the Rust server to an arm64 `bootstrap` zip (uses zig under the hood).
+      # pipx keeps it isolated + on PATH; cargo-lambda fetches zig on first build.
+      - name: Install cargo-lambda
+        run: pipx install cargo-lambda
+
+      - name: Build the Lambda (arm64)
+        run: cargo lambda build --release --arm64 -p openom --bin openom
+        # → target/lambda/openom/bootstrap.zip
+
+      - name: Assume the AWS deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload the SHA-keyed artifact
+        run: aws s3 cp target/lambda/openom/bootstrap.zip "s3://${ARTIFACTS_BUCKET}/openom/${GITHUB_SHA}.zip"
+
+      # Migrations run OUT-OF-BAND against the DIRECT endpoint (the runtime never migrates — OPE-506).
+      # Additive-only migrations, so running before the new code goes live is safe for the old code.
+      - name: Migrate (direct URL)
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: cargo run -p openom --bin migrate
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform apply (publishes the version, moves the alias)
+        working-directory: infra/terraform
+        env:
+          # Artifact + secrets + env-specific config → the Lambda's env vars (GitHub is the source of truth).
+          TF_VAR_lambda_artifact_key: openom/${{ github.sha }}.zip
+          TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
+          TF_VAR_s3_access_key: ${{ secrets.R2_ACCESS_KEY_ID }}
+          TF_VAR_s3_secret_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TF_VAR_otlp_headers: authorization=Bearer ${{ secrets.AXIOM_TOKEN }},x-axiom-dataset=${{ vars.AXIOM_DATASET }}
+          TF_VAR_internal_gc_token: ${{ secrets.OPENOM_INTERNAL_GC_TOKEN }}
+          TF_VAR_otlp_endpoint: ${{ vars.AXIOM_OTLP_ENDPOINT }}
+          TF_VAR_s3_endpoint: ${{ vars.R2_ENDPOINT }}
+          TF_VAR_s3_public_endpoint: ${{ vars.R2_ENDPOINT }}
+          TF_VAR_s3_bucket: ${{ vars.R2_BUCKET }}
+          TF_VAR_s3_region: auto
+          TF_VAR_jwks_url: ${{ vars.SUPABASE_JWKS_URL }}
+          TF_VAR_jwt_issuer: ${{ vars.SUPABASE_JWT_ISS }}
+          TF_VAR_jwt_audience: ${{ vars.SUPABASE_JWT_AUD }}
+          TF_VAR_web_origins: ${{ vars.OPENOM_WEB_ORIGINS }}
+        run: |
+          terraform init -backend-config=env/staging.s3.tfbackend
+          terraform apply -auto-approve -var-file=env/staging.tfvars
+
+      # Basic liveness gate (the richer JWT'd round-trip smoke comes later).
+      - name: Smoke — /health on the Function URL
+        working-directory: infra/terraform
+        run: |
+          url=$(terraform output -raw api_url)
+          echo "staging API: $url"
+          curl -fsS "${url}health" && echo " — /health OK"

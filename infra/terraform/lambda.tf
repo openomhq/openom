@@ -75,6 +75,7 @@ resource "aws_lambda_function" "api" {
   s3_key        = var.lambda_artifact_key
   memory_size   = 256
   timeout       = 15
+  publish       = true # immutable versions, so the alias promotes/rolls back atomically
   depends_on    = [aws_iam_role_policy.exec_logs, aws_cloudwatch_log_group.api]
 
   environment {
@@ -104,12 +105,33 @@ resource "aws_lambda_function" "api" {
   }
 }
 
-# Public front door — the app enforces JWT auth; CORS is handled in-app (the CorsLayer), so no CORS
-# block here (a Function-URL CORS config would shadow it and split the source of truth).
+# The "live" alias the Function URL serves. CI promotes it to each newly published version; a
+# rollback re-points it to the prior version with no code change.
+resource "aws_lambda_alias" "live" {
+  count            = local.lambda_on
+  name             = "live"
+  function_name    = aws_lambda_function.api[0].function_name
+  function_version = aws_lambda_function.api[0].version
+}
+
+# Public front door → the ALIAS (not $LATEST). The app enforces JWT auth; CORS is handled in-app
+# (the CorsLayer), so no Function-URL CORS block (it would shadow the app + split the source of truth).
 resource "aws_lambda_function_url" "api" {
   count              = local.lambda_on
   function_name      = aws_lambda_function.api[0].function_name
+  qualifier          = aws_lambda_alias.live[0].name
   authorization_type = "NONE"
+}
+
+# AuthType NONE needs an explicit public invoke grant, scoped to the alias.
+resource "aws_lambda_permission" "url_public" {
+  count                  = local.lambda_on
+  statement_id           = "AllowPublicFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.api[0].function_name
+  qualifier              = aws_lambda_alias.live[0].name
+  principal              = "*"
+  function_url_auth_type = "NONE"
 }
 
 # --- CI-perms extension (OPE-17) ---
@@ -118,10 +140,13 @@ resource "aws_lambda_function_url" "api" {
 # the admin, since the DenySelfMutation in oidc.tf stops CI widening its own policy.
 data "aws_iam_policy_document" "ci_deploy_lambda" {
   statement {
-    sid       = "Function"
-    effect    = "Allow"
-    actions   = ["lambda:*"]
-    resources = ["arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${local.fn_name}"]
+    sid     = "Function"
+    effect  = "Allow"
+    actions = ["lambda:*"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${local.fn_name}",
+      "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${local.fn_name}:*",
+    ]
   }
   # A few Lambda calls the API only allows at "*" (no resource-level support).
   statement {
