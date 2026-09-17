@@ -394,8 +394,14 @@ async fn cross_owner_access_forbidden() {
     send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rO/0"), b"d0", owner, true)).await;
 
     // A non-owner is refused on read, list, write, and history — the seam guards every per-tree data op.
-    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rO/0"), other)).await;
+    let (s, headers, _) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rO/0"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read a blob");
+    // Guards that `app()` still wires the request_id middleware (the `with_trace_layers` extraction
+    // must not silently drift from production): every response echoes x-request-id.
+    assert!(
+        headers.contains_key("x-request-id"),
+        "app() must echo x-request-id on every response",
+    );
     let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/blobs"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot list");
     let (s, _, _) = send(

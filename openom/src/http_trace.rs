@@ -12,8 +12,10 @@ use axum::body::Body;
 use axum::extract::{MatchedPath, Request};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Response};
 use axum::middleware::Next;
+use axum::Router;
 use opentelemetry::propagation::Extractor;
 use opentelemetry::trace::TraceContextExt;
+use tower_http::trace::TraceLayer;
 use tracing::field::Empty;
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -103,6 +105,24 @@ pub(crate) fn on_response(res: &Response<Body>, _latency: Duration, span: &Span)
     if status.is_server_error() {
         span.record("otel.status_code", "ERROR");
     }
+}
+
+/// Apply the request-tracing layers to a router: the SERVER span ([`make_span`]/[`on_response`])
+/// and the [`request_id`] middleware (applied last = OUTERMOST, so the id is present when the span
+/// is built and is echoed on the response). Extracted so `app()` and the tracing tests share ONE
+/// wiring — the test proves span/route/status/id behavior on a stateless router, and `app()` can't
+/// silently drift from it (a companion `api.rs` assertion checks the real `app()` still applies it).
+pub fn with_trace_layers<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_span)
+                .on_response(on_response),
+        )
+        .layer(axum::middleware::from_fn(request_id))
 }
 
 /// Adapt an HTTP `HeaderMap` to OpenTelemetry's propagation `Extractor` — so we can read W3C

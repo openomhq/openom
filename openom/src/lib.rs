@@ -25,6 +25,9 @@ pub mod storage;
 pub mod telemetry;
 pub mod trees;
 
+// The request-tracing layer wiring, shared between `app()` and the tracing integration tests.
+pub use http_trace::with_trace_layers;
+
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
@@ -33,7 +36,6 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use config::Config;
@@ -173,21 +175,12 @@ pub fn app(state: AppState) -> Router {
             .route("/dev/media/gc", post(media::sweep_dev))
             .route("/dev/log/gc", post(gc::gc_dev));
     }
-    router
-        // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media)
-        // take the presigned path, never this proxy.
-        .layer(DefaultBodyLimit::max(trees::MAX_OBJECT_BYTES))
-        // One SERVER root span per request — method + matched route + request id, no PII/query
-        // strings (SERVER-DATA-FORMAT §7). It continues an incoming W3C trace and records the
-        // response status; `telemetry` exports it over OTLP. `request_id` runs OUTSIDE (applied
-        // last = outermost) so the id is present when the span is built + is echoed back.
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(http_trace::make_span)
-                .on_response(http_trace::on_response),
-        )
-        .layer(axum::middleware::from_fn(http_trace::request_id))
-        .with_state(state)
+    // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media) take the
+    // presigned path, never this proxy. Innermost of the outer layers.
+    let router = router.layer(DefaultBodyLimit::max(trees::MAX_OBJECT_BYTES));
+    // One SERVER root span per request + the x-request-id correlation id — see `with_trace_layers`.
+    // Shared with the tracing tests so this wiring has a single source of truth.
+    http_trace::with_trace_layers(router).with_state(state)
 }
 
 /// Wire up the shared state: a lazy Postgres pool, run migrations, seed the local

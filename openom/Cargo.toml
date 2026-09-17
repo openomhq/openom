@@ -68,6 +68,9 @@ tower-http.workspace = true
 [dev-dependencies]
 # Integration tests drive the router in-process via ServiceExt::oneshot (no socket).
 tower = { version = "0.5", features = ["util"] }
+# The tracing tests capture spans in-process via opentelemetry_sdk's InMemorySpanExporter +
+# SimpleSpanProcessor (the `testing` feature) — test build only, never the release Lambda.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # tests/api.rs mints ad-hoc signer identities via openom_keyring_chain::generate_identity (test-util gated).
 openom-keyring-chain = { workspace = true, features = ["test-util"] }
 # tests/api.rs builds keyring fixtures whose DEK epochs/wraps are keyeo key material.
