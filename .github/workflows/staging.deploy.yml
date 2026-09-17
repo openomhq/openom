@@ -43,8 +43,8 @@ jobs:
           pipx install cargo-lambda
 
       - name: Build the Lambda (arm64)
-        run: cargo lambda build --release --arm64 -p openom --bin openom
-        # → target/lambda/openom/bootstrap.zip
+        run: cargo lambda build --release --arm64 -p openom --bin openom --output-format zip
+        # → target/lambda/openom/bootstrap.zip (a `bootstrap`-at-root zip for provided.al2023)
 
       - name: Assume the AWS deploy role (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -53,7 +53,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Upload the SHA-keyed artifact
-        run: aws s3 cp target/lambda/openom/bootstrap.zip "s3://${ARTIFACTS_BUCKET}/openom/${GITHUB_SHA}.zip"
+        run: |
+          zip=$(find target/lambda -name bootstrap.zip | head -n1)
+          test -n "$zip" || { echo "no bootstrap.zip under target/lambda:"; ls -R target/lambda; exit 1; }
+          aws s3 cp "$zip" "s3://${ARTIFACTS_BUCKET}/openom/${GITHUB_SHA}.zip"
 
       # Migrations run OUT-OF-BAND against the DIRECT endpoint (the runtime never migrates — OPE-506).
       # Additive-only migrations, so running before the new code goes live is safe for the old code.
