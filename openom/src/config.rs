@@ -15,6 +15,8 @@
 //! Supabase" (real JWT verification over local `MinIO`). Everything is read from the environment.
 
 use std::env;
+use std::fmt;
+
 use uuid::Uuid;
 
 /// Where the API process runs. `Local` = a long-running local HTTP server (+ pretty logs +
@@ -109,7 +111,7 @@ pub enum JwtAlg {
     Rs256,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Runtime preset (local server vs deployed serverless). See the module docs.
     pub runtime: Runtime,
@@ -176,6 +178,41 @@ pub struct Config {
     /// `jwt_issuer`) — and the SAME value is the one source of truth the R2 bucket CORS and the Pages
     /// CSP `connect-src` also read, so they can't drift. Empty (unset) → no cross-origin (same-origin).
     pub web_origins: Vec<String>,
+}
+
+impl fmt::Debug for Config {
+    /// Hand-rolled so secrets are REDACTED (presence preserved) — a stray `{:?}` in a log or panic
+    /// must never leak the DB password, the S3 keys, or the JWT/OTLP/GC secrets. Non-secret fields
+    /// print normally. Keep in sync when adding a field: a new SECRET must be redacted here.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redact = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("Config")
+            .field("runtime", &self.runtime)
+            .field("env", &self.env)
+            .field("stack", &self.stack)
+            .field("storage", &self.storage)
+            .field("auth", &self.auth)
+            .field("http_addr", &self.http_addr)
+            .field("database_url", &"<redacted>") // embeds the Postgres password
+            .field("s3_endpoint", &self.s3_endpoint)
+            .field("s3_public_endpoint", &self.s3_public_endpoint)
+            .field("s3_bucket", &self.s3_bucket)
+            .field("s3_region", &self.s3_region)
+            .field("s3_access_key", &"<redacted>")
+            .field("s3_secret_key", &"<redacted>")
+            .field("jwt_alg", &self.jwt_alg)
+            .field("jwt_secret", &redact(&self.jwt_secret))
+            .field("jwks_url", &self.jwks_url)
+            .field("jwt_issuer", &self.jwt_issuer)
+            .field("jwt_audience", &self.jwt_audience)
+            .field("local_member_id", &self.local_member_id)
+            .field("otel_enabled", &self.otel_enabled)
+            .field("otlp_endpoint", &self.otlp_endpoint)
+            .field("otlp_headers", &redact(&self.otlp_headers)) // Axiom ingest token
+            .field("internal_gc_token", &redact(&self.internal_gc_token))
+            .field("web_origins", &self.web_origins)
+            .finish()
+    }
 }
 
 /// Parse `OPENOM_WEB_ORIGINS` — a comma-separated CORS allow-list of browser origins. Trims each
@@ -378,5 +415,61 @@ mod tests {
     fn env_unrecognized_panics() {
         // A near-miss like "prod" must fail fast, not silently pick an environment.
         let _ = parse_env(Some("prod"));
+    }
+
+    #[test]
+    fn web_origins_parse_trims_slashes_and_drops_empties() {
+        use super::parse_web_origins;
+        assert!(parse_web_origins(None).is_empty());
+        assert!(parse_web_origins(Some("  ")).is_empty());
+        assert_eq!(
+            parse_web_origins(Some(" https://a.com/ , ,https://b.com ")),
+            vec!["https://a.com".to_string(), "https://b.com".to_string()],
+        );
+    }
+
+    #[test]
+    fn debug_redacts_every_secret() {
+        use super::{AuthMode, Config, JwtAlg, StorageMode};
+        let cfg = Config {
+            runtime: Runtime::Remote,
+            env: OpenomEnv::Production,
+            stack: Some("prod-eu".into()),
+            storage: StorageMode::Cloud,
+            auth: AuthMode::Jwt,
+            http_addr: "0.0.0.0:6060".into(),
+            database_url: "postgres://user:SUPERSECRETPW@host/db".into(),
+            s3_endpoint: "https://s3".into(),
+            s3_public_endpoint: "https://s3".into(),
+            s3_bucket: "b".into(),
+            s3_region: "eu".into(),
+            s3_access_key: "AKIASECRETKEYID".into(),
+            s3_secret_key: "S3SECRETVALUE".into(),
+            jwt_alg: JwtAlg::Hs256,
+            jwt_secret: Some("JWTSHARED".into()),
+            jwks_url: None,
+            jwt_issuer: None,
+            jwt_audience: None,
+            local_member_id: uuid::Uuid::nil(),
+            otel_enabled: true,
+            otlp_endpoint: "https://otel".into(),
+            otlp_headers: Some("authorization=Bearer AXIOMTOKEN".into()),
+            internal_gc_token: Some("GCTOKENVALUE".into()),
+            web_origins: vec!["https://app.example".into()],
+        };
+        let dbg = format!("{cfg:?}");
+        for secret in [
+            "SUPERSECRETPW",
+            "AKIASECRETKEYID",
+            "S3SECRETVALUE",
+            "JWTSHARED",
+            "AXIOMTOKEN",
+            "GCTOKENVALUE",
+        ] {
+            assert!(!dbg.contains(secret), "Debug leaked a secret: {secret}");
+        }
+        assert!(dbg.contains("<redacted>"), "secrets should be marked redacted");
+        // Non-secret fields still print — Debug stays useful for diagnostics.
+        assert!(dbg.contains("Production") && dbg.contains("app.example"));
     }
 }
