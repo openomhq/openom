@@ -47,18 +47,14 @@ data "aws_iam_policy_document" "ci_deploy_trust" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
-    # Match the clean `repository` + `environment` claims, NOT `sub`: this org's OIDC subs carry
-    # immutable numeric ids (repo:owner@<id>/repo@<id>:...), so a plain sub string never matches.
-    # Together these pin the assume to exactly openomhq/openom's staging-gated jobs.
+    # AWS requires the trust to pin `sub` (or job_workflow_ref) — repository/environment alone is
+    # refused. This org's subs carry immutable numeric ids (repo:owner@<id>/repo@<id>:...), so match
+    # with StringLike and wildcard ONLY the ids: still pinned to openomhq/openom by name + the staging
+    # environment, just id-agnostic.
     condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:repository"
-      values   = ["${var.github_owner}/${var.github_repo}"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:environment"
-      values   = [var.github_environment]
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.github_owner}@*/${var.github_repo}@*:environment:${var.github_environment}"]
     }
   }
 }
