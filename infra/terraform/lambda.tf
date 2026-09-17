@@ -179,7 +179,7 @@ data "aws_iam_policy_document" "ci_deploy_lambda" {
   statement {
     sid       = "ReadExecRoleAndBoundary"
     effect    = "Allow"
-    actions   = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListRoleTags", "iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions"]
+    actions   = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListRoleTags", "iam:ListInstanceProfilesForRole", "iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions"]
     resources = [aws_iam_role.exec.arn, aws_iam_policy.exec_boundary.arn]
   }
 }

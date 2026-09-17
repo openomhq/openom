@@ -88,25 +88,15 @@ data "aws_iam_policy_document" "ci_deploy_perms" {
       values   = ["${var.stack_name}/*"]
     }
   }
+  # Full control of the ARTIFACTS bucket only (build zips — non-secret). Deliberately broad: the aws
+  # provider's S3 refresh probes ~a dozen GetBucket* sub-configs, tedious + brittle to enumerate one
+  # by one. Scoped to the single openom-<stack>-artifacts bucket, so blast radius is minimal — and
+  # bucket reads/writes are not an IAM-escalation vector.
   statement {
-    sid       = "ArtifactsObjects"
+    sid       = "Artifacts"
     effect    = "Allow"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+    actions   = ["s3:*"]
     resources = [aws_s3_bucket.artifacts.arn, "${aws_s3_bucket.artifacts.arn}/*"]
-  }
-  # Manage the artifacts bucket's sub-resources (versioning/PAB/encryption/policy/tags) — a refresh
-  # touches all of these, so without them CI's plan fails with AccessDenied.
-  statement {
-    sid    = "ArtifactsBucketConfig"
-    effect = "Allow"
-    actions = [
-      "s3:GetBucketVersioning", "s3:PutBucketVersioning",
-      "s3:GetBucketPublicAccessBlock", "s3:PutBucketPublicAccessBlock",
-      "s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
-      "s3:GetBucketPolicy", "s3:PutBucketPolicy",
-      "s3:GetBucketTagging", "s3:PutBucketTagging", "s3:GetBucketLocation", "s3:GetBucketAcl",
-    ]
-    resources = [aws_s3_bucket.artifacts.arn]
   }
   # Read-only refresh of the OIDC provider (only present in the owning stack) + CI's own role.
   statement {
@@ -118,7 +108,7 @@ data "aws_iam_policy_document" "ci_deploy_perms" {
   statement {
     sid       = "SelfRoleRead"
     effect    = "Allow"
-    actions   = ["iam:GetRole", "iam:ListRoleTags", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"]
+    actions   = ["iam:GetRole", "iam:ListRoleTags", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole"]
     resources = [aws_iam_role.ci_deploy.arn]
   }
   # HARD DENY (a Deny always wins): CI can never mutate its OWN role or trust. Closes the

@@ -4,17 +4,10 @@ name: staging.deploy
 # with cargo-lambda, upload a SHA-keyed artifact, run migrations out-of-band against the DIRECT Neon
 # URL, terraform-apply (which publishes a new Lambda version + moves the `live` alias the Function URL
 # serves), then smoke /health. Rollback = re-point the alias to the prior version.
+# Manual only — deliberately NO push trigger. We don't auto-deploy staging on merge until the
+# branching model is settled; deploys are an explicit `Run workflow` for now.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'openom/**'
-      - 'packages/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'infra/terraform/**'
-      - '.github/workflows/staging.deploy.yml'
 
 concurrency:
   group: staging.deploy
@@ -40,10 +33,14 @@ jobs:
           targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
 
-      # cargo-lambda cross-compiles the Rust server to an arm64 `bootstrap` zip (uses zig under the hood).
-      # pipx keeps it isolated + on PATH; cargo-lambda fetches zig on first build.
-      - name: Install cargo-lambda
-        run: pipx install cargo-lambda
+      # cargo-lambda cross-compiles the Rust server to an arm64 `bootstrap` zip; it needs Zig for the
+      # cross-link. Install a pinned Zig on PATH (cargo-lambda finds `zig` there), then cargo-lambda.
+      - name: Install Zig + cargo-lambda
+        run: |
+          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/.zig" && tar -xJf /tmp/zig.tar.xz -C "$HOME/.zig" --strip-components=1
+          echo "$HOME/.zig" >> "$GITHUB_PATH"
+          pipx install cargo-lambda
 
       - name: Build the Lambda (arm64)
         run: cargo lambda build --release --arm64 -p openom --bin openom
