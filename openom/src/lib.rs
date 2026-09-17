@@ -183,8 +183,18 @@ pub fn app(state: AppState) -> Router {
     http_trace::with_trace_layers(router).with_state(state)
 }
 
-/// Wire up the shared state: a lazy Postgres pool, run migrations, seed the local
-/// dev account, and connect the blob store.
+/// Apply the embedded migration set — the single source of truth for BOTH the in-process local path
+/// ([`build_state`]) and the out-of-band `migrate` bin (which points it at the DIRECT DB endpoint;
+/// a remote runtime never migrates in-process — see [`build_state`]).
+///
+/// # Errors
+/// Returns [`sqlx::migrate::MigrateError`] if applying a migration fails.
+pub async fn run_migrations(db: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate!("./migrations").run(db).await
+}
+
+/// Wire up the shared state: a lazy Postgres pool, migrations (local runtime only),
+/// seed the local dev account, and connect the blob store.
 ///
 /// Idempotent — safe to call at every
 /// startup and at the top of each integration test.
@@ -196,14 +206,20 @@ pub fn app(state: AppState) -> Router {
 /// Never in practice: the JWT-verifier `expect`s require key material that `Config` validates at load,
 /// so a validly-loaded config always satisfies them.
 pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
-    // Lazy pool: the process starts even if Postgres is briefly slow; the migration
-    // below is the first thing that actually needs a connection.
+    // Lazy pool: the process starts even if Postgres is briefly slow; the first query
+    // (or the local migration below) is what actually opens a connection.
     let db = PgPoolOptions::new().connect_lazy(&config.database_url)?;
 
-    // Migrations are idempotent and advisory-locked, so running them on every start
-    // is safe (already-applied ones are a quick no-op).
-    sqlx::migrate!("./migrations").run(&db).await?;
-    tracing::info!("migrations applied");
+    // Migrate in-process ONLY on a local runtime (dev + the integration suite). NOT on a remote
+    // runtime: `database_url` is Neon's POOLED (PgBouncer) endpoint, where sqlx's session-level
+    // advisory lock isn't reliably held, and every cold Lambda would race to migrate. There,
+    // migrations run out-of-band against the DIRECT endpoint via the `migrate` bin (OPE-20).
+    if config.is_remote() {
+        tracing::info!("remote runtime: skipping in-process migrations (run out-of-band via the migrate bin)");
+    } else {
+        run_migrations(&db).await?;
+        tracing::info!("migrations applied");
+    }
 
     if config.auth_is_dev() {
         provision_dev_account(&db, config.local_member_id).await?;
