@@ -1,0 +1,28 @@
+name: otel-export
+
+# The OTLP EXPORT-mechanism check (openom/tests/tracing_export.rs): the real batch processor +
+# blocking reqwest client + force_flush, over a loopback receiver. Its failure trigger is a change
+# to the export plumbing itself — NOT per-commit app code — so it's an #[ignore]d test run here, out
+# of the default gate. Auto-runs when the exporter wiring or the test changes; run it on demand
+# (workflow_dispatch) after bumping the opentelemetry*/reqwest deps.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'openom/src/telemetry.rs'
+      - 'openom/tests/tracing_export.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  export-mechanism:
+    runs-on: ubuntu-latest
+    # Cap only guards a cold compile of the crate; the loopback test itself is sub-second.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: OTLP export over loopback (batch + blocking client + force_flush)
+        run: cargo test -p openom --test tracing_export -- --ignored --nocapture
