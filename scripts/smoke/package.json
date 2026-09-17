@@ -1,0 +1,9 @@
+{
+  "name": "openom-staging-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Deps for the staging-smoke workflow's Supabase auth check (not part of the app).",
+  "dependencies": {
+    "jose": "^6.0.0"
+  }
+}

@@ -1,0 +1,85 @@
+name: staging-smoke
+
+# Provider-connectivity smoke test — proves the staging providers (Neon, R2, Supabase)
+# and their credentials are all wired correctly, BEFORE the openom server itself is
+# deployed. Each provider is its OWN job so they run in parallel and fail INDEPENDENTLY:
+# a Neon outage doesn't mask an R2 problem, and the run shows exactly which provider is
+# down. Runs twice a week + on demand. Once the real server + deploy smoke test (OPE-511)
+# exist, this is superseded and can be deleted.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 6 * * 1,4'   # Mon + Thu 06:30 UTC (~07:30 CET / 08:30 CEST)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-smoke
+  cancel-in-progress: false
+
+jobs:
+  neon:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - name: Connect + SELECT 1 (pooled)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          out=$(psql "$DATABASE_URL" -tAc 'select 1;')
+          test "$out" = "1" || { echo "unexpected result: '$out'"; exit 1; }
+          echo "Neon OK"
+
+  r2:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - name: Put / get / delete round-trip
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: 'true'
+          # R2 is S3-compatible but rejects aws-cli v2's newer default integrity checksums;
+          # only send/validate them when the request actually requires it.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          key="smoke/heartbeat-${GITHUB_RUN_ID}.txt"
+          printf 'staging smoke %s\n' "$(date -u +%FT%TZ)" > /tmp/hb.txt
+          aws s3api put-object    --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" --body /tmp/hb.txt > /dev/null
+          aws s3api get-object    --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" /tmp/out.txt      > /dev/null
+          diff /tmp/hb.txt /tmp/out.txt
+          aws s3api delete-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key"                  > /dev/null
+          echo "R2 OK"
+
+  supabase:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Sign in + verify token against JWKS
+        env:
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+        run: |
+          set -euo pipefail
+          npm --prefix scripts/smoke install --no-audit --no-fund --silent
+          node scripts/smoke/supabase-smoke.mjs
