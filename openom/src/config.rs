@@ -169,6 +169,25 @@ pub struct Config {
     /// the EventBridge/scheduler caller that presents it in `x-openom-internal-token` — can run the sweep.
     /// Never logged.
     pub internal_gc_token: Option<String>,
+
+    /// Browser origins allowed for cross-origin fetch (CORS) — `OPENOM_WEB_ORIGINS`, a comma-separated
+    /// list of exact origins (`https://staging.openom.org`) and/or single-label wildcard patterns
+    /// (`https://*.<project>.pages.dev`). A deployment input, NOT derived from `OPENOM_ENV` (like
+    /// `jwt_issuer`) — and the SAME value is the one source of truth the R2 bucket CORS and the Pages
+    /// CSP `connect-src` also read, so they can't drift. Empty (unset) → no cross-origin (same-origin).
+    pub web_origins: Vec<String>,
+}
+
+/// Parse `OPENOM_WEB_ORIGINS` — a comma-separated CORS allow-list of browser origins. Trims each
+/// entry, drops a stray trailing slash (an `Origin` header never has one), and skips empties; an
+/// unset/blank value yields no origins (same-origin only).
+fn parse_web_origins(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().trim_end_matches('/'))
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 impl Config {
@@ -255,6 +274,7 @@ impl Config {
                 .unwrap_or_else(|_| "http://localhost:4318".into()),
             otlp_headers: env::var("OTEL_EXPORTER_OTLP_HEADERS").ok(),
             internal_gc_token: env::var("OPENOM_INTERNAL_GC_TOKEN").ok().filter(|s| !s.trim().is_empty()),
+            web_origins: parse_web_origins(env::var("OPENOM_WEB_ORIGINS").ok().as_deref()),
         };
         config.validate();
         config

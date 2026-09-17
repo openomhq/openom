@@ -10,6 +10,7 @@ pub mod auth;
 pub mod authz;
 pub mod blobs;
 pub mod config;
+mod cors;
 pub mod error_codes;
 pub mod frontier;
 pub mod gc;
@@ -180,7 +181,14 @@ pub fn app(state: AppState) -> Router {
     let router = router.layer(DefaultBodyLimit::max(trees::MAX_OBJECT_BYTES));
     // One SERVER root span per request + the x-request-id correlation id — see `with_trace_layers`.
     // Shared with the tracing tests so this wiring has a single source of truth.
-    http_trace::with_trace_layers(router).with_state(state)
+    let router = http_trace::with_trace_layers(router);
+    // CORS outermost, so a browser preflight is answered before routing/auth. Added only when the
+    // deployment configures OPENOM_WEB_ORIGINS; otherwise no layer at all = same-origin only.
+    let router = match cors::layer(&state.config.web_origins) {
+        Some(cors) => router.layer(cors),
+        None => router,
+    };
+    router.with_state(state)
 }
 
 /// Apply the embedded migration set — the single source of truth for BOTH the in-process local path

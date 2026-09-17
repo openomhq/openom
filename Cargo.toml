@@ -129,7 +129,7 @@ opentelemetry_sdk = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
 tracing-opentelemetry = "0.33"
 # HTTP request tracing (per-request root span with safe fields only).
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 # Metadata DB: Neon (serverless Postgres) in prod, a local container in dev.
 # ring, not aws-lc-rs, to avoid a cmake/C build in the container.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "migrate", "macros"] }
