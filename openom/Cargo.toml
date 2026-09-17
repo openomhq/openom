@@ -28,6 +28,9 @@ openom-keyring-api.workspace = true
 # The whole HTTP surface in one Lambda: Axum routing over the Lambda runtime.
 axum.workspace = true
 lambda_http.workspace = true
+# The runtime's OpenTelemetry tower layer: post-response flush (off the client-latency path) +
+# a FaaS invocation span. Direct dep so we can turn on its `opentelemetry` feature.
+lambda_runtime = { version = "1", features = ["opentelemetry"] }
 tokio.workspace = true
 # Object-safe async trait for the Meter seam (`Arc<dyn Meter>`, OPE-412).
 async-trait.workspace = true
@@ -53,7 +56,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Structured logging: pretty locally, JSON in prod. OTLP export (opt-in) turns the
-# same spans into traces for grafana/otel-lgtm (dev) / Better Stack (prod).
+# same spans into traces for grafana/otel-lgtm (dev) / Axiom (staging + prod).
 tracing.workspace = true
 tracing-subscriber.workspace = true
 opentelemetry.workspace = true

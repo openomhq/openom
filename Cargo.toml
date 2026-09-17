@@ -122,7 +122,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # OPENOM_OTEL is set; otherwise the server just logs to stdout.
 opentelemetry = "0.32"
 opentelemetry_sdk = "0.32"
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
+# reqwest-BLOCKING-client, not reqwest-client: the default BatchSpanProcessor drives export on a
+# dedicated OS thread with no tokio reactor, and the async reqwest client would panic there ("no
+# reactor running") → spans silently never export. The blocking client is the SDK's default + is
+# built on its own thread, safe under #[tokio::main].
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
 tracing-opentelemetry = "0.33"
 # HTTP request tracing (per-request root span with safe fields only).
 tower-http = { version = "0.6", features = ["trace"] }

@@ -13,6 +13,7 @@ pub mod config;
 pub mod error_codes;
 pub mod frontier;
 pub mod gc;
+mod http_trace;
 pub mod invites;
 pub mod jwks;
 pub mod keyring;
@@ -32,8 +33,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use tower_http::trace::{DefaultMakeSpan, TraceLayer};
-use tracing::Level;
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use config::Config;
@@ -177,9 +177,16 @@ pub fn app(state: AppState) -> Router {
         // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media)
         // take the presigned path, never this proxy.
         .layer(DefaultBodyLimit::max(trees::MAX_OBJECT_BYTES))
-        // One root span per request. DefaultMakeSpan records method + matched route +
-        // version only — no PII, no query strings (SERVER-DATA-FORMAT §7 discipline).
-        .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::INFO)))
+        // One SERVER root span per request — method + matched route + request id, no PII/query
+        // strings (SERVER-DATA-FORMAT §7). It continues an incoming W3C trace and records the
+        // response status; `telemetry` exports it over OTLP. `request_id` runs OUTSIDE (applied
+        // last = outermost) so the id is present when the span is built + is echoed back.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(http_trace::make_span)
+                .on_response(http_trace::on_response),
+        )
+        .layer(axum::middleware::from_fn(http_trace::request_id))
         .with_state(state)
 }
 

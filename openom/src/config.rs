@@ -41,6 +41,48 @@ fn parse_runtime(raw: Option<&str>) -> Runtime {
     }
 }
 
+/// Environment *identity* — orthogonal to [`Runtime`] (you can run any env locally). Drives
+/// payment sandbox-vs-live, the telemetry `deployment.environment` tag, and `noindex`. A
+/// **closed** 3-value set: widening it touches every exhaustive `match` + alerting query.
+/// `OPENOM_ENV` (`development` | `staging` | `production`); required when `OPENOM_RUNTIME=remote`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenomEnv {
+    Development,
+    Staging,
+    Production,
+}
+
+impl OpenomEnv {
+    /// The lowercase name, for the OTEL `deployment.environment` attribute + logs.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OpenomEnv::Development => "development",
+            OpenomEnv::Staging => "staging",
+            OpenomEnv::Production => "production",
+        }
+    }
+    /// True only in the live production environment (gates live payments, etc.).
+    #[must_use]
+    pub fn is_production(self) -> bool {
+        matches!(self, OpenomEnv::Production)
+    }
+}
+
+/// Parse `OPENOM_ENV`. `None` when unset/empty (the caller picks the default vs a required
+/// panic per runtime); a known value → `Some`; an unrecognized value → a hard startup panic.
+fn parse_env(raw: Option<&str>) -> Option<OpenomEnv> {
+    match raw.map(str::trim) {
+        None | Some("") => None,
+        Some("development") => Some(OpenomEnv::Development),
+        Some("staging") => Some(OpenomEnv::Staging),
+        Some("production") => Some(OpenomEnv::Production),
+        Some(other) => panic!(
+            "config: OPENOM_ENV={other:?} is not recognized — set development, staging, or production"
+        ),
+    }
+}
+
 /// Where encrypted tree bytes live. `Cloud` additionally refuses the reserved dev `key_id`
 /// (§16) so a dev key can never seal real user data at rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +113,12 @@ pub enum JwtAlg {
 pub struct Config {
     /// Runtime preset (local server vs deployed serverless). See the module docs.
     pub runtime: Runtime,
+    /// Environment identity (`OPENOM_ENV`). Required when `runtime == Remote`; defaults to
+    /// `Development` locally. Drives sandbox-vs-live payments, the telemetry env tag, noindex.
+    pub env: OpenomEnv,
+    /// Free-form deployment/stack label (`OPENOM_STACK` = the Terraform `stack_name`), surfaced
+    /// as the OTEL `service.instance.id` so preview/branch traffic is separable from laptops.
+    pub stack: Option<String>,
     /// Storage axis (independent of `runtime`; defaults from it, `STORAGE` overrides).
     pub storage: StorageMode,
     /// Auth axis (independent of `runtime`; defaults from it, `AUTH` overrides).
@@ -132,6 +180,17 @@ impl Config {
     #[must_use]
     pub fn from_env() -> Self {
         let runtime = parse_runtime(env::var("OPENOM_RUNTIME").ok().as_deref());
+        // Environment identity: required when deployed (defaulting to `development` inside a real
+        // deploy is wrong-by-default); a local run defaults to `development`.
+        let openom_env = parse_env(env::var("OPENOM_ENV").ok().as_deref()).unwrap_or_else(|| {
+            match runtime {
+                Runtime::Remote => panic!(
+                    "config: OPENOM_ENV is required when OPENOM_RUNTIME=remote — set development, staging, or production"
+                ),
+                Runtime::Local => OpenomEnv::Development,
+            }
+        });
+        let stack = env::var("OPENOM_STACK").ok().filter(|s| !s.trim().is_empty());
         // Each axis defaults from the OPENOM_RUNTIME preset, then its own env overrides it.
         let storage = match env::var("STORAGE").ok().as_deref() {
             Some("cloud") => StorageMode::Cloud,
@@ -155,6 +214,8 @@ impl Config {
             env::var("S3_PUBLIC_ENDPOINT").unwrap_or_else(|_| s3_endpoint.clone());
         let config = Self {
             runtime,
+            env: openom_env,
+            stack,
             storage,
             auth,
             http_addr: env::var("OPENOM_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:6060".into()),
@@ -259,7 +320,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_runtime, Runtime};
+    use super::{parse_env, parse_runtime, OpenomEnv, Runtime};
 
     #[test]
     fn runtime_unset_or_empty_defaults_to_local() {
@@ -281,5 +342,21 @@ mod tests {
         // A typo (or a vendor word like "lambda") must fail fast — never silently boot the
         // Local preset on a real deployment.
         let _ = parse_runtime(Some("lambda"));
+    }
+
+    #[test]
+    fn env_parses_the_three_values() {
+        assert_eq!(parse_env(Some("development")), Some(OpenomEnv::Development));
+        assert_eq!(parse_env(Some("staging")), Some(OpenomEnv::Staging));
+        assert_eq!(parse_env(Some(" production ")), Some(OpenomEnv::Production)); // trimmed
+        assert_eq!(parse_env(None), None);
+        assert_eq!(parse_env(Some("")), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "not recognized")]
+    fn env_unrecognized_panics() {
+        // A near-miss like "prod" must fail fast, not silently pick an environment.
+        let _ = parse_env(Some("prod"));
     }
 }

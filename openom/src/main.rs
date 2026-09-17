@@ -24,23 +24,26 @@ async fn main() -> Result<(), lambda_http::Error> {
     let router = app(state);
 
     if config.is_remote() {
-        // On Lambda the batch processor's flush timer stops when the sandbox freezes
-        // between invocations, so spans would be lost. Flush explicitly after each
-        // response instead (invisible to app code — the seam stays in one place).
-        let router = match otel.clone() {
-            Some(provider) => router.layer(axum::middleware::from_fn(
-                move |req: axum::extract::Request, next: axum::middleware::Next| {
-                    let provider = provider.clone();
-                    async move {
-                        let response = next.run(req).await;
-                        let _ = provider.force_flush();
-                        response
+        // The lambda_runtime OTel layer wraps the whole invocation: it drops the handler future
+        // (closing the request span so it's included in the flush) and flushes AFTER the response
+        // is posted to the runtime — so the flush is OFF the client-latency path, and the last span
+        // before a sandbox freeze isn't lost. (The batch processor's own timer stops when frozen.)
+        match otel.clone() {
+            Some(provider) => {
+                use lambda_runtime::layers::{OpenTelemetryFaasTrigger, OpenTelemetryLayer};
+                use lambda_runtime::Runtime;
+                let flush = move || {
+                    if let Err(err) = provider.force_flush() {
+                        tracing::warn!(error = ?err, "OTLP span flush failed");
                     }
-                },
-            )),
-            None => router,
-        };
-        lambda_http::run(router).await
+                };
+                Runtime::new(lambda_http::Adapter::from(router))
+                    .layer(OpenTelemetryLayer::new(flush).with_trigger(OpenTelemetryFaasTrigger::Http))
+                    .run()
+                    .await
+            }
+            None => lambda_http::run(router).await,
+        }
     } else {
         let addr = config.http_addr.clone();
         tracing::info!(%addr, "serving locally over plain HTTP");
@@ -58,6 +61,12 @@ async fn main() -> Result<(), lambda_http::Error> {
 fn init_tracing(config: &Config) -> Option<SdkTracerProvider> {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, EnvFilter, Layer};
+
+    // Install the W3C trace-context propagator so an incoming `traceparent` continues the same
+    // trace (and outgoing calls can inject it, once wired) — the standard for distributed traces.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
