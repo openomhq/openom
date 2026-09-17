@@ -4,8 +4,9 @@ name: staging-smoke
 # and their credentials are all wired correctly, BEFORE the openom server itself is
 # deployed. Each provider is its OWN job so they run in parallel and fail INDEPENDENTLY:
 # a Neon outage doesn't mask an R2 problem, and the run shows exactly which provider is
-# down. Runs twice a week + on demand. Once the real server + deploy smoke test (OPE-511)
-# exist, this is superseded and can be deleted.
+# down. The `otel` job also emits a real trace through our own exporter to prove OTLP
+# export + W3C propagation reach Axiom. Runs twice a week + on demand. Once the real
+# server + deploy smoke test (OPE-511) exist, this is superseded and can be deleted.
 
 on:
   workflow_dispatch:
@@ -83,3 +84,28 @@ jobs:
           set -euo pipefail
           npm --prefix scripts/smoke install --no-audit --no-fund --silent
           node scripts/smoke/supabase-smoke.mjs
+
+  # Emit a real 2-span trace (client -> server, linked via an injected/extracted traceparent)
+  # through our OWN openom exporter, so this proves the whole path the server will use: OTLP
+  # HTTP export reaches Axiom, the resource attributes land, and W3C propagation links spans.
+  # Builds the crate (hence the toolchain + cache); it needs no DB/S3 — only the Axiom creds.
+  otel:
+    runs-on: ubuntu-latest
+    environment: staging
+    # Cap only guards a pathological cold compile of the server crate (warm w/ cache ≈ 1-2 min);
+    # a real telemetry failure exits in ~2s via the exporter's own flush timeout, not this cap.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Emit a trace to Axiom via the openom exporter
+        env:
+          OPENOM_OTEL: '1'
+          OPENOM_ENV: staging
+          OPENOM_STACK: otel-smoke
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ vars.AXIOM_OTLP_ENDPOINT }}
+          OTEL_EXPORTER_OTLP_HEADERS: authorization=Bearer ${{ secrets.AXIOM_TOKEN }},x-axiom-dataset=${{ vars.AXIOM_DATASET }}
+        run: |
+          set -euo pipefail
+          cargo run -p openom --bin otel_smoke
