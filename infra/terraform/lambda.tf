@@ -155,13 +155,19 @@ data "aws_iam_policy_document" "ci_deploy_lambda" {
     actions   = ["lambda:GetAccountSettings", "lambda:ListFunctions"]
     resources = ["*"]
   }
+  # DescribeLogGroups has no resource-level scoping (it's account-wide) — must be on "*".
   statement {
-    sid    = "LogGroup"
-    effect = "Allow"
-    actions = [
-      "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:DescribeLogGroups",
-      "logs:PutRetentionPolicy", "logs:TagResource", "logs:ListTagsForResource",
-    ]
+    sid       = "LogGroupDescribe"
+    effect    = "Allow"
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["*"]
+  }
+  # Full control of ONLY the function's own log group (+ its streams) — low-risk, avoids the
+  # tag/retention API whack-a-mole.
+  statement {
+    sid       = "LogGroupManage"
+    effect    = "Allow"
+    actions   = ["logs:*"]
     resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${local.fn_name}*"]
   }
   # Pass (only) the exec role to Lambda + read it/the boundary for state refresh. No CreateRole.
