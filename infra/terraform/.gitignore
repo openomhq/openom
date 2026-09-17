@@ -1,0 +1,13 @@
+# Terraform working state — never commit. (A stray plan file can contain secret values in cleartext.)
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# DO commit .terraform.lock.hcl (pins provider versions between the admin's machine and CI).

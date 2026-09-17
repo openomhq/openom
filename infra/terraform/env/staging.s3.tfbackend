@@ -1,0 +1,6 @@
+# Backend settings for the STAGING state
+# Passed via `terraform init -backend-config=...`.
+# Keep tf_state_bucket in staging.tfvars identical.
+bucket = "openom-tfstate-841547768414"
+key    = "staging/terraform.tfstate"
+region = "eu-central-1"
