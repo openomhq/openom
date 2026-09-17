@@ -1,4 +1,4 @@
-name: staging-smoke
+name: staging.smoke
 
 # Provider-connectivity smoke test — proves the staging providers (Neon, R2, Supabase)
 # and their credentials are all wired correctly, BEFORE the openom server itself is
@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: staging-smoke
+  group: staging.smoke
   cancel-in-progress: false
 
 jobs:

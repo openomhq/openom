@@ -1,4 +1,4 @@
-// Functional Supabase auth smoke (see .github/workflows/staging-smoke.yml).
+// Functional Supabase auth smoke (see .github/workflows/staging.smoke.yml).
 //
 // Availability alone (fetching the JWKS) proves nothing about auth working. So this does
 // the real loop:
