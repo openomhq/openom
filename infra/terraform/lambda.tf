@@ -91,6 +91,7 @@ resource "aws_lambda_function" "api" {
       S3_PUBLIC_ENDPOINT          = var.s3_public_endpoint
       S3_BUCKET                   = var.s3_bucket
       S3_REGION                   = var.s3_region
+      AUTH_JWT_ALG                = "ES256" # Supabase = asymmetric ES256 via JWKS (no shared secret)
       AUTH_JWKS_URL               = var.jwks_url
       AUTH_JWT_ISS                = var.jwt_issuer
       AUTH_JWT_AUD                = var.jwt_audience
