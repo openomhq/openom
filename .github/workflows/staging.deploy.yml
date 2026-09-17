@@ -46,19 +46,6 @@ jobs:
         run: cargo lambda build --release --arm64 -p openom --bin openom
         # → target/lambda/openom/bootstrap.zip
 
-      # TEMPORARY diagnostic — prints only the sub/aud/environment claims (never the token) so we can
-      # see why the role trust rejects it. Remove once OIDC assume works.
-      - name: Debug — OIDC claims
-        run: |
-          payload=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value' | cut -d. -f2)
-          python3 - "$payload" <<'PY'
-          import sys, base64, json
-          p = sys.argv[1]; p += "=" * (-len(p) % 4)
-          d = json.loads(base64.urlsafe_b64decode(p))
-          print({k: d.get(k) for k in ("iss", "aud", "sub", "repository", "environment", "ref")})
-          PY
-
       - name: Assume the AWS deploy role (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:

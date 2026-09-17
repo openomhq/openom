@@ -33,7 +33,7 @@ locals {
 # SECURITY-CRITICAL. Scoped to exactly this repo AND the protected `staging` environment: only a
 # `staging`-gated job in openomhq/openom can assume it. This is only meaningful if the GitHub
 # `staging` environment actually has protection (branch policy → main + required reviewers); confirm
-# that before wiring AWS_DEPLOY_ROLE_ARN into CI (see README). Never widen `sub` to `repo:owner/repo:*`.
+# that before wiring AWS_DEPLOY_ROLE_ARN into CI (see README).
 data "aws_iam_policy_document" "ci_deploy_trust" {
   statement {
     effect  = "Allow"
@@ -47,10 +47,18 @@ data "aws_iam_policy_document" "ci_deploy_trust" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # Match the clean `repository` + `environment` claims, NOT `sub`: this org's OIDC subs carry
+    # immutable numeric ids (repo:owner@<id>/repo@<id>:...), so a plain sub string never matches.
+    # Together these pin the assume to exactly openomhq/openom's staging-gated jobs.
     condition {
       test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_owner}/${var.github_repo}:environment:${var.github_environment}"]
+      variable = "token.actions.githubusercontent.com:repository"
+      values   = ["${var.github_owner}/${var.github_repo}"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:environment"
+      values   = [var.github_environment]
     }
   }
 }
