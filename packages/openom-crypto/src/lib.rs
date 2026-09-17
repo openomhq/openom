@@ -19,7 +19,7 @@ pub const DEV_KEY_ID: &[u8] = b"openom-dev-key-v1";
 
 /// The well-known fixed dev DEK — SHA-256 of a constant label. Not secret (dev
 /// inspection only); never valid for real data, since the server refuses [`DEV_KEY_ID`]
-/// under `RUN_MODE=production`.
+/// under `OPENOM_RUNTIME=remote`.
 #[must_use]
 pub fn dev_dek() -> Key32 {
     use sha2::{Digest, Sha256};

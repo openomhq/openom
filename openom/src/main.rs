@@ -12,7 +12,7 @@ async fn main() -> Result<(), lambda_http::Error> {
     let otel = init_tracing(&config);
 
     tracing::info!(
-        run_mode = ?config.run_mode,
+        runtime = ?config.runtime,
         storage = ?config.storage,
         auth = ?config.auth,
         envelope_version = openom_protocol::ENVELOPE_VERSION,
@@ -23,7 +23,7 @@ async fn main() -> Result<(), lambda_http::Error> {
     let state = build_state(&config).await?;
     let router = app(state);
 
-    if config.is_lambda() {
+    if config.is_remote() {
         // On Lambda the batch processor's flush timer stops when the sandbox freezes
         // between invocations, so spans would be lost. Flush explicitly after each
         // response instead (invisible to app code — the seam stays in one place).
@@ -67,7 +67,7 @@ fn init_tracing(config: &Config) -> Option<SdkTracerProvider> {
         tracing_opentelemetry::layer().with_tracer(p.tracer("openom"))
     });
 
-    let fmt_layer = if config.is_lambda() {
+    let fmt_layer = if config.is_remote() {
         fmt::layer().json().boxed()
     } else {
         fmt::layer().boxed()

@@ -269,7 +269,7 @@ impl Sealer {
 
     /// A local-development sealer using the reserved dev key (§16): real ciphertext,
     /// well-known DEK, tagged with `DEV_KEY_ID` — which the server refuses under
-    /// `RUN_MODE=production`. This is what lets the web app run the full seal/open path
+    /// `OPENOM_RUNTIME=remote`. This is what lets the web app run the full seal/open path
     /// with no server and no unlock flow, for fast UI iteration.
     #[must_use]
     pub fn dev(tree_id: TreeId, replica_id: ReplicaId) -> Self {

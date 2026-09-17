@@ -16,9 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Mirrors docker-compose.yml / scripts/itest.mjs, with the stack reached at localhost (published ports).
-      # RUN_MODE=local presets storage=local (MinIO) + auth=dev + the /dev routes the media/log GC tests use;
-      # the S3/DB endpoints still come from the explicit vars below (RUN_MODE never overrides those).
-      RUN_MODE: local
+      # OPENOM_RUNTIME=local presets storage=local (MinIO) + auth=dev + the /dev routes the media/log GC tests use;
+      # the S3/DB endpoints still come from the explicit vars below (OPENOM_RUNTIME never overrides those).
+      OPENOM_RUNTIME: local
       DATABASE_URL: postgres://openom:openom@localhost:5432/openom
       S3_ENDPOINT: http://localhost:9000
       S3_PUBLIC_ENDPOINT: http://localhost:9000

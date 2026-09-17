@@ -4,24 +4,41 @@
 //! - `STORAGE` — `local` (`MinIO`) vs `cloud` (R2). Also gates the dev-key refusal.
 //! - `AUTH` — `dev` (fake auth: a bearer that parses as a UUID = that member) vs `jwt`
 //!   (a real verified token; the `aud` default keys on this).
-//! - deployment target — local HTTP server (+ pretty logs, dev routes) vs Lambda (+ JSON
-//!   logs, no dev routes). Tracks `RUN_MODE` (Local vs Production).
+//! - runtime — a long-running local HTTP server (+ pretty logs, dev routes) vs a deployed
+//!   serverless function (+ JSON logs, no dev routes). Tracks `OPENOM_RUNTIME` (`local` vs
+//!   `remote`) — vendor-neutral: `remote` is a serverless function today (AWS Lambda), but
+//!   the value names *where* the API runs, not the vendor.
 //!
-//! `RUN_MODE` is a convenience PRESET: `local` → {storage=local, auth=dev, `LocalServer`};
-//! `production` → {storage=cloud, auth=jwt, Lambda}. `STORAGE` / `AUTH` override their axis
-//! independently — e.g. `RUN_MODE=local` + `AUTH=jwt` + `AUTH_JWT_SECRET=…` is "local Supabase"
-//! (real JWT verification over local `MinIO`). Everything is read from the environment.
+//! `OPENOM_RUNTIME` is a convenience PRESET: `local` → {storage=local, auth=dev, local server};
+//! `remote` → {storage=cloud, auth=jwt, deployed}. `STORAGE` / `AUTH` override their axis
+//! independently — e.g. `OPENOM_RUNTIME=local` + `AUTH=jwt` + `AUTH_JWT_SECRET=…` is "local
+//! Supabase" (real JWT verification over local `MinIO`). Everything is read from the environment.
 
 use std::env;
 use uuid::Uuid;
 
-/// Deployment-target preset. Local = HTTP server + pretty logs + dev routes;
-/// Production = Lambda + JSON logs + no dev routes. Also the default source for the
-/// storage/auth axes.
+/// Where the API process runs. `Local` = a long-running local HTTP server (+ pretty logs +
+/// dev routes); `Remote` = a deployed serverless function (+ JSON logs + no dev routes). Also
+/// the default source for the storage/auth axes. Selected by `OPENOM_RUNTIME` (`local` |
+/// `remote`) — the deployment sets `remote`; everything else defaults to `local`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunMode {
+pub enum Runtime {
     Local,
-    Production,
+    Remote,
+}
+
+/// Parse the `OPENOM_RUNTIME` preset. Unset/empty → `Local` (the default); `local`/`remote`
+/// select their mode. An **unrecognized** value is a hard startup panic — a switch that
+/// controls dev-routes and fake-auth must never silently fall back to `Local` on a real
+/// deployment (dev routes registered, pretty logs, OTEL export skipped).
+fn parse_runtime(raw: Option<&str>) -> Runtime {
+    match raw.map(str::trim) {
+        None | Some("" | "local") => Runtime::Local,
+        Some("remote") => Runtime::Remote,
+        Some(other) => {
+            panic!("config: OPENOM_RUNTIME={other:?} is not recognized — set `local` or `remote`")
+        }
+    }
 }
 
 /// Where encrypted tree bytes live. `Cloud` additionally refuses the reserved dev `key_id`
@@ -52,13 +69,13 @@ pub enum JwtAlg {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Deployment target preset (Local server vs Lambda). See the module docs.
-    pub run_mode: RunMode,
-    /// Storage axis (independent of `run_mode`; defaults from it, `STORAGE` overrides).
+    /// Runtime preset (local server vs deployed serverless). See the module docs.
+    pub runtime: Runtime,
+    /// Storage axis (independent of `runtime`; defaults from it, `STORAGE` overrides).
     pub storage: StorageMode,
-    /// Auth axis (independent of `run_mode`; defaults from it, `AUTH` overrides).
+    /// Auth axis (independent of `runtime`; defaults from it, `AUTH` overrides).
     pub auth: AuthMode,
-    /// Address the local HTTP server binds. Ignored under Lambda.
+    /// Address the local HTTP server binds. Ignored when deployed.
     pub http_addr: String,
     /// Postgres connection string (Neon in prod, a local container in dev).
     pub database_url: String,
@@ -110,28 +127,26 @@ impl Config {
     /// Build the config from environment variables, with dev-safe defaults.
     ///
     /// # Panics
-    /// Never in practice: the only unwrap is on a hardcoded, valid UUID literal.
+    /// On an unrecognized `OPENOM_RUNTIME` (fail-fast). Otherwise never in practice: the only
+    /// unwrap is on a hardcoded, valid UUID literal.
     #[must_use]
     pub fn from_env() -> Self {
-        let run_mode = match env::var("RUN_MODE").unwrap_or_default().as_str() {
-            "production" | "prod" => RunMode::Production,
-            _ => RunMode::Local,
-        };
-        // Each axis defaults from the RUN_MODE preset, then its own env overrides it.
+        let runtime = parse_runtime(env::var("OPENOM_RUNTIME").ok().as_deref());
+        // Each axis defaults from the OPENOM_RUNTIME preset, then its own env overrides it.
         let storage = match env::var("STORAGE").ok().as_deref() {
             Some("cloud") => StorageMode::Cloud,
             Some("local") => StorageMode::Local,
-            _ => match run_mode {
-                RunMode::Production => StorageMode::Cloud,
-                RunMode::Local => StorageMode::Local,
+            _ => match runtime {
+                Runtime::Remote => StorageMode::Cloud,
+                Runtime::Local => StorageMode::Local,
             },
         };
         let auth = match env::var("AUTH").ok().as_deref() {
             Some("jwt") => AuthMode::Jwt,
             Some("dev") => AuthMode::Dev,
-            _ => match run_mode {
-                RunMode::Production => AuthMode::Jwt,
-                RunMode::Local => AuthMode::Dev,
+            _ => match runtime {
+                Runtime::Remote => AuthMode::Jwt,
+                Runtime::Local => AuthMode::Dev,
             },
         };
         let s3_endpoint =
@@ -139,7 +154,7 @@ impl Config {
         let s3_public_endpoint =
             env::var("S3_PUBLIC_ENDPOINT").unwrap_or_else(|_| s3_endpoint.clone());
         let config = Self {
-            run_mode,
+            runtime,
             storage,
             auth,
             http_addr: env::var("OPENOM_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:6060".into()),
@@ -164,7 +179,7 @@ impl Config {
                 Ok(v) if v.trim().is_empty() => None, // explicit opt-out
                 Ok(v) => Some(v),
                 // Default the audience check ON for the real-JWT axis (Supabase's "authenticated").
-                // Keyed on AUTH, not RUN_MODE, so local-Supabase (RUN_MODE=local, AUTH=jwt) is hardened.
+                // Keyed on AUTH, not OPENOM_RUNTIME, so local-Supabase (OPENOM_RUNTIME=local, AUTH=jwt) is hardened.
                 Err(_) if auth == AuthMode::Jwt => Some("authenticated".into()),
                 Err(_) => None,
             },
@@ -205,16 +220,17 @@ impl Config {
     pub fn auth_is_jwt(&self) -> bool {
         self.auth == AuthMode::Jwt
     }
-    /// The deployment runs under Lambda (JSON logs, no dev routes). Local server otherwise.
+    /// The API runs as a deployed serverless function (JSON logs, no dev routes). A local
+    /// server otherwise.
     #[must_use]
-    pub fn is_lambda(&self) -> bool {
-        self.run_mode == RunMode::Production
+    pub fn is_remote(&self) -> bool {
+        self.runtime == Runtime::Remote
     }
-    /// Dev-only routes (`/dev/media/gc`, later `/dev/auth/token`) are registered only on the local
-    /// server deployment — never under Lambda.
+    /// Dev-only routes (`/dev/media/gc`, later `/dev/auth/token`) are registered only on the
+    /// local runtime — never on a deployed one.
     #[must_use]
     pub fn dev_routes_enabled(&self) -> bool {
-        self.run_mode == RunMode::Local
+        self.runtime == Runtime::Local
     }
 
     /// Refuse illegal axis combinations at startup (fail fast, never at request time).
@@ -238,5 +254,32 @@ impl Config {
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_runtime, Runtime};
+
+    #[test]
+    fn runtime_unset_or_empty_defaults_to_local() {
+        assert_eq!(parse_runtime(None), Runtime::Local);
+        assert_eq!(parse_runtime(Some("")), Runtime::Local);
+        assert_eq!(parse_runtime(Some("   ")), Runtime::Local);
+    }
+
+    #[test]
+    fn runtime_recognized_values() {
+        assert_eq!(parse_runtime(Some("local")), Runtime::Local);
+        assert_eq!(parse_runtime(Some("remote")), Runtime::Remote);
+        assert_eq!(parse_runtime(Some(" remote ")), Runtime::Remote); // trimmed
+    }
+
+    #[test]
+    #[should_panic(expected = "not recognized")]
+    fn runtime_unrecognized_panics_not_silent_local() {
+        // A typo (or a vendor word like "lambda") must fail fast — never silently boot the
+        // Local preset on a real deployment.
+        let _ = parse_runtime(Some("lambda"));
     }
 }
