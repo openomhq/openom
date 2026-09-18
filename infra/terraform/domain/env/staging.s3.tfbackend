@@ -1,0 +1,9 @@
+# Backend settings for the STAGING domain state.
+# Passed via `terraform init -backend-config=env/staging.s3.tfbackend`.
+#
+# The key is under domain/ — NOT staging/ — on purpose: the CI deploy role's state grant is scoped to
+# staging/*, so keeping the domain state outside that prefix means the narrow CI role cannot read or
+# overwrite it. This root is admin-applied only.
+bucket = "openom-tfstate-841547768414"
+key    = "domain/staging.tfstate"
+region = "eu-central-1"
