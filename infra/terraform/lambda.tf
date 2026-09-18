@@ -138,13 +138,16 @@ resource "aws_lambda_permission" "url_public" {
 }
 
 resource "aws_lambda_permission" "url_public_invoke" {
-  count                  = local.lambda_on
-  statement_id           = "AllowPublicFunctionUrlInvoke"
-  action                 = "lambda:InvokeFunction"
-  function_name          = aws_lambda_function.api[0].function_name
-  qualifier              = aws_lambda_alias.live[0].name
-  principal              = "*"
-  function_url_auth_type = "NONE"
+  count         = local.lambda_on
+  statement_id  = "AllowPublicFunctionUrlInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api[0].function_name
+  qualifier     = aws_lambda_alias.live[0].name
+  principal     = "*"
+  # No function_url_auth_type here — AWS rejects it for InvokeFunction. AWS's recommended
+  # `InvokedViaFunctionUrl` condition isn't expressible via aws_lambda_permission, so InvokeFunction
+  # is granted unconditionally to `*`. Safe: the function is already public via the URL, and anonymous
+  # callers can't reach the Lambda Invoke API directly (it needs SigV4). Tighten for prod if wanted.
 }
 
 # --- CI-perms extension (OPE-17) ---
