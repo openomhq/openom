@@ -12,7 +12,7 @@ resource "aws_acm_certificate" "api" {
   }
 }
 
-resource "cloudflare_record" "cert_validation" {
+resource "cloudflare_dns_record" "cert_validation" {
   for_each = {
     for dvo in aws_acm_certificate.api.domain_validation_options :
     dvo.domain_name => {
@@ -32,8 +32,13 @@ resource "cloudflare_record" "cert_validation" {
 }
 
 resource "aws_acm_certificate_validation" "api" {
-  certificate_arn         = aws_acm_certificate.api.arn
-  validation_record_fqdns = [for r in cloudflare_record.cert_validation : r.hostname]
+  certificate_arn = aws_acm_certificate.api.arn
+  # Derive the FQDNs from ACM directly (v5 dropped the computed `hostname`, and we don't want to
+  # depend on how the provider echoes back `name`). depends_on ties this to the records' creation.
+  validation_record_fqdns = [
+    for dvo in aws_acm_certificate.api.domain_validation_options : trimsuffix(dvo.resource_record_name, ".")
+  ]
+  depends_on = [cloudflare_dns_record.cert_validation]
 }
 
 # --- CloudFront in front of the Function URL ---
@@ -90,7 +95,7 @@ resource "aws_cloudfront_distribution" "api" {
 }
 
 # api_domain → CloudFront (DNS-only; CloudFront terminates TLS with the ACM cert).
-resource "cloudflare_record" "api" {
+resource "cloudflare_dns_record" "api" {
   zone_id = var.cloudflare_zone_id
   name    = var.api_domain
   type    = "CNAME"

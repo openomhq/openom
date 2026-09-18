@@ -10,7 +10,7 @@ terraform {
     # DNS for the API custom domain (ACM validation record + the CNAME to CloudFront).
     cloudflare = {
       source  = "cloudflare/cloudflare"
-      version = "~> 4.0"
+      version = "~> 5.0"
     }
   }
 }
