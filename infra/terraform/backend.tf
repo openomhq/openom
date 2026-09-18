@@ -2,7 +2,7 @@
 #
 # bucket/key/region are supplied PER-ENV via `-backend-config=env/<env>.s3.tfbackend` at
 # `terraform init` (partial config), so each environment keeps its own state object under the one
-# shared, versioned state bucket (created out-of-band in OPE-468).
+# shared, versioned state bucket (created out-of-band).
 terraform {
   backend "s3" {
     encrypt      = true

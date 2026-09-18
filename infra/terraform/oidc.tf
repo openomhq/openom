@@ -69,7 +69,7 @@ resource "aws_iam_role" "ci_deploy" {
 # SKELETON scope only — what CI needs to `terraform plan/apply` the resources THIS config manages:
 # the per-env state, the artifacts bucket (+ its sub-resources), and read-only refresh of the OIDC
 # provider + its own role. Deliberately NO iam:CreateRole/AttachRolePolicy/lambda/secrets here: the
-# exec role and compute resources arrive in OPE-17, which extends this policy with a DISJOINT
+# exec role and compute resources are added by the Lambda config (lambda.tf), which extends this policy with a DISJOINT
 # `openom-<stack>-exec-*` role namespace + a permissions boundary (so CI can never mint an
 # admin-capable role). That extension is a platform change applied by the admin, not by CI (the Deny
 # below stops CI widening its own policy).

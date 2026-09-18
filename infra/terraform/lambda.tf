@@ -1,7 +1,7 @@
 locals {
   fn_name = "openom-${var.stack_name}-api"
   # The Lambda + its URL + log group only exist once a built artifact is available. The admin's first
-  # apply (artifact key empty) stands up the IAM/role scaffolding; CI's deploy (OPE-20) sets the
+  # apply (artifact key empty) stands up the IAM/role scaffolding; CI's deploy sets the
   # SHA-keyed artifact and brings the function up. So nobody has to cross-compile Rust locally.
   lambda_on = var.lambda_artifact_key != "" ? 1 : 0
 }
@@ -150,8 +150,8 @@ resource "aws_lambda_permission" "url_public_invoke" {
   # callers can't reach the Lambda Invoke API directly (it needs SigV4). Tighten for prod if wanted.
 }
 
-# --- CI-perms extension (OPE-17) ---
-# Grows the deploy role so CI (OPE-20) can create/update the function + its URL + log group and PASS
+# --- CI-perms extension ---
+# Grows the deploy role so CI can create/update the function + its URL + log group and PASS
 # the exec role — but NOT create/modify IAM roles (the exec role is admin-managed above). Applied by
 # the admin, since the DenySelfMutation in oidc.tf stops CI widening its own policy.
 data "aws_iam_policy_document" "ci_deploy_lambda" {

@@ -1,5 +1,5 @@
-# Lambda deploy artifacts: CI (OPE-20) uploads the built zip keyed by git SHA (openom/<sha>.zip);
-# OPE-17's Lambda promotes a specific key (var.lambda_artifact_key). Private, versioned, encrypted.
+# Lambda deploy artifacts: CI uploads the built zip keyed by git SHA (openom/<sha>.zip); the Lambda
+# promotes a specific key (var.lambda_artifact_key). Private, versioned, encrypted.
 resource "aws_s3_bucket" "artifacts" {
   bucket = "openom-${var.stack_name}-artifacts-${data.aws_caller_identity.current.account_id}"
 }

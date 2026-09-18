@@ -10,7 +10,7 @@ variable "aws_region" {
 }
 
 variable "tf_state_bucket" {
-  description = "The out-of-band Terraform state bucket (OPE-468). Named here too so the CI deploy role can be granted state access (a backend block can't be read as a variable). Keep in sync with env/<env>.s3.tfbackend."
+  description = "The out-of-band Terraform state bucket. Named here too so the CI deploy role can be granted state access (a backend block can't be read as a variable). Keep in sync with env/<env>.s3.tfbackend."
   type        = string
 }
 
