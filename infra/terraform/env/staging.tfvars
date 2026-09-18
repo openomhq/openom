@@ -10,3 +10,8 @@ tf_state_bucket = "openom-tfstate-841547768414"
 # Staging owns the account-global GitHub OIDC provider; a later production stack in the same account
 # must set this false (and look the provider up) to avoid an EntityAlreadyExists collision.
 manage_oidc_provider = true
+
+# Lock the Function URL to CloudFront (OAC). The domain root's OAC + CloudFront-principal grant must be
+# applied first (they are). Flipping this removes the public invoke grant: the raw *.on.aws host 403s
+# everyone but CloudFront; the custom domain keeps serving.
+lambda_url_auth_type = "AWS_IAM"
