@@ -59,11 +59,18 @@ jobs:
           aws s3 cp "$zip" "s3://${ARTIFACTS_BUCKET}/openom/${GITHUB_SHA}.zip"
 
       # Migrations run OUT-OF-BAND against the DIRECT endpoint (the runtime never migrates — OPE-506).
-      # Additive-only migrations, so running before the new code goes live is safe for the old code.
+      # Additive-only, so running before the new code goes live is safe for the old code. Use a
+      # PREBUILT sqlx-cli (0.9, matching our sqlx) instead of `cargo run --bin migrate` — no crate
+      # rebuild. Same migration format + _sqlx_migrations table as the `migrate` bin, which stays for
+      # local/Docker use.
+      - name: Install sqlx-cli (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.9.0
       - name: Migrate (direct URL)
         env:
           MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
-        run: cargo run -p openom --bin migrate
+        run: sqlx migrate run --source openom/migrations --database-url "$MIGRATION_DATABASE_URL"
 
       - uses: hashicorp/setup-terraform@v3
 

@@ -191,13 +191,14 @@ pub fn app(state: AppState) -> Router {
     router.with_state(state)
 }
 
-/// Apply the embedded migration set — the single source of truth for BOTH the in-process local path
-/// ([`build_state`]) and the out-of-band `migrate` bin (which points it at the DIRECT DB endpoint;
-/// a remote runtime never migrates in-process — see [`build_state`]).
+/// Apply the embedded migration set. Used by [`build_state`] for the in-process LOCAL path (dev +
+/// the integration suite). A remote runtime never migrates in-process (see [`build_state`]); the
+/// deploy pipeline runs the SAME migrations out-of-band via `sqlx-cli` against the direct endpoint —
+/// verified checksum-compatible with this macro (both are sqlx 0.9).
 ///
 /// # Errors
 /// Returns [`sqlx::migrate::MigrateError`] if applying a migration fails.
-pub async fn run_migrations(db: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+async fn run_migrations(db: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(db).await
 }
 
