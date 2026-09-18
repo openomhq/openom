@@ -51,6 +51,16 @@ data "aws_cloudfront_origin_request_policy" "all_viewer_except_host" {
   name = "Managed-AllViewerExceptHostHeader"
 }
 
+# OAC lets CloudFront SigV4-sign requests to the Function URL origin, so the origin can require
+# AWS_IAM (locked to CloudFront) instead of being public. The matching grant to the CloudFront
+# principal is created by the caller (it needs the Lambda's region + name).
+resource "aws_cloudfront_origin_access_control" "api" {
+  name                              = "${var.api_domain}-oac"
+  origin_access_control_origin_type = "lambda"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
 resource "aws_cloudfront_distribution" "api" {
   enabled         = true
   is_ipv6_enabled = true
@@ -59,8 +69,9 @@ resource "aws_cloudfront_distribution" "api" {
   comment         = var.comment
 
   origin {
-    domain_name = var.function_url_host
-    origin_id   = "function-url"
+    domain_name              = var.function_url_host
+    origin_id                = "function-url"
+    origin_access_control_id = aws_cloudfront_origin_access_control.api.id
     custom_origin_config {
       http_port              = 80
       https_port             = 443

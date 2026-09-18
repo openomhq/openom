@@ -21,10 +21,14 @@ pub(crate) fn layer(origins: &[String]) -> Option<CorsLayer> {
     Some(
         CorsLayer::new()
             .allow_origin(allow)
-            // Token-in-header auth (Authorization: Bearer), so no credentials/cookie mode.
+            // Token-in-header auth (Bearer, in `Authorization` or `Openom-Auth`), so no credential/cookie mode.
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
             .allow_headers([
                 HeaderName::from_static("authorization"),
+                // The JWT header used when behind CloudFront OAC (which claims `Authorization`).
+                HeaderName::from_static("openom-auth"),
+                // SHA-256 of the request body, required by a Function URL origin under OAC/AWS_IAM.
+                HeaderName::from_static("x-amz-content-sha256"),
                 HeaderName::from_static("content-type"),
                 HeaderName::from_static("if-match"),
                 HeaderName::from_static("if-none-match"),

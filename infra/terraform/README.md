@@ -98,12 +98,24 @@ Cloudflare DNS at it. Deploy the app stack first (the domain reads its Function 
 - **OIDC trust** pins the token `sub` to this repo + the `staging` environment. It is only as strong as
   the GitHub environment protection (restrict the `staging` environment to `main`, add a required
   reviewer, and confirm fork PRs can't reach its secrets).
-- **The raw Function URL stays public.** The Lambda Function URL is `AuthType NONE` and remains
-  reachable at its `*.on.aws` host even with CloudFront in front. The app enforces JWT + CORS itself,
-  so this is acceptable for **staging**, but it means edge-only controls (WAF, rate limiting) are
-  bypassable via the origin host. **Before production**, lock the origin — a CloudFront-injected shared
-  secret header the app requires is the pragmatic fit (native OAC signs the `Authorization` header,
-  which collides with the API's `Bearer` JWT).
+- **Origin lock via a toggle.** The Function URL's auth is `var.lambda_url_auth_type`: `NONE` = public
+  (reachable at its `*.on.aws` host), `AWS_IAM` = only CloudFront can invoke it (via OAC — the
+  Origin Access Control + the CloudFront-principal grant live in the admin-applied `domain/` root).
+  Under `AWS_IAM` the raw host 403s everyone else, so edge controls (WAF, rate-limit) can't be
+  bypassed. Because OAC claims the `Authorization` header for its SigV4 signature, the client carries
+  its JWT in `Openom-Auth` and a body digest in `x-amz-content-sha256` (both built into the app +
+  client). Flip order matters — see the cutover below.
+
+### Origin-lock cutover (NONE → AWS_IAM)
+
+1. **App + client already speak it** — the server accepts `Openom-Auth` (falling back to
+   `Authorization`), the client sends `Openom-Auth` + `x-amz-content-sha256`. Just deploy normally.
+2. **Admin applies `domain/`** — adds the OAC + the CloudFront-principal invoke grant. Harmless while
+   the URL is still `NONE` (additive).
+3. **Flip:** set `lambda_url_auth_type = "AWS_IAM"` in `env/staging.tfvars` and apply the app root
+   (CI or admin). The raw `*.on.aws` host now 403s; the custom domain keeps working via OAC.
+4. Verify `https://api.<stack>.openom.org/health` still returns 200 (it flows through CloudFront).
+   Reverse (`AWS_IAM` → `NONE`) is just the tfvar back; do it before step 2's teardown if rolling back.
 
 ## Prerequisites (AWS side, done once)
 

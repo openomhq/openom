@@ -97,10 +97,11 @@ jobs:
           terraform init -backend-config=env/staging.s3.tfbackend
           terraform apply -auto-approve -var-file=env/staging.tfvars
 
-      # Basic liveness gate (the richer JWT'd round-trip smoke comes later).
-      - name: Smoke — /health on the Function URL
-        working-directory: infra/terraform
+      # Liveness gate via the PUBLIC entrypoint (the CloudFront custom domain), which works whether the
+      # Function URL is public (NONE) or locked to CloudFront (AWS_IAM). The raw Function URL isn't used
+      # here — under AWS_IAM it 403s everyone but CloudFront. (Richer JWT'd round-trip smoke comes later.)
+      - name: Smoke — /health via the public API domain
         run: |
-          url=$(terraform output -raw api_url)
+          url="https://api.staging.openom.org"
           echo "staging API: $url"
-          curl -fsS "${url}health" && echo " — /health OK"
+          curl -fsS "$url/health" && echo " — /health OK"

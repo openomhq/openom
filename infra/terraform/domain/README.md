@@ -65,8 +65,12 @@ Resource logic is in `../modules/api-domain`, so new environments add only thin 
   TLS/SNI).
 - DNS records are **DNS-only** (`proxied = false`): CloudFront terminates TLS with the ACM cert, so it
   must receive the request directly.
-- **Origin is still open**: the raw `*.on.aws` Function URL remains public (see the app root's README
-  security notes). Acceptable for staging; lock the origin before production.
+- **Origin lock (OAC)**: this root also creates a CloudFront **Origin Access Control** on the origin
+  and grants the CloudFront service principal (scoped to this distribution) invoke rights on the
+  Function URL. That's additive and harmless while the app root's Function URL is still `NONE`; it
+  becomes the *only* allowed caller once the app root flips `lambda_url_auth_type` to `AWS_IAM`. See
+  the app root's README "Origin-lock cutover". OAC claims `Authorization`, so clients send the JWT in
+  `Openom-Auth` and a body digest in `x-amz-content-sha256`.
 - **Staleness**: the domain reads the Function URL live at plan time, so a re-apply always tracks the
   current URL. If the Lambda function is ever destroyed + recreated, re-apply this root to repoint the
   origin.

@@ -115,20 +115,25 @@ resource "aws_lambda_alias" "live" {
   function_version = aws_lambda_function.api[0].version
 }
 
-# Public front door → the ALIAS (not $LATEST). The app enforces JWT auth; CORS is handled in-app
-# (the CorsLayer), so no Function-URL CORS block (it would shadow the app + split the source of truth).
+# Front door → the ALIAS (not $LATEST). The app enforces JWT auth; CORS is handled in-app (the
+# CorsLayer), so no Function-URL CORS block (it would shadow the app + split the source of truth).
+#
+# authorization_type is a variable so the origin can be locked to CloudFront: NONE = public (the
+# resource policy grants everyone); AWS_IAM = only SigV4-signed callers, i.e. CloudFront via OAC (the
+# OAC + the CloudFront-principal grant live in the admin-applied domain root). Flip to AWS_IAM only
+# AFTER that grant is applied — see infra/terraform/domain.
 resource "aws_lambda_function_url" "api" {
   count              = local.lambda_on
   function_name      = aws_lambda_function.api[0].function_name
   qualifier          = aws_lambda_alias.live[0].name
-  authorization_type = "NONE"
+  authorization_type = var.lambda_url_auth_type
 }
 
-# AuthType NONE needs an explicit public invoke grant, scoped to the alias. Since Oct 2025 AWS
-# requires BOTH lambda:InvokeFunctionUrl AND lambda:InvokeFunction on the resource policy or the URL
-# 403s — so there are two permissions, both scoped to NONE-URL invocations.
+# Public invoke grant — present ONLY while the URL is NONE. (Since Oct 2025 a NONE URL needs BOTH
+# lambda:InvokeFunctionUrl AND lambda:InvokeFunction or it 403s.) Under AWS_IAM these are removed and
+# the domain root grants the CloudFront principal instead.
 resource "aws_lambda_permission" "url_public" {
-  count                  = local.lambda_on
+  count                  = var.lambda_url_auth_type == "NONE" ? local.lambda_on : 0
   statement_id           = "AllowPublicFunctionUrl"
   action                 = "lambda:InvokeFunctionUrl"
   function_name          = aws_lambda_function.api[0].function_name
@@ -138,16 +143,12 @@ resource "aws_lambda_permission" "url_public" {
 }
 
 resource "aws_lambda_permission" "url_public_invoke" {
-  count         = local.lambda_on
+  count         = var.lambda_url_auth_type == "NONE" ? local.lambda_on : 0
   statement_id  = "AllowPublicFunctionUrlInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.api[0].function_name
   qualifier     = aws_lambda_alias.live[0].name
   principal     = "*"
-  # No function_url_auth_type here — AWS rejects it for InvokeFunction. AWS's recommended
-  # `InvokedViaFunctionUrl` condition isn't expressible via aws_lambda_permission, so InvokeFunction
-  # is granted unconditionally to `*`. Safe: the function is already public via the URL, and anonymous
-  # callers can't reach the Lambda Invoke API directly (it needs SigV4). Tighten for prod if wanted.
 }
 
 # --- CI-perms extension ---

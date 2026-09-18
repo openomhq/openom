@@ -28,6 +28,30 @@ module "api_domain" {
   comment            = "openom ${var.stack_name} API"
 }
 
+# Lock the origin to CloudFront: allow ONLY the CloudFront service principal (this distribution) to
+# invoke the Function URL. Created in the Lambda's region (aws.app_region), scoped to the alias. This
+# is additive while the URL is still NONE — pair it with the app root flipping the URL to AWS_IAM.
+# Both actions per the Oct-2025 Function-URL dual-permission rule (as with the public grants).
+resource "aws_lambda_permission" "cloudfront_invoke_url" {
+  provider      = aws.app_region
+  statement_id  = "AllowCloudFrontInvokeFunctionUrl"
+  action        = "lambda:InvokeFunctionUrl"
+  function_name = local.fn_name
+  qualifier     = "live"
+  principal     = "cloudfront.amazonaws.com"
+  source_arn    = module.api_domain.distribution_arn
+}
+
+resource "aws_lambda_permission" "cloudfront_invoke" {
+  provider      = aws.app_region
+  statement_id  = "AllowCloudFrontInvokeFunction"
+  action        = "lambda:InvokeFunction"
+  function_name = local.fn_name
+  qualifier     = "live"
+  principal     = "cloudfront.amazonaws.com"
+  source_arn    = module.api_domain.distribution_arn
+}
+
 output "api_custom_url" {
   description = "The API's custom domain."
   value       = module.api_domain.api_custom_url

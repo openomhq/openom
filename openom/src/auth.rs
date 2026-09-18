@@ -29,9 +29,15 @@ impl FromRequestParts<AppState> for Identity {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Prefer the `Openom-Auth` header, falling back to standard `Authorization`. Behind CloudFront
+        // OAC (the locked-origin setup), CloudFront overwrites `Authorization` with its SigV4 origin
+        // signature, so the client carries the JWT in `Openom-Auth` instead; everywhere else (local,
+        // dev, tests, a future non-CloudFront host) plain `Authorization` still works. Both carry the
+        // same `Bearer <jwt>` value, so this is a header-name choice, nothing more.
         let bearer = parts
             .headers
-            .get(AUTHORIZATION)
+            .get("openom-auth")
+            .or_else(|| parts.headers.get(AUTHORIZATION))
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "));
 

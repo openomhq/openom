@@ -16,6 +16,24 @@ const b64encode = (u8) => btoa(String.fromCharCode(...u8)); // STANDARD base64, 
 // forever (design C2). #send aborts the fetch after this; the abort surfaces as the `timeout` code.
 const REQUEST_TIMEOUT_MS = 20_000;
 
+// SHA-256 of the empty string — the content hash for a bodyless request.
+const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+// Lowercase-hex SHA-256 of a request body, sent as `x-amz-content-sha256`. A Lambda Function URL behind
+// CloudFront OAC (AWS_IAM) validates the body against this and rejects unsigned payloads; CloudFront
+// won't compute it, so the client must. Harmless off-CloudFront (the origin just ignores the header).
+async function bodyContentHash(body) {
+  let bytes;
+  if (body == null || body === '') return EMPTY_SHA256;
+  if (typeof body === 'string') bytes = new TextEncoder().encode(body);
+  else if (body instanceof Uint8Array) bytes = body;
+  else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
+  else if (ArrayBuffer.isView(body)) bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  else return EMPTY_SHA256; // unknown body kind (Blob/stream) — not produced on this seam
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 // ---- blob-channel error normalization (OPE-418 client adapter) ----
 // The data channel crosses the Comlink worker↔main boundary, so its failures must be PLAIN AppErrors
 // (a custom Error subclass loses its props in transit). Parse the server's RFC 9457 body into a code; a
@@ -87,7 +105,10 @@ export class RemoteStore {
     const h = { ...extra };
     if (this.#getAccessToken) {
       const token = await this.#getAccessToken({ forceRefresh });
-      if (token) h.authorization = `Bearer ${token}`;
+      // `Openom-Auth`, not `Authorization`: behind CloudFront OAC the origin signature claims the
+      // `Authorization` header, so the JWT rides here instead (the server reads `Openom-Auth`, and
+      // still accepts `Authorization` off-CloudFront). Same `Bearer <jwt>` value either way.
+      if (token) h['openom-auth'] = `Bearer ${token}`;
     }
     return h;
   }
@@ -101,8 +122,10 @@ export class RemoteStore {
   // AuthError so the composition root re-gates / signs out. Never loops. Non-401 statuses are
   // handed back untouched for each method to interpret (404/409/410/etc.).
   async #send(url, { method, extraHeaders = {}, body } = {}) {
+    // Stable across the 401 forced-refresh retry (the body doesn't change), so compute it once.
+    const withHash = { ...extraHeaders, 'x-amz-content-sha256': await bodyContentHash(body) };
     const attempt = async (forceRefresh) => {
-      const headers = await this.#headers(extraHeaders, { forceRefresh });
+      const headers = await this.#headers(withHash, { forceRefresh });
       // Per-request deadline (C2): abort the fetch if it hasn't resolved in time, so a hung backend surfaces
       // as an error (blob channel → the `timeout` code) instead of hanging the driver. The abort reason is a
       // TimeoutError; the only abort source on this path is this timer, so netAppError reads any abort as a timeout.

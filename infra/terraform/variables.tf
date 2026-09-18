@@ -127,3 +127,13 @@ variable "internal_gc_token" {
   default     = ""
   sensitive   = true
 }
+
+variable "lambda_url_auth_type" {
+  description = "Function URL auth: NONE (public) or AWS_IAM (locked to CloudFront via OAC — see infra/terraform/domain). Flip to AWS_IAM only AFTER the domain root's OAC grant is applied."
+  type        = string
+  default     = "NONE"
+  validation {
+    condition     = contains(["NONE", "AWS_IAM"], var.lambda_url_auth_type)
+    error_message = "lambda_url_auth_type must be NONE or AWS_IAM."
+  }
+}

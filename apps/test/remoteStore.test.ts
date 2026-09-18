@@ -36,8 +36,8 @@ describe('RemoteStore', () => {
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
     await store.blobGet('t/snapshot');
     await store.blobGet('t/snapshot');
-    expect((fetch.mock.calls[0][1] as any).headers.authorization).toBe('Bearer jwt-1');
-    expect((fetch.mock.calls[1][1] as any).headers.authorization).toBe('Bearer jwt-2');
+    expect((fetch.mock.calls[0][1] as any).headers['openom-auth']).toBe('Bearer jwt-1');
+    expect((fetch.mock.calls[1][1] as any).headers['openom-auth']).toBe('Bearer jwt-2');
     expect(auth.getAccessToken).toHaveBeenCalledTimes(2);
   });
 
@@ -45,14 +45,14 @@ describe('RemoteStore', () => {
     const fetch = vi.fn(async () => res({ status: 200 }));
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth: async () => 'jwt-fn' });
     await store.blobGet('t/x');
-    expect((fetch.mock.calls[0][1] as any).headers.authorization).toBe('Bearer jwt-fn');
+    expect((fetch.mock.calls[0][1] as any).headers['openom-auth']).toBe('Bearer jwt-fn');
   });
 
-  it('omits Authorization when no auth seam is given', async () => {
+  it('omits the auth header when no auth seam is given', async () => {
     const fetch = vi.fn(async () => res({ status: 200 }));
     const store = new RemoteStore({ baseUrl: 'http://x', fetch });
     await store.blobGet('t/x');
-    expect((fetch.mock.calls[0][1] as any).headers.authorization).toBeUndefined();
+    expect((fetch.mock.calls[0][1] as any).headers['openom-auth']).toBeUndefined();
   });
 
   it('on a 401 does EXACTLY ONE forced-refresh retry, then succeeds', async () => {
@@ -64,7 +64,7 @@ describe('RemoteStore', () => {
     // First attempt stale, retry forced-refresh.
     expect(auth.getAccessToken).toHaveBeenNthCalledWith(1, { forceRefresh: false });
     expect(auth.getAccessToken).toHaveBeenNthCalledWith(2, { forceRefresh: true });
-    expect((fetch.mock.calls[1][1] as any).headers.authorization).toBe('Bearer fresh');
+    expect((fetch.mock.calls[1][1] as any).headers['openom-auth']).toBe('Bearer fresh');
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
