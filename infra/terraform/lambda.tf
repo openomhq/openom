@@ -124,11 +124,23 @@ resource "aws_lambda_function_url" "api" {
   authorization_type = "NONE"
 }
 
-# AuthType NONE needs an explicit public invoke grant, scoped to the alias.
+# AuthType NONE needs an explicit public invoke grant, scoped to the alias. Since Oct 2025 AWS
+# requires BOTH lambda:InvokeFunctionUrl AND lambda:InvokeFunction on the resource policy or the URL
+# 403s — so there are two permissions, both scoped to NONE-URL invocations.
 resource "aws_lambda_permission" "url_public" {
   count                  = local.lambda_on
   statement_id           = "AllowPublicFunctionUrl"
   action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.api[0].function_name
+  qualifier              = aws_lambda_alias.live[0].name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
+resource "aws_lambda_permission" "url_public_invoke" {
+  count                  = local.lambda_on
+  statement_id           = "AllowPublicFunctionUrlInvoke"
+  action                 = "lambda:InvokeFunction"
   function_name          = aws_lambda_function.api[0].function_name
   qualifier              = aws_lambda_alias.live[0].name
   principal              = "*"
