@@ -62,7 +62,7 @@ pub use recovery::{
     generate_recovery_code, parse_recovery_code, RECOVERY_ARGON2_ITERATIONS,
     RECOVERY_ARGON2_MEMORY_KIB, RECOVERY_ARGON2_PARALLELISM, RECOVERY_ENTROPY_LEN,
 };
-pub use root::{derive_root, derive_rvk, RootKeys, RootLabels};
+pub use root::{derive_root, derive_root_from_master, derive_rvk, RootKeys, RootLabels};
 pub use secret::{Dek, HpkePrivate, Kek, Passphrase, RecoveryCode, RrkSecret};
 pub use wrap_aad::{rrk_wrap_aad, wrap_aad};
 

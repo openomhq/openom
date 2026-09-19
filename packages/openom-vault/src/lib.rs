@@ -6,6 +6,9 @@ pub use error::VaultError;
 pub mod vault;
 mod vault_core;
 
+pub mod account_keystore;
+pub use account_keystore::{AccountKeystore, UnlockedAccount};
+
 pub mod lifecycle;
 pub use lifecycle::{ChainVault, KeyringLifecycle, VaultContext};
 

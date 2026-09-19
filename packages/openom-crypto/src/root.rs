@@ -8,6 +8,8 @@
 //! [`derive_rvk`](keyeo_crypto::derive_rvk) is re-exported unchanged.)
 
 use keyeo_crypto::{KdfParams, RootKeys, RootLabels};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::CryptoError;
 
@@ -36,6 +38,44 @@ const OPENOM_ROOT_LABELS: RootLabels = RootLabels {
 /// Returns [`CryptoError`] if Argon2id derivation fails.
 pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, CryptoError> {
     keyeo_crypto::derive_root(passphrase, params, &OPENOM_ROOT_LABELS)
+}
+
+/// Derive [`RootKeys`] from a **stored-random account root** (32 bytes) under the frozen `openom:*` labels —
+/// the durable-identity path (OPE-542). Unlike [`derive_root`], the master is the account root, NOT
+/// Argon2id(passphrase), so the identity + HPKE keys (and thus `member_id`) stay stable across passphrase
+/// changes; the passphrase only unwraps the account root. Byte-identical HKDF split to [`derive_root`].
+#[must_use]
+pub fn derive_account_keys(account_root: &[u8; 32]) -> RootKeys {
+    keyeo_crypto::derive_root_from_master(account_root, &OPENOM_ROOT_LABELS)
+}
+
+/// A fresh random 256-bit **account root** — the durable-identity master (OPE-542). One per user profile,
+/// stored wrapped under the passphrase- and recovery-code-KEKs; `member_id`/identity derive from it via
+/// [`derive_account_keys`].
+///
+/// # Errors
+/// Returns [`CryptoError::Rng`] if the system RNG fails.
+pub fn generate_account_root() -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let mut root = Zeroizing::new([0u8; 32]);
+    getrandom::fill(root.as_mut_slice()).map_err(|e| CryptoError::Rng(e.to_string()))?;
+    Ok(root)
+}
+
+/// The user-level `member_id`: `uuid8(SHA-256(author_pubkey)[..16])` — self-certifying (an admission point can
+/// recompute it from the carried key), squat-proof, and stable across passphrase changes / trees / devices
+/// (the identity key never changes). `UUIDv8` layout (version nibble + `RFC-4122` variant bits), lowercase-hex
+/// canonical form. Shared by the vault (mint), the server (`/register` verification), and the client.
+#[must_use]
+pub fn derive_member_id(author_pubkey: &[u8]) -> String {
+    let digest = Sha256::digest(author_pubkey);
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&digest[..16]);
+    b[6] = (b[6] & 0x0f) | 0x80; // UUID version 8
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant (10xx)
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+    )
 }
 
 #[cfg(test)]

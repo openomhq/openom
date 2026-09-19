@@ -81,30 +81,49 @@ pub fn derive_root(
     labels: &RootLabels,
 ) -> Result<RootKeys, CryptoError> {
     // The Argon2id output is the HKDF master (derive_kek is exactly that Argon2id step). It is typed
-    // Kek by reuse; only the labels.kek expansion below is the KEK the caller wraps with.
+    // Kek by reuse; the HKDF split into sibling keys is [`derive_root_from_master`].
     let master = derive_kek(passphrase, params)?;
-    let hk = Hkdf::<Sha256>::new(None, master.expose());
+    Ok(derive_root_from_master(master.expose(), labels))
+}
+
+/// Split a 32-byte **master** into the sibling [`RootKeys`] (KEK / Ed25519 identity / X25519 HPKE) via the
+/// same frozen HKDF construction [`derive_root`] uses — but from a master supplied directly, NOT run through
+/// Argon2id.
+///
+/// Two callers: [`derive_root`] passes the Argon2id(passphrase) output; the durable-identity account keystore
+/// passes a **stored-random account root** (so the identity is stable across passphrase changes). The HKDF
+/// split is byte-identical either way — same empty extract salt, same `labels`, same expand order — so an
+/// account root and a passphrase master of equal bytes would yield equal keys (they never collide in practice:
+/// the account root is CSPRNG, the master is Argon2id output).
+///
+/// # Panics
+/// Never in practice: the only fallible step is HKDF-Expand, which fails only when the requested output
+/// exceeds `255 * 32` bytes — here every output is a fixed 32 bytes, so the bound is always satisfied. The
+/// `expect`s document that impossible case rather than thread an unreachable error to every caller.
+#[must_use]
+pub fn derive_root_from_master(master: &[u8], labels: &RootLabels) -> RootKeys {
+    let hk = Hkdf::<Sha256>::new(None, master);
 
     let mut kek = Zeroizing::new([0u8; KEY_LEN]);
     hk.expand(labels.kek, kek.as_mut_slice())
-        .map_err(|_| CryptoError::Kdf("hkdf expand (kek)".into()))?;
+        .expect("hkdf expand of a 32-byte KEK output is within the SHA-256 length bound");
 
     let mut seed = Zeroizing::new([0u8; 32]);
     hk.expand(labels.identity, seed.as_mut_slice())
-        .map_err(|_| CryptoError::Kdf("hkdf expand (identity)".into()))?;
+        .expect("hkdf expand of a 32-byte identity seed is within the SHA-256 length bound");
     let identity = SigningKey::from_seed(&seed);
 
     let mut hpke_ikm = Zeroizing::new([0u8; 32]);
     hk.expand(labels.hpke, hpke_ikm.as_mut_slice())
-        .map_err(|_| CryptoError::Kdf("hkdf expand (hpke)".into()))?;
+        .expect("hkdf expand of a 32-byte HPKE ikm is within the SHA-256 length bound");
     let hpke = derive_hpke_keypair(&hpke_ikm);
 
-    Ok(RootKeys {
+    RootKeys {
         kek: kek.into(),
         identity,
         hpke_secret: hpke.secret.into(),
         hpke_public: hpke.public,
-    })
+    }
 }
 
 // The owner identity's seed scrubs on drop — proven at compile time inside `edsign` (the crate
