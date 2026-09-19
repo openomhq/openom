@@ -1499,4 +1499,44 @@ mod tests {
         let carol = members(&k).into_iter().find(|(id, _)| id == "carol").map(|(_, r)| r);
         assert_eq!(carol, Some(KeyringRole::EDITOR), "the concurrent promotion is carved out");
     }
+
+    #[test]
+    fn a_quorum_demotion_excludes_the_target_from_the_denominator() {
+        // Demoting a co-owner via founder-or-unanimity must NOT need the target's own approval — the target
+        // is excluded from both the eligible set and the unanimity denominator. bob + carol (unanimity
+        // minus the target dave) demote dave; if dave were counted, his missing approval would block it.
+        let m = [
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("carol", KeyringRole::CO_OWNER, 3),
+            minit("dave", KeyringRole::CO_OWNER, 4),
+        ];
+        let mut k = quorum_engine(&m);
+        k.apply(genesis(&m)).unwrap();
+        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("dave", KeyringRole::EDITOR))).unwrap();
+        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
+        assert_eq!(
+            q_role_of(&k, "dave"),
+            Some(KeyringRole::EDITOR),
+            "bob + carol demote dave without dave's own approval"
+        );
+    }
+
+    #[test]
+    fn a_removed_member_cannot_authorize_a_later_change() {
+        // A member removed at an earlier causal position has no authority over a later op it authors: the
+        // change must not take effect. (The resolver voids a removed author's op, so this holds independent
+        // of the is_authorized `is_active` guard — which is why that guard is a defensive one.)
+        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)]);
+        k.apply(sign_op([2; 32], vec![], "founder", MembershipAction::Remove { member: "bob".into() }, &sk(1)))
+            .unwrap();
+        // bob's add is a CHILD of his own removal — bob is inactive at this position.
+        k.apply(sign_op([3; 32], vec![[2; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2)))
+            .unwrap();
+        assert!(
+            !members(&k).iter().any(|(id, _)| id == "carol"),
+            "a removed (inactive) member cannot authorize a change"
+        );
+    }
 }

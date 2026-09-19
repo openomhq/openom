@@ -1640,4 +1640,74 @@ mod tests {
         assert!(format!("{}", ClientError::Malformed("boom".into())).contains("boom"));
         assert!(format!("{}", ClientError::RolledBack("x".into())).contains("rolled back"));
     }
+
+    #[test]
+    fn compaction_preserves_below_cut_sealing_with_correct_origins() {
+        let a0 = provision_anchor(b"tree-seal", "founder", vpk(1), xpk(1), vk(3), b"GEN".to_vec(), &sk(1));
+        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"ADD".to_vec(), &sk(1)).unwrap();
+        let a2 = append_reseal(&a1, "founder", b"RSL".to_vec(), &sk(1)).unwrap();
+        let a3 = append_remove(&a2, "founder", "bob", b"REM".to_vec(), &sk(1)).unwrap();
+        let cut: [u8; 32] = watermark(&a3).unwrap().try_into().unwrap();
+        // A benign op above the cut so the retained frontier is non-empty.
+        let a4 = append_reseal(&a3, "founder", b"ABOVE".to_vec(), &sk(1)).unwrap();
+        let cp = compact_to_checkpoint(&a4, &[cut], None, "founder".into(), &sk(1), |pre| Ok((pre.to_vec(), 0))).unwrap();
+        let resolved = resolve(&cp).unwrap();
+        let sealing = resolved.checkpoint_sealing.expect("a checkpoint anchor carries preserved sealing");
+        let entry = |n: &[u8]| sealing.iter().find(|s| s.bytes.as_slice() == n);
+        // The pinned genesis sealing AND every below-cut op's sealing are preserved, each tagged with the
+        // origin its action maps to (Genesis / Reseal / Remove) — the sealer's epoch-eligibility signal.
+        assert_eq!(entry(b"GEN").map(|s| s.origin), Some(SealingOrigin::Genesis), "genesis sealing preserved");
+        assert_eq!(entry(b"ADD").map(|s| s.origin), Some(SealingOrigin::Other), "the Add's sealing preserved");
+        assert_eq!(entry(b"RSL").map(|s| s.origin), Some(SealingOrigin::Reseal), "the Reseal keeps its origin");
+        assert_eq!(entry(b"REM").map(|s| s.origin), Some(SealingOrigin::Remove), "the Remove keeps its origin");
+    }
+
+    #[test]
+    fn a_checkpoint_authored_by_a_non_owner_is_rejected() {
+        let a0 = provision_anchor(b"tree-cp2", "founder", vpk(1), xpk(1), vk(3), b"g".to_vec(), &sk(1));
+        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"w".to_vec(), &sk(1)).unwrap();
+        let cut: [u8; 32] = watermark(&a1).unwrap().try_into().unwrap();
+        let a2 = append_reseal(&a1, "founder", b"x".to_vec(), &sk(1)).unwrap();
+        // bob is a CoOwner (an active signer) but NOT the Owner: a checkpoint he authors must be refused,
+        // even though his signature verifies. The author must be the resolved Owner AND its registered key.
+        let cp = compact_to_checkpoint(&a2, &[cut], None, "bob".into(), &sk(2), |pre| Ok((pre.to_vec(), 0))).unwrap();
+        assert!(resolve(&cp).is_err(), "a non-Owner-authored checkpoint is rejected");
+    }
+
+    #[test]
+    fn a_removed_genesis_member_is_still_an_ever_member() {
+        // A GENESIS member who is later removed is no longer a current member and was never Added, so the
+        // only path that keeps them in the ever-member set (self-heal coverage) is the Create arm.
+        let founder = minit("founder", KeyringRole::OWNER, 1);
+        let bob = minit("bob", KeyringRole::CO_OWNER, 2);
+        let genesis = mint(
+            &keyeo_dag::GroupId::unscoped(),
+            vec![],
+            "founder".into(),
+            MembershipAction::Create { initial_members: vec![founder.clone(), bob.clone()] },
+            b"g".to_vec(),
+            &sk(1),
+        );
+        let gid = genesis.id;
+        let remove = mint(
+            &keyeo_dag::GroupId::unscoped(),
+            vec![gid],
+            "founder".into(),
+            MembershipAction::Remove { member: "bob".into() },
+            b"r".to_vec(),
+            &sk(1),
+        );
+        // Empty base: the in-DAG Create SEEDS the group (so it is an effective op whose initial_members
+        // the ever-map must fold in), then bob is removed.
+        let anchor = DagAnchor {
+            group_id: Vec::new(),
+            genesis: vec![],
+            reset_authority: None,
+            genesis_op_id: gid,
+            ops: vec![encode_op(&genesis), encode_op(&remove)],
+            checkpoint: None,
+        };
+        let ever = resolve(&postcard::to_allocvec(&anchor).unwrap()).unwrap().ever_members;
+        assert!(ever.contains_key("bob"), "a removed genesis member remains an ever-member");
+    }
 }
