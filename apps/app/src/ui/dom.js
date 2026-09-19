@@ -1,12 +1,25 @@
 // Winziger DOM-Helfer statt Framework: h() erzeugt Knoten, render() tauscht
 // einen Bereich aus. Reaktivitaet kommt aus tree.revision, nicht aus Events.
+// Apply a `style` prop via the CSSOM — an object ({fontSize:'16px'}) OR a "a:b;c:d" string. NEVER the
+// style *attribute*, so a strict CSP (style-src 'self', no 'unsafe-inline') doesn't block it.
+function applyStyle(el, v) {
+  if (typeof v === 'string') {
+    for (const decl of v.split(';')) {
+      const i = decl.indexOf(':');
+      if (i > 0) el.style.setProperty(decl.slice(0, i).trim(), decl.slice(i + 1).trim());
+    }
+  } else if (v && typeof v === 'object') {
+    Object.assign(el.style, v);
+  }
+}
+
 export function h(tag, props = null, ...children) {
   const el = document.createElement(tag);
   if (props) {
     for (const [k, v] of Object.entries(props)) {
       if (v === null || v === undefined || v === false) continue;
       if (k === 'class') el.className = v;
-      else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+      else if (k === 'style') applyStyle(el, v);
       else if (k === 'dataset') Object.assign(el.dataset, v);
       else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
       else if (k === 'html') el.innerHTML = v;
@@ -31,7 +44,8 @@ export function svg(tag, props = null, ...children) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
   if (props) for (const [k, v] of Object.entries(props)) {
     if (v === null || v === undefined || v === false) continue;
-    el.setAttribute(k, String(v));
+    else if (k === 'style') applyStyle(el, v);
+    else el.setAttribute(k, String(v));
   }
   for (const c of children) if (c) el.appendChild(c);
   return el;
