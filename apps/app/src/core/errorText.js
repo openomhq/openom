@@ -1,4 +1,4 @@
-// The code→message seam between the error framework and the UI (plan/design.error-model.md). Given an
+// The code→message seam between the error framework and the UI. Given an
 // AppError, produce a localized string via Fluent keyed by `${domain}-err-${code}`, interpolating the typed
 // `args`. This is the MINIMAL renderer the framework provides so no call site ever falls back to a raw
 // `.message`/`.stack` (decision A2); the full catalog + recovery affordances (retry/reauth/... buttons) are

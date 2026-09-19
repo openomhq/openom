@@ -1,4 +1,4 @@
-// The unified AppError contract (plan/design.error-model.md). Every failure in the app — HTTP (9457),
+// The unified AppError contract. Every failure in the app — HTTP (9457),
 // auth, vault, storage, or an unexpected crash — is normalized into one of these PLAIN, structured-clone-safe
 // objects before it crosses a Comlink boundary, so the UI renders from `code` + `args` only and no backend
 // internal / stack / live object ever leaks (decisions B1, B2, A4).

@@ -43,7 +43,7 @@ pub struct SyncTick {
 #[cfg(feature = "wasm")]
 mod wasm;
 
-/// The wasm-core mirror of the unified error-code registry (generated; see `plan/design.error-model.md`).
+/// The wasm-core mirror of the unified error-code registry (generated from contracts/error-codes.json).
 /// Ready for the in-core error path to emit `AppError`s once 9457 parsing moves into Rust (B3).
 pub mod error_codes;
 

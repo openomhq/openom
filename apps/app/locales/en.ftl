@@ -216,7 +216,7 @@ security-change = Change
 security-change-hint = Set a new passphrase. This also issues a fresh recovery code.
 security-planned = Planned
 
-# Errors — one message per AppError code (key = `${domain}-err-${code}`; see error-codes.json + errText).
+# Errors — one message per AppError code (key = `${domain}-err-${code}`; see contracts/error-codes.json + errText).
 # `err-generic` is the fallback for an unknown/unmapped code. quota_exceeded also carries {$limit}/{$used}
 # args (owner/maintainer only) for a richer variant the UI may add later.
 error-generic = Something went wrong. Please try again.

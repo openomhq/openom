@@ -23,7 +23,7 @@ jobs:
       - name: Parse every module
         run: find apps/app/src -name '*.js' -print0 | xargs -0 -n1 node --check
 
-      # Der Fehlercode-Generator (error-codes.json -> JS + Rust Spiegel) darf nicht driften.
+      # Der Fehlercode-Generator (contracts/error-codes.json -> JS + Rust Spiegel) darf nicht driften.
       - name: Error codes in sync
         run: node scripts/gen-error-codes.mjs --check
 
