@@ -1,0 +1,12 @@
+# cargo-mutants configuration.
+#
+# cargo-mutants generates mutants by PARSING source, then builds+tests each — so it also emits mutants for
+# the `#[cfg(kani)]` proof-harness modules that the normal `cargo test` build cfg's OUT. Those mutations are
+# inert (the code never compiles under `cargo test`), so they can never be caught and show up as phantom
+# "missed" survivors, burying the real coverage gaps. Exclude them here. The harness modules are named
+# `verification` / `clock_verification`; keep new Kani harnesses to that convention so this pattern keeps
+# matching. The harnesses' own correctness is checked by the separate Kani job (scripts/kani.mjs) — which
+# runs only manually, so run the proofs periodically since mutation testing no longer touches them.
+exclude_re = [
+  "(?:clock_)?verification::",
+]

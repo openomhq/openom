@@ -3705,6 +3705,7 @@ dependencies = [
  "edsign",
  "format-jcs",
  "jsonschema",
+ "openom-data-model",
  "proptest",
  "serde",
  "serde_json",

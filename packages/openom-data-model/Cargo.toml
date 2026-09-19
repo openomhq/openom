@@ -32,3 +32,9 @@ validation = ["dep:jsonschema"]
 
 [dev-dependencies]
 proptest.workspace = true
+# Turn the `validation` feature ON for THIS crate's own test build (the `schema` module and its tests are
+# behind it) without making it a default feature or affecting dependents / the wasm build. A
+# self-referential dev-dependency is the idiomatic way to enable a feature for a crate's own tests — so
+# `cargo test -p openom-data-model` (and cargo-mutants) exercise the schema validator, not just imports
+# that happen to turn the feature on.
+openom-data-model = { path = ".", features = ["validation"] }
