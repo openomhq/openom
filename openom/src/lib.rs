@@ -74,6 +74,26 @@ async fn ready(State(state): State<AppState>) -> (StatusCode, &'static str) {
     }
 }
 
+/// Aggregated per-dependency health — booleans only, no detail. Public (like `/health` + `/ready`);
+/// the staging gate page and monitoring read it. `database` = Postgres reachable, `storage` = the blob
+/// store (R2) reachable (a HEAD on a never-written key — a 404 still proves it answered), `auth` = the
+/// JWKS endpoint reachable (always true in dev, which has no external JWKS).
+async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let database = sqlx::query("SELECT 1").execute(&state.db).await.is_ok();
+    let storage = state.storage.head_object("_status/probe").await.is_ok();
+    let auth = match state.config.jwks_url.as_deref() {
+        None => true,
+        Some(url) => reqwest::Client::new()
+            .get(url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false),
+    };
+    Json(serde_json::json!({ "database": database, "storage": storage, "auth": auth }))
+}
+
 /// Echoes the authenticated caller — proves the auth wiring end to end.
 async fn whoami(id: auth::Identity) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "member_id": id.member_id }))
@@ -163,6 +183,7 @@ pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/status", get(status))
         // The scheduled production GC trigger (OPE-415): registered in EVERY deployment (unlike /dev/*), but
         // authenticated by a shared secret in-handler and fail-closed when unset — so it's inert until a
         // deployment sets OPENOM_INTERNAL_GC_TOKEN and wires an EventBridge caller. Ops, not the public wire,
