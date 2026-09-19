@@ -9,4 +9,8 @@
 # runs only manually, so run the proofs periodically since mutation testing no longer touches them.
 exclude_re = [
   "(?:clock_)?verification::",
+  # The resolver's debug-only fixpoint tripwire (keyeo-dag strong_remove). Its own mutants are either
+  # inert on correct code (a wider/absent bound still converges) or caught as panics — excluding it keeps
+  # the survivor list about real logic, not the guard.
+  "assert_fixpoint_progress",
 ]

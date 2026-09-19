@@ -186,7 +186,10 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         // Both only GROW `invalid`, so the loop converges (bounded by |ops|). The taint alone, before the
         // fixpoint, already suffices for the OPE-381 attack; interleaving keeps it robust to any rule that
         // voids a key-setter.
+        let mut passes = 0usize;
         loop {
+            passes += 1;
+            assert_fixpoint_progress(passes, ops.len());
             let before = invalid.len();
             propagate_key_taint(ops, graph, &authorized, &depth, &mut invalid);
             invalid = strong_remove_fixpoint(ops, graph, &depth, &genesis, &invalidators, invalid);
@@ -359,7 +362,10 @@ fn propagate_key_taint<OId, R, S, Op>(
     S: SignatureScheme,
     Op: SignedOp<OpId = OId, R = R, S = S>,
 {
+    let mut passes = 0usize;
     loop {
+        passes += 1;
+        assert_fixpoint_progress(passes, ops.len());
         let newly: Vec<OId> = ops
             .keys()
             .copied()
@@ -386,6 +392,22 @@ enum Invalidator<OId, MId> {
     Demote(Vec<OId>),
 }
 
+/// Debug-only tripwire for the resolver's monotone fixpoint loops. Every such loop grows the `invalid`
+/// set by at least one op per pass until it stabilises, so it provably cannot exceed `|ops|` passes; a
+/// loop that runs far beyond that has stopped converging (a broken termination check). In debug/test
+/// builds — where mutation testing runs — this turns such a runaway into an immediate panic instead of a
+/// 17-second hang, and documents the bound at the loop head. It compiles out in release (`debug_assert!`),
+/// so production keeps trusting the convergence proof at zero cost. The `4·|ops| + 16` bound is a wide
+/// margin over the true `|ops| + 1`, so it can never fire on correct inputs (the resolver proptests, which
+/// push hundreds of random op sets through these loops, are the standing check that it does not).
+#[inline]
+fn assert_fixpoint_progress(passes: usize, op_count: usize) {
+    debug_assert!(
+        passes <= 4 * op_count + 16,
+        "strong-remove fixpoint did not converge within its |ops| bound — non-termination",
+    );
+}
+
 /// Strong-remove/-demote fixpoint (rules 1–4 + `StrongDemote`) over the seeded `invalid` set, returning the
 /// final ignore set. Every rule only GROWS `invalid` (monotone), so the inner rules loop and the outer rule-4
 /// loop converge to the unique least fixpoint (order-independent — BEC). Rule 4 runs after the inner fixpoint
@@ -404,11 +426,17 @@ fn strong_remove_fixpoint<OId: OpId, Op: SignedOp<OpId = OId>>(
     let mut op_ids: Vec<OId> = ops.keys().copied().collect();
     op_ids.sort_by_key(|o| (*depth.get(o).unwrap_or(&0), *o));
 
+    let mut outer_passes = 0usize;
     loop {
+        outer_passes += 1;
+        assert_fixpoint_progress(outer_passes, ops.len());
         // Inner fixpoint: rules 1+2+StrongDemote+3 iterated until stable (all monotone — the ignore set only
         // grows — so this converges). Any rule-4 suppressions from a previous outer pass are already in
         // `invalid` and cascade correctly through rule 3 here.
+        let mut inner_passes = 0usize;
         loop {
+            inner_passes += 1;
+            assert_fixpoint_progress(inner_passes, ops.len());
             let mut changed = false;
 
             // Rules 1 + 2 + StrongDemote: process invalidators in the merged `(depth,id)` order. A valid
