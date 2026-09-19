@@ -69,9 +69,11 @@ jobs:
           # the whole-suite unmutated baseline (~51s across all 16 crates) — a baseline that exceeds --timeout is
           # FATAL (exit 4), unlike a per-mutant timeout which is just recorded and skipped. The tree's green state
           # is already verified by the web/desktop/integration workflows, so skipping the baseline check is safe.
-          # 20s clears any single crate's real test time yet kills a runaway-allocation mutant at ~2 GB — far below
-          # the ~110s point where such a mutant fills RAM and OOM-kills the whole runner.
-          cargo mutants -vV --in-place --baseline=skip --timeout 20 "${args[@]}"
+          # 17s clears the observed legit test tail (p95 15.0s / p99 15.2s / max 15.4s from the 2026-09-16 run — a
+          # ~1.6s margin for runner variance) yet still kills a runaway-allocation mutant far below the ~110s point
+          # where such a mutant fills RAM and OOM-kills the whole runner. Don't drop below ~16s: a real ~15s test
+          # cohort (top ~10%) would start false-timing-out.
+          cargo mutants -vV --in-place --baseline=skip --timeout 17 "${args[@]}"
 
       - uses: actions/upload-artifact@v4
         if: always()
