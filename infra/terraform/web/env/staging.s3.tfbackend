@@ -1,0 +1,5 @@
+# Backend settings for the STAGING web state (separate object from the app + api-domain roots).
+# Passed via `terraform init -backend-config=env/staging.s3.tfbackend`.
+bucket = "openom-tfstate-841547768414"
+key    = "web/staging.tfstate"
+region = "eu-central-1"

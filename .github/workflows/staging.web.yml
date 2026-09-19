@@ -1,0 +1,94 @@
+name: staging.web
+
+# Publish the web app (apps/app) to the staging Cloudflare Pages project, pointed at the REAL staging
+# API (api.staging.openom.org), not local-only. The Pages project + custom domain + the Zero Trust
+# Access wall are Terraform (infra/terraform/web); this only builds + uploads content.
+#
+# Manual only — no auto-deploy until the branching model is settled (mirrors staging.deploy).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: staging.web
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 20
+    env:
+      API_URL: https://api.staging.openom.org
+      SITE_URL: https://app.staging.openom.org/
+      PAGES_PROJECT: openom-staging-web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The app loads ONE gitignored build artifact — the openom-app-core wasm. Compile it (Docker
+      # is pre-installed on the runner; wasm-bindgen is version-pinned to Cargo.lock). ~a few minutes.
+      - name: Build the app-core wasm
+        run: node scripts/build-app-core.mjs
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          cp -r apps/app/. _site/
+          cp -r assets _site/assets
+          # The shared-password staging gate (a Pages Function). Lives outside apps/app so the public
+          # demo + local dev stay ungated; only staging gets it.
+          mkdir -p _site/functions
+          cp apps/staging-gate/_middleware.js _site/functions/_middleware.js
+
+      # Fill %SITE_URL% / %DEMO% / %SERVER% (openom:server meta → the RemoteStore base URL). DEMO=false
+      # (real backend, account wall on), SERVER = the custom API domain (the raw Function URL is locked).
+      - name: Substitute deploy-time placeholders
+        working-directory: apps
+        env:
+          SITE_URL: ${{ env.SITE_URL }}
+          DEMO: "false"
+          OPENOM_SERVER: ${{ env.API_URL }}
+        run: node scripts/site-url.mjs ../_site
+
+      # Cloudflare Pages serves _headers. CSP starts as Report-Only: a strict policy on a buildless +
+      # wasm app can trip on things (inline handlers, worker/blob URLs) that only show up in a real
+      # browser — deploy report-only first, watch the console, then flip to enforcing (drop `-Report-Only`).
+      # `wasm-unsafe-eval` is required to instantiate WebAssembly without allowing JS eval.
+      - name: Write _headers (CSP + security + caching)
+        env:
+          R2: ${{ vars.R2_ENDPOINT }}
+        run: |
+          cat > _site/_headers <<EOF
+          /*
+            Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' ${API_URL} ${R2}; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+            X-Content-Type-Options: nosniff
+            Referrer-Policy: no-referrer
+          /assets/*
+            Cache-Control: public, max-age=31536000, immutable
+          EOF
+          echo "wrote _headers:"; cat _site/_headers
+
+      # Sync the shared gate password (a GitHub secret) into the Pages project's env, so the gate
+      # Function reads env.STAGING_APP_GATE_PASSWORD. Fed over stdin (no interactive prompt); idempotent —
+      # re-set on every deploy. Rotate = update the GitHub secret and re-run this workflow.
+      - name: Set the staging-gate password (Pages secret)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
+        run: printf '%s' "$STAGING_APP_GATE_PASSWORD" | npx --yes wrangler@3 pages secret put STAGING_APP_GATE_PASSWORD --project-name "$PAGES_PROJECT"
+
+      - name: Deploy to Cloudflare Pages
+        env:
+          # wrangler reads the token from CLOUDFLARE_API_TOKEN by convention; our secret is named for its
+          # job (a Pages-Edit-only token), so map it here. Account id is a var — it's not secret.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@3 pages deploy _site --project-name "$PAGES_PROJECT" --branch main --commit-hash "${{ github.sha }}"
