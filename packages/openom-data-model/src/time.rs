@@ -355,6 +355,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn civil_from_days_is_invertible_at_every_day_across_era_boundaries() {
+        // civil_from_days must be the EXACT inverse of days_from_civil for every day, not just the sampled
+        // instants the round-trip tests happen to draw. A subtle slip in the day-of-era year arithmetic
+        // (the `doe/36_524 - doe/146_096` correction) only changes the computed year at days where it
+        // crosses a 365-boundary, and the day-of-era is 0 exactly at a 400-year era boundary — both are
+        // easy for a sparse sample to miss. Walk a dense range spanning several 146_097-day eras.
+        for days in 0i64..300_000 {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(
+                days_from_civil(y, m, d),
+                days,
+                "civil_from_days({days}) = ({y},{m},{d}) is not invertible"
+            );
+        }
+    }
+
     proptest! {
         /// Round-trip over the whole realistic domain: any instant this century, any logical counter.
         #[test]
