@@ -309,7 +309,11 @@ where
     /// Returns [`Error`] if applying a now-eligible pending op fails.
     pub fn flush(&mut self) -> Result<Vec<MembershipEvent<Op::MemberId>>, Error<Op::MemberId>> {
         let mut all_events = Vec::new();
+        let bound = self.ops.len() + self.pending.len();
+        let mut passes = 0usize;
         loop {
+            passes += 1;
+            assert_traversal_progress(passes, bound);
             let mut applied_any = false;
             let mut remaining = Vec::new();
             for op in std::mem::take(&mut self.pending) {
@@ -461,7 +465,10 @@ where
             .map(|(id, _)| *id)
             .collect();
         let mut order: Vec<Op::OpId> = Vec::with_capacity(self.ops.len());
+        let mut passes = 0usize;
         while let Some(&next) = ready.iter().next() {
+            passes += 1;
+            assert_traversal_progress(passes, self.ops.len());
             ready.remove(&next);
             order.push(next);
             if let Some(cs) = children.get(&next) {
@@ -612,6 +619,21 @@ where
     }
 }
 
+/// Debug-only tripwire for the engine's bounded traversal loops (flush, the Kahn topological sort, and the
+/// prune-set DFS). Each visits an op at most once — flush applies each pending op once, Kahn dequeues each
+/// node once, the DFS `keep`-guards every push — so none can exceed its op-count bound. In debug/test builds
+/// (where mutation testing runs) a mutation that breaks the terminating condition turns a would-be
+/// non-terminating loop into an immediate panic instead of a 17-second timeout; it compiles out in release
+/// (`debug_assert!`). The `4·bound + 16` margin is wide over the true bound, so it never fires on correct
+/// inputs.
+#[inline]
+fn assert_traversal_progress(iters: usize, bound: usize) {
+    debug_assert!(
+        iters <= 4 * bound + 16,
+        "engine traversal did not terminate within its |ops| bound — non-termination",
+    );
+}
+
 /// Membership events for one `apply` = the diff between the resolved active set before and after.
 /// An op that was admitted but is unauthorized or superseded yields no event.
 fn diff_events<Id: MemberId, R: Role>(
@@ -738,7 +760,10 @@ impl<Op: SignedOp> keyeo_core::Compaction for Retained<'_, Op> {
         // so they stay prunable. Walk parents from each un-subsumed op, stopping at the tips, to collect `keep`.
         let mut keep: HashSet<Op::OpId> = HashSet::new();
         let mut stack: Vec<Op::OpId> = all.iter().copied().filter(|x| !subsumed(x)).collect();
+        let mut passes = 0usize;
         while let Some(x) = stack.pop() {
+            passes += 1;
+            assert_traversal_progress(passes, state.ops.len());
             if let Some(op) = state.ops.get(&x) {
                 for p in op.parents() {
                     if tips.contains(p) {
