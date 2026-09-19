@@ -55,7 +55,7 @@ pub use keyeo_crypto::{
 pub use envelope::{open_envelope, seal_envelope, AuthorIdentity, SealParams};
 pub use kdf::{default_kdf_params, derive_kek};
 pub use recovery::recovery_kdf_params;
-pub use root::{derive_account_keys, derive_member_id, derive_root, generate_account_root};
+pub use root::{derive_account_keys, derive_root, generate_account_root};
 pub use seal::{open, seal};
 
 #[cfg(test)]

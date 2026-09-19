@@ -8,7 +8,6 @@
 //! [`derive_rvk`](keyeo_crypto::derive_rvk) is re-exported unchanged.)
 
 use keyeo_crypto::{KdfParams, RootKeys, RootLabels};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
@@ -59,23 +58,6 @@ pub fn generate_account_root() -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     let mut root = Zeroizing::new([0u8; 32]);
     getrandom::fill(root.as_mut_slice()).map_err(|e| CryptoError::Rng(e.to_string()))?;
     Ok(root)
-}
-
-/// The user-level `member_id`: `uuid8(SHA-256(author_pubkey)[..16])` — self-certifying (an admission point can
-/// recompute it from the carried key), squat-proof, and stable across passphrase changes / trees / devices
-/// (the identity key never changes). `UUIDv8` layout (version nibble + `RFC-4122` variant bits), lowercase-hex
-/// canonical form. Shared by the vault (mint), the server (`/register` verification), and the client.
-#[must_use]
-pub fn derive_member_id(author_pubkey: &[u8]) -> String {
-    let digest = Sha256::digest(author_pubkey);
-    let mut b = [0u8; 16];
-    b.copy_from_slice(&digest[..16]);
-    b[6] = (b[6] & 0x0f) | 0x80; // UUID version 8
-    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant (10xx)
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
-    )
 }
 
 #[cfg(test)]

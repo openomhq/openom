@@ -21,10 +21,11 @@ use keyeo_crypto::{
     KdfParams as KeyeoKdfParams, KekKind, Wrap as KeyeoWrap, WrapMethod as KeyeoWrapMethod,
 };
 use openom_crypto::{
-    default_kdf_params, derive_account_keys, derive_kek, derive_member_id, generate_account_root,
+    default_kdf_params, derive_account_keys, derive_kek, generate_account_root,
     generate_recovery_code, generate_salt, parse_recovery_code, recovery_kdf_params, Kek,
     RecoveryCode, RootKeys,
 };
+use openom_keyring_api::derive_member_id;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 

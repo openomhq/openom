@@ -1,6 +1,26 @@
 #![doc = include_str!("../README.md")]
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// The canonical user-level `member_id`: `uuid8(SHA-256(author_pubkey)[..16])` — self-certifying (any admission
+/// point can recompute it from the carried key), squat-proof, and stable across passphrase changes / trees /
+/// devices (the identity key never changes). `UUIDv8` layout (version nibble + `RFC-4122` variant bits),
+/// lowercase-hex canonical form. The ONE shared home for this convention: the vault mints it, the keyring
+/// engines enforce `member_id == derive_member_id(author_public_key)` at admission, and the server verifies it
+/// at `/register`.
+#[must_use]
+pub fn derive_member_id(author_pubkey: &[u8]) -> String {
+    let digest = Sha256::digest(author_pubkey);
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&digest[..16]);
+    b[6] = (b[6] & 0x0f) | 0x80; // UUID version 8
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant (10xx)
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+    )
+}
 
 /// Which keyring engine backs a tree.
 ///

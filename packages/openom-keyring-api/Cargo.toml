@@ -8,6 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+# For `derive_member_id` (SHA-256 of the identity pubkey) — the canonical member-id convention, shared by the
+# vault (mint), the keyring engines (admission check), and the server (/register). A hash is all it needs, so
+# the crate stays dependency-light (no openom-crypto → argon2/proto pulled into the engine).
+sha2.workspace = true
 # The generic membership-envelope wire (`MembershipEnvelope`) — a hand-written `#[derive(prost::Message)]`
 # struct, so openom-keyring-api OWNS an efficient protobuf wire of its own (no borrowed openom proto, no buf/protoc
 # codegen tooling). prost is generic, so the crate stays dependency-light.
