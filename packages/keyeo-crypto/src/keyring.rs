@@ -256,4 +256,13 @@ mod tests {
         tags.sort_unstable();
         assert_eq!(tags, [1, 2, 3, 4]);
     }
+
+    #[test]
+    fn string_recipient_id_aad_is_its_own_bytes_and_injective() {
+        // The AAD binding must be the id's OWN bytes (so a wrap can't be transplanted to another
+        // recipient) and injective across distinct ids — a constant or empty AAD would let any recipient
+        // open any wrap.
+        assert_eq!("alice".to_string().aad_bytes(), b"alice".to_vec());
+        assert_ne!("a".to_string().aad_bytes(), "b".to_string().aad_bytes());
+    }
 }

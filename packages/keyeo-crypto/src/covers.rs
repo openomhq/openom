@@ -207,4 +207,18 @@ mod tests {
         assert!(missing(&both, &required, &rrk).is_empty());
         assert!(covers_exact(&both, &required, &rrk));
     }
+
+    #[test]
+    fn a_stale_key_rrk_wrap_does_not_cover_the_recovery_root() {
+        // The rekey-race guard applies to the recovery root exactly as to a member: an RRK wrap to the
+        // right id but a STALE key must not count toward coverage.
+        let required = vec![desc("alice", Some(1))];
+        let rrk = desc("owner", Some(5)); // the recovery root's CURRENT key is 5
+        let stale = epoch(vec![rrk_wrap("owner", 9), member_wrap("alice", 1)]);
+        assert_eq!(missing(&stale, &required, &rrk), vec!["owner".to_string()]);
+        assert!(!covers_exact(&stale, &required, &rrk));
+        // A current-key RRK wrap covers it.
+        let current = epoch(vec![rrk_wrap("owner", 5), member_wrap("alice", 1)]);
+        assert!(missing(&current, &required, &rrk).is_empty());
+    }
 }

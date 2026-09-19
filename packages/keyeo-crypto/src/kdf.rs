@@ -163,4 +163,33 @@ mod tests {
         assert_eq!(a.expose().len(), KEY_LEN);
         assert_ne!(a.expose(), b.expose()); // astronomically unlikely to collide
     }
+
+    #[test]
+    fn validate_accepts_in_bounds_and_rejects_any_single_out_of_bounds_field() {
+        // A consumer runs this on params read off an UNVERIFIED keyring, so EVERY field must gate
+        // independently — one weak field (that would OOM/CPU-burn or a too-short salt) has to fail the
+        // whole check, and it must never clamp.
+        let bounds = KdfBounds {
+            memory_kib: 8..=16,
+            iterations: 1..=3,
+            parallelism: 1..=2,
+            salt_len: 16..=32,
+        };
+        let params = |memory_kib, iterations, parallelism, salt_len| KdfParams {
+            salt: vec![0u8; salt_len],
+            memory_kib,
+            iterations,
+            parallelism,
+        };
+        // Every field inside the window (both edges) → accepted.
+        assert!(params(8, 1, 1, 16).validate(&bounds));
+        assert!(params(16, 3, 2, 32).validate(&bounds));
+        // Each field, alone, just outside the window → rejected.
+        assert!(!params(7, 1, 1, 16).validate(&bounds), "memory below floor");
+        assert!(!params(17, 1, 1, 16).validate(&bounds), "memory above ceiling");
+        assert!(!params(8, 4, 1, 16).validate(&bounds), "iterations above ceiling");
+        assert!(!params(8, 1, 3, 16).validate(&bounds), "parallelism above ceiling");
+        assert!(!params(8, 1, 1, 15).validate(&bounds), "salt too short");
+        assert!(!params(8, 1, 1, 33).validate(&bounds), "salt too long");
+    }
 }
