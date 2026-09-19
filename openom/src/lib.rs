@@ -88,8 +88,7 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
             .timeout(std::time::Duration::from_secs(3))
             .send()
             .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false),
+            .is_ok_and(|r| r.status().is_success()),
     };
     Json(serde_json::json!({ "database": database, "storage": storage, "auth": auth }))
 }
