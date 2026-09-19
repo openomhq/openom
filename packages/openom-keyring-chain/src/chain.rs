@@ -1277,4 +1277,59 @@ mod tests {
             KeyringError::UnendorsedOrdinaryChange
         );
     }
+
+    #[test]
+    fn governing_ref_encodes_a_revision_and_round_trips() {
+        for n in [0u32, 1, 255, 256, 65_536, u32::MAX] {
+            assert_eq!(decode_governing_ref(&encode_governing_ref(n)), Some(n), "round-trip {n}");
+        }
+        // A ref that isn't exactly 4 bytes is foreign / malformed and does not resolve.
+        assert_eq!(decode_governing_ref(&[1, 2, 3]), None);
+        assert_eq!(decode_governing_ref(&[]), None);
+        assert_eq!(decode_governing_ref(&[0, 0, 0, 1, 0]), None);
+        // A GoverningKeyring publishes its own revision as the ref.
+        let f = key();
+        let gk = GoverningKeyring::from_genesis(genesis(&f, &[], &[]), &f.verifying_key()).unwrap();
+        assert_eq!(gk.governing_ref(), encode_governing_ref(gk.revision()));
+        assert_eq!(decode_governing_ref(&gk.governing_ref()), Some(gk.revision()));
+    }
+
+    #[test]
+    fn a_member_list_exactly_at_the_cap_is_accepted() {
+        use crate::doc::MAX_MEMBERS;
+        let f = key();
+        let mut k = genesis(&f, &[], &[]);
+        let mut eps = epochs_of(&k);
+        // Fill to EXACTLY the cap with unique editors, each carrying its own wrap.
+        let mut i = 0usize;
+        while k.members.len() < MAX_MEMBERS {
+            let id = format!("m{i}");
+            k.members.push(dummy_member(&id));
+            eps[0].wraps.push(wrap(&id, HPKE));
+            i += 1;
+        }
+        set_epochs(&mut k, &eps);
+        k.signatures.clear();
+        sign_keyring(&mut k, &f);
+        assert_eq!(k.members.len(), MAX_MEMBERS);
+        // The bound is inclusive — exactly the cap is allowed (a `>` weakened to `>=` would reject it).
+        assert!(verify_reset(None, &k).is_ok());
+    }
+
+    #[test]
+    fn an_epoch_list_exactly_at_the_cap_is_accepted() {
+        use crate::doc::MAX_EPOCHS;
+        let f = key();
+        let mut k = genesis(&f, &[], &[]);
+        let mut eps = epochs_of(&k);
+        let e = eps[0].clone();
+        while eps.len() < MAX_EPOCHS {
+            eps.push(e.clone());
+        }
+        set_epochs(&mut k, &eps);
+        k.signatures.clear();
+        sign_keyring(&mut k, &f);
+        assert_eq!(epochs_of(&k).len(), MAX_EPOCHS);
+        assert!(verify_reset(None, &k).is_ok());
+    }
 }

@@ -386,3 +386,224 @@ fn decode(bytes: &[u8]) -> Result<Keyring, SyncError> {
 fn chain_err(e: KeyringError) -> SyncError {
     SyncError::Chain(format!("{e:?}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::{Member, RecoveryKey, MEMBER_OWNER, WRAP_RRK_HPKE, WRAP_X25519_HPKE};
+    use keyeo_crypto::{
+        codec, EncappedKey, Epoch as KeyeoEpoch, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        X25519PublicKey,
+    };
+    use std::sync::Arc;
+    use store_blob::MemoryBlob;
+
+    const EDITOR: i32 = 4;
+
+    fn sk(seed: u8) -> SigningKey {
+        SigningKey::from_seed(&[seed; 32])
+    }
+    fn pk(seed: u8) -> Vec<u8> {
+        sk(seed).verifying_key().to_bytes().to_vec()
+    }
+    fn wrap(id: &str, method: i32) -> KeyeoWrap<String> {
+        let encapped = EncappedKey::from_bytes([0u8; 32]);
+        let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
+        let m = if method == WRAP_RRK_HPKE {
+            WrapMethod::RrkHpke { encapped, recipient_key }
+        } else {
+            WrapMethod::MemberHpke { encapped, recipient_key }
+        };
+        KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
+    }
+    fn bytes(k: &Keyring) -> Vec<u8> {
+        k.encode_to_vec()
+    }
+
+    /// A one-founder genesis (rev 1) re-keyed to `founder_seed`, self-signed.
+    fn genesis(founder_seed: u8) -> Keyring {
+        let mut g = Keyring {
+            tree_id: b"tree-uuid-16byte".to_vec(),
+            revision: 1,
+            layout_version: 1,
+            prev_keyring_hash: vec![],
+            members: vec![Member {
+                member_id: "owner".into(),
+                role: MEMBER_OWNER,
+                author_public_key: pk(founder_seed),
+                hpke_public_key: vec![9; 32],
+            }],
+            signatures: vec![],
+            recovery_keys: vec![],
+            epochs: codec::encode_epochs(&[KeyeoEpoch {
+                key_id: KeyId::new(vec![0]),
+                ordinal: 0,
+                dek_commitment: [0u8; 32],
+                wraps: vec![wrap("owner", WRAP_RRK_HPKE)],
+            }]),
+            ..Default::default()
+        };
+        sign_keyring(&mut g, &sk(founder_seed));
+        g
+    }
+
+    /// Like [`genesis`], but pinning `rvk_seed` as the recovery authority and co-signed by it.
+    fn genesis_with_rvk(founder_seed: u8, rvk_seed: u8) -> Keyring {
+        let mut g = genesis(founder_seed);
+        g.recovery_keys = vec![RecoveryKey {
+            public_key: vec![5; 32],
+            member_id: "owner".into(),
+            wraps: codec::encode_wraps::<String>(&[]),
+            recovery_verifying_key: pk(rvk_seed),
+        }];
+        g.signatures.clear();
+        sign_keyring(&mut g, &sk(founder_seed));
+        sign_keyring(&mut g, &sk(rvk_seed));
+        g
+    }
+
+    /// A rev+1 ordinary successor of `prior` that adds editor `id`, founder-signed.
+    fn next(prior: &Keyring, editor_seed: u8, id: &str, founder_seed: u8) -> Keyring {
+        let mut k = prior.clone();
+        k.revision = prior.revision + 1;
+        k.prev_keyring_hash = keyring_hash(prior).to_vec();
+        k.members.push(Member {
+            member_id: id.into(),
+            role: EDITOR,
+            author_public_key: pk(editor_seed),
+            hpke_public_key: vec![9; 32],
+        });
+        let mut eps = k.key_material().unwrap();
+        eps[0].wraps.push(wrap(id, WRAP_X25519_HPKE));
+        k.epochs = codec::encode_epochs(&eps);
+        k.signatures.clear();
+        sign_keyring(&mut k, &sk(founder_seed));
+        k
+    }
+
+    /// A self-signed recovery reset re-founding under `founder_seed` at `rev` (no recovery authority).
+    fn reset_at(founder_seed: u8, rev: u32) -> Keyring {
+        let mut r = genesis(founder_seed);
+        r.revision = rev;
+        r.signatures.clear();
+        sign_keyring(&mut r, &sk(founder_seed));
+        r
+    }
+
+    #[test]
+    fn pull_bootstraps_then_reports_none_then_walks_a_multi_revision_advance() {
+        let store = Arc::new(MemoryBlob::new());
+        let mut producer = KeyringChainBlobSync::new(Arc::clone(&store));
+        let g = genesis(1);
+        producer.publish(&bytes(&g)).unwrap();
+
+        let mut consumer = KeyringChainBlobSync::new(Arc::clone(&store));
+        // First pull with no anchor bootstraps off the head and returns its bytes.
+        assert_eq!(consumer.pull().unwrap(), Some(bytes(&g)));
+        assert_eq!(consumer.revision(), Some(1));
+        // Pulling again with the head unchanged (same revision, same hash) reports no advance.
+        assert_eq!(consumer.pull().unwrap(), None);
+
+        // The producer advances the head two revisions, leaving rev/2 in history.
+        let r2 = next(&g, 2, "e2", 1);
+        let r3 = next(&r2, 3, "e3", 1);
+        producer.publish(&bytes(&r2)).unwrap();
+        producer.publish(&bytes(&r3)).unwrap();
+        // The consumer walks rev/2 then the head rev/3 and adopts the new bytes.
+        assert_eq!(consumer.pull().unwrap(), Some(bytes(&r3)));
+        assert_eq!(consumer.revision(), Some(3));
+
+        // A head served BELOW our watermark is a rollback, not an advance.
+        store.put(HEAD, &bytes(&g), Precondition::Any).unwrap();
+        assert!(matches!(consumer.pull(), Err(PullError::Rollback { have: 3, served: 1 })));
+    }
+
+    #[test]
+    fn pull_surfaces_a_recovery_reset_as_reset_pending() {
+        let store = Arc::new(MemoryBlob::new());
+        let mut producer = KeyringChainBlobSync::new(Arc::clone(&store));
+        let g = genesis(1);
+        producer.publish(&bytes(&g)).unwrap();
+        let mut consumer = KeyringChainBlobSync::new(Arc::clone(&store));
+        consumer.pull().unwrap();
+
+        // A rev-2 head that re-founds under a fresh identity (an unendorsed set change on the walk) is a
+        // recovery reset — surfaced for the out-of-band ceremony, never silently walked.
+        let mut reset = reset_at(9, 2);
+        reset.prev_keyring_hash = keyring_hash(&g).to_vec();
+        reset.signatures.clear();
+        sign_keyring(&mut reset, &sk(9));
+        store.put(HEAD, &bytes(&reset), Precondition::Any).unwrap();
+        assert!(matches!(consumer.pull(), Err(PullError::ResetPending)));
+    }
+
+    #[test]
+    fn accept_reset_enforces_the_revision_watermark() {
+        let store = Arc::new(MemoryBlob::new());
+        let mut producer = KeyringChainBlobSync::new(Arc::clone(&store));
+        let g = genesis(1);
+        producer.publish(&bytes(&g)).unwrap();
+        producer.publish(&bytes(&next(&g, 2, "e2", 1))).unwrap();
+
+        let mut consumer = KeyringChainBlobSync::new(Arc::clone(&store));
+        consumer.pull().unwrap(); // bootstrap rev 1
+        consumer.pull().unwrap(); // walk to rev 2
+        assert_eq!(consumer.revision(), Some(2));
+
+        // Behind the watermark → refused.
+        store.put(HEAD, &bytes(&reset_at(9, 1)), Precondition::Any).unwrap();
+        assert!(consumer.accept_reset().is_err(), "a reset behind the watermark is refused");
+        // At the watermark → accepted (no prior RVK to gate).
+        store.put(HEAD, &bytes(&reset_at(9, 2)), Precondition::Any).unwrap();
+        assert!(consumer.accept_reset().is_ok(), "a reset at the watermark is accepted");
+        // Ahead of the watermark → accepted.
+        store.put(HEAD, &bytes(&reset_at(8, 3)), Precondition::Any).unwrap();
+        assert!(consumer.accept_reset().is_ok(), "a reset ahead of the watermark is accepted");
+    }
+
+    #[test]
+    fn accept_reset_enforces_the_prior_recovery_authority() {
+        let store = Arc::new(MemoryBlob::new());
+        let mut producer = KeyringChainBlobSync::new(Arc::clone(&store));
+        // The head pins a recovery authority (rvk seed 42), so the bootstrapped anchor carries it.
+        producer.publish(&bytes(&genesis_with_rvk(7, 42))).unwrap();
+        let mut consumer = KeyringChainBlobSync::new(Arc::clone(&store));
+        consumer.pull().unwrap();
+
+        // A forged reset that re-founds under NO recovery authority must be refused: the prior anchor
+        // pinned an RVK this reset neither carries nor is signed by. (If the RVK filter were inverted the
+        // gate would go inactive and this forged reset would be accepted.)
+        store.put(HEAD, &bytes(&reset_at(9, 1)), Precondition::Any).unwrap();
+        assert!(
+            consumer.accept_reset().is_err(),
+            "an RVK-pinned anchor must reject a reset lacking the recovery authority"
+        );
+
+        // The legitimate reset — carrying the same RVK and co-signed by it — is accepted.
+        store.put(HEAD, &bytes(&genesis_with_rvk(9, 42)), Precondition::Any).unwrap();
+        assert!(
+            consumer.accept_reset().is_ok(),
+            "a reset carrying and signed by the pinned RVK is accepted"
+        );
+    }
+
+    #[test]
+    fn drafts_are_keyed_per_proposal_id() {
+        let store = Arc::new(MemoryBlob::new());
+        let sync = KeyringChainBlobSync::new(Arc::clone(&store));
+        let (a, b) = (bytes(&genesis(1)), bytes(&genesis(2)));
+        sync.propose("p1", &a).unwrap();
+        // A distinct proposal id must claim a distinct key; a constant key would collide here (Conflict).
+        sync.propose("p2", &b).unwrap();
+        assert_eq!(sync.get_draft("p1").unwrap(), Some(a));
+        assert_eq!(sync.get_draft("p2").unwrap(), Some(b));
+    }
+
+    #[test]
+    fn sync_and_pull_errors_render_human_readable_messages() {
+        assert!(format!("{}", SyncError::Malformed("boom")).contains("boom"));
+        assert!(format!("{}", SyncError::Conflict).contains("concurrent"));
+        assert!(format!("{}", PullError::Rollback { have: 3, served: 1 }).contains('3'));
+        assert!(format!("{}", PullError::ResetPending).contains("reset"));
+    }
+}

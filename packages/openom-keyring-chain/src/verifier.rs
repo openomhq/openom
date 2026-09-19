@@ -294,4 +294,41 @@ mod tests {
             "a fork is refused, never accepted as a reset"
         );
     }
+
+    /// A genesis pinning `rvk_seed` as its recovery authority, founder + RVK co-signed — so the
+    /// bootstrapped state carries a recovery verifying key.
+    fn genesis_with_rvk(founder_seed: u8, rvk_seed: u8) -> Keyring {
+        let mut g = genesis(founder_seed);
+        g.recovery_keys = vec![crate::wire::RecoveryKey {
+            public_key: vec![5; 32],
+            member_id: "owner".into(),
+            wraps: codec::encode_wraps::<String>(&[]),
+            recovery_verifying_key: pk(rvk_seed),
+        }];
+        g.signatures.clear();
+        sign_keyring(&mut g, &sk(founder_seed));
+        sign_keyring(&mut g, &sk(rvk_seed));
+        g
+    }
+
+    #[test]
+    fn reset_fallback_enforces_the_prior_recovery_authority() {
+        let v = ChainVerifier;
+        // The head pins a recovery authority (seed 42); the bootstrapped state carries it.
+        let g = genesis_with_rvk(1, 42);
+        let boot = v.admit(None, &env(&g)).unwrap();
+
+        // A rev-2 re-founding that CHAINS onto the head but carries NO recovery authority (nor is signed
+        // by the pinned one) must be refused — never smuggled in as a reset. If the RVK gate were inert
+        // (prior_rvk -> None) this forged reset would be admitted.
+        let mut forged = genesis(9);
+        forged.revision = 2;
+        forged.prev_keyring_hash = keyring_hash(&g).to_vec();
+        forged.signatures.clear();
+        sign_keyring(&mut forged, &sk(9));
+        assert!(
+            v.admit(Some(&boot.state), &env(&forged)).is_err(),
+            "an RVK-pinned head must reject a reset lacking the recovery authority"
+        );
+    }
 }

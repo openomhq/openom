@@ -182,3 +182,38 @@ impl RecoveryKey {
 /// which the structure gate turns into a rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyMaterialError;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keyeo_crypto::{codec, EncappedKey, Wrap as KeyeoWrap, WrapMethod, WrappedDek, X25519PublicKey};
+
+    #[test]
+    fn max_key_material_bytes_is_four_mib() {
+        // The pre-decode DoS cap, pinned so a slip in its constant arithmetic is caught.
+        assert_eq!(MAX_KEY_MATERIAL_BYTES, 4_194_304);
+        assert_eq!(MAX_KEY_MATERIAL_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn escrow_wraps_decodes_the_recovery_key_wrap_blob() {
+        let w = KeyeoWrap {
+            recipient: "owner".to_string(),
+            method: WrapMethod::RrkHpke {
+                encapped: EncappedKey::from_bytes([0u8; 32]),
+                recipient_key: X25519PublicKey::from_bytes([9u8; 32]),
+            },
+            ciphertext: WrappedDek::from_bytes([1u8; 48]),
+        };
+        let rk = RecoveryKey {
+            public_key: vec![5; 32],
+            member_id: "owner".into(),
+            wraps: codec::encode_wraps::<String>(&[w]),
+            recovery_verifying_key: vec![7; 32],
+        };
+        // A constant `Ok(vec![])` would silently drop the escrow wrap.
+        let decoded = rk.escrow_wraps().unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].recipient, "owner");
+    }
+}

@@ -326,3 +326,37 @@ fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(b);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keyeo_chain::Role;
+
+    #[test]
+    fn role_grants_at_least_orders_by_strength() {
+        // Lower ordinal = stronger. A stronger role grants at least a weaker one, never the reverse, and a
+        // role always grants at least itself (the equal case pins `<=`, not `<`).
+        assert!(KeyringRole(1).grants_at_least(&KeyringRole(4)));
+        assert!(!KeyringRole(4).grants_at_least(&KeyringRole(1)));
+        assert!(KeyringRole(2).grants_at_least(&KeyringRole(2)));
+    }
+
+    #[test]
+    fn layout_version_accessor_reports_the_keyrings_value() {
+        let k = Keyring { layout_version: 7, ..Default::default() };
+        assert_eq!(KeyringDoc::new(&k).layout_version(), 7);
+    }
+
+    #[test]
+    fn payload_commitment_binds_first_shared_revision() {
+        // `first_shared_revision` is an openom-only field the generic engine does not sign — it rides ONLY
+        // through the payload commitment (a `put_u32`). Two keyrings differing only in it must commit to
+        // distinct payload hashes, or a signature could be transplanted across a share-state change.
+        let base = Keyring::default();
+        let shared = Keyring { first_shared_revision: 5, ..Default::default() };
+        assert_ne!(
+            KeyringDoc::new(&base).payload_commitment(),
+            KeyringDoc::new(&shared).payload_commitment(),
+        );
+    }
+}
