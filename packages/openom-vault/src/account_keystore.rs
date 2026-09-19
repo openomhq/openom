@@ -202,6 +202,26 @@ impl AccountKeystore {
         })
     }
 
+    /// Serialize to the persisted blob (JSON). The JS/host layer stores these bytes at rest and hands them back
+    /// to [`Self::from_bytes`] on open — openom-vault does not itself touch storage (per the "let the platform
+    /// persist" boundary). The wrapped account root is the only secret; the rest is public.
+    ///
+    /// # Errors
+    /// [`VaultError`] if serialization fails.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, VaultError> {
+        serde_json::to_vec(self)
+            .map_err(|e| VaultError::BadKeyring(format!("account keystore encode: {e}")))
+    }
+
+    /// Load a keystore from its persisted blob.
+    ///
+    /// # Errors
+    /// [`VaultError`] if the bytes are not a valid keystore.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, VaultError> {
+        serde_json::from_slice(bytes)
+            .map_err(|e| VaultError::BadKeyring(format!("account keystore decode: {e}")))
+    }
+
     /// Verify the plaintext public fields against the identity derived from the unwrapped account root — closes
     /// the KDF-downgrade / pubkey-swap tamper vector: a mutated public field is rejected rather than trusted.
     fn verify_public_fields(&self, root: &RootKeys) -> Result<(), VaultError> {
@@ -275,6 +295,19 @@ mod tests {
         let (mut ks, _code, _u) = AccountKeystore::create(pass()).unwrap();
         ks.author_public[0] ^= 0xff; // flip a bit — plaintext claim no longer matches the wrapped identity
         assert!(ks.unlock(pass()).is_err());
+    }
+
+    #[test]
+    fn persisted_blob_roundtrips_and_still_unlocks() {
+        let (ks, code, unlocked) = AccountKeystore::create(pass()).unwrap();
+        let bytes = ks.to_bytes().unwrap();
+        let loaded = AccountKeystore::from_bytes(&bytes).unwrap();
+        assert_eq!(ks, loaded);
+        // the reloaded blob still opens with both credentials, to the same identity
+        let via_pass = loaded.unlock(pass()).unwrap();
+        let via_code = loaded.unlock_with_recovery(&code).unwrap();
+        assert_eq!(via_pass.member_id, unlocked.member_id);
+        assert_eq!(via_code.member_id, unlocked.member_id);
     }
 
     #[test]
