@@ -26,6 +26,14 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Mutation testing's kill signal comes mainly from the deterministic unit tests; the proptests are extra
+  # RANDOM exploration, and they run once per mutant of their crate — the heavy ones (keyring-dag's ladder
+  # proofs ~15s, keyring-chain's oracle ~9s) otherwise dominate the ~2h run. Dial proptest's case count DOWN
+  # for THIS workflow only; the web/desktop/integration workflows run plain `cargo test` and keep proptest's
+  # default 256-case coverage. Before trusting this (and before lowering --timeout below), dispatch once and
+  # confirm the survivor list gains nothing vs a full-cases run — a mutant only 256 cases would kill would
+  # otherwise show as a false survivor.
+  PROPTEST_CASES: '64'
   # The canonical default set (one source of truth for both the cron run and a no-input dispatch): the
   # security-critical crypto / envelope / keyring / CRDT crates + the PURE crates from the OPE-243 audit.
   DEFAULT_PACKAGES: 'edsign openom-crypto keyeo-crypto openom-sealer openom-data-crdt keyeo-chain keyeo-dag openom-keyring-chain openom-keyring-dag openom-protocol openom-roles did format-jcs format-edtf openom-data-model openom-data-projection'
