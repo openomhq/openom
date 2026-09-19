@@ -593,3 +593,92 @@ fn verify_reset_accepts_a_reset_and_enforces_the_rvk_gate() {
     // No prior RVK → the gate is inert.
     assert!(verify_reset(None, &build(rvk_pub, false)).is_ok());
 }
+
+// ---- key rotation is a PRIVILEGED signer-set change (not an ordinary edit) ----
+
+#[test]
+fn key_rotation_is_a_privileged_signer_set_change() {
+    let (f, carol_old, carol_new) = (sk(1), sk(2), sk(9));
+    let g = genesis(&f, &[(&carol_old, "carol")], &[]);
+    let a = anchor(&g);
+    // Same id + role, a NEW public key.
+    let rotate = |d: &mut TestDoc| {
+        d.members.iter_mut().find(|m| m.id == "carol").unwrap().public_key = vk(&carol_new);
+    };
+
+    // Carol signing with her OLD key cannot silently rotate to a NEW key: a key change makes the signer
+    // SET differ (identity is id + role + key, never id alone), so it is a privileged change — and under
+    // kind 0 a lone co-owner can't authorize one. If `same_signer` matched on id alone this would slip
+    // through as an ordinary any-of edit.
+    assert_eq!(
+        verify_transition(&a, &next(&g, rotate, &[&carol_old])),
+        Err(Error::UnendorsedSetChange)
+    );
+    // The founder CAN authorize the rotation (kind-0 founder path).
+    verify_transition(&a, &next(&g, rotate, &[&f])).unwrap();
+}
+
+// ---- the kind-2 co-owner denominator excludes the founder AND any departing (removed) signer ----
+
+#[test]
+fn governance_kind2_denominator_excludes_founder_and_departing_signers() {
+    let (f, aa, bb, cc, dd) = (sk(1), sk(2), sk(3), sk(4), sk(6));
+
+    // Target-exclusion: under threshold(2), removing co-owner "c" — signed by the OTHER co-owners a,b —
+    // is authorized. "c" (the removal target) is excluded from the denominator, but a+b still meet 2-of.
+    // If the denominator kept ONLY the departing signer, a+b's two valid signatures would count for
+    // nothing and this would be wrongly refused.
+    let g3 = genesis(&f, &[(&aa, "a"), (&bb, "b"), (&cc, "c")], &[]);
+    let ruled2 = next(&g3, set_rule(2, 2), &[&f]);
+    let a2 = verify_transition(&anchor(&g3), &ruled2).unwrap();
+    let demote_c = |d: &mut TestDoc| d.members.iter_mut().find(|m| m.id == "c").unwrap().role = EDITOR;
+    verify_transition(&a2, &next(&ruled2, demote_c, &[&aa, &bb])).unwrap();
+
+    // Founder + departing both excluded: under threshold(3), remove "c" AND add a fresh co-owner "d" (so
+    // it is not a lone self-removal), signed by a, b, and the departing c. The denominator is {a,b} —
+    // the founder f and the departing c are BOTH excluded — so 3-of is unmeetable and three signatures
+    // still cannot authorize it. If the founder or the departing signer counted, this would pass.
+    let ruled3 = next(&g3, set_rule(2, 3), &[&f]);
+    let a3 = verify_transition(&anchor(&g3), &ruled3).unwrap();
+    let swap = |d: &mut TestDoc| {
+        d.members.iter_mut().find(|m| m.id == "c").unwrap().role = EDITOR;
+        d.members.push(member(&dd, "d", CO_OWNER));
+    };
+    assert_eq!(
+        verify_transition(&a3, &next(&ruled3, swap, &[&aa, &bb, &cc])),
+        Err(Error::UnendorsedSetChange)
+    );
+}
+
+// ---- a threshold(0) rule can never be satisfied → refused as a lockout ----
+
+#[test]
+fn governance_kind3_zero_threshold_is_a_lockout() {
+    let (f, aa, bb) = (sk(1), sk(2), sk(3));
+    let g = genesis(&f, &[(&aa, "a"), (&bb, "b")], &[]);
+    // kind 3 (no founder path) with threshold 0 is satisfiable by NO signer set — it would brick
+    // governance forever — so the lockout guard refuses it even though the founder authorizes the change
+    // under the prior (kind-0) rule.
+    assert_eq!(
+        verify_transition(&anchor(&g), &next(&g, set_rule(3, 0), &[&f])),
+        Err(Error::UnendorsedSetChange)
+    );
+}
+
+// ---- verify_all: unanimity over DISTINCT keys, fail-closed on an empty set ----
+
+#[test]
+fn verify_all_is_unanimity_and_fails_closed_on_empty() {
+    use crate::signing::verify_all;
+    let msg: &[u8] = b"unanimity";
+    let (k1, k2, k3) = (sk(1), sk(2), sk(3));
+    let keys = [vk(&k1), vk(&k2), vk(&k3)];
+    let all_sigs: Vec<[u8; 64]> = [&k1, &k2, &k3].iter().map(|k| k.sign(msg).to_bytes()).collect();
+    // Every required key signs → unanimity holds.
+    assert!(verify_all::<Ed25519>(msg, &all_sigs, &keys));
+    // One required key did not sign → NOT unanimity.
+    let missing: Vec<[u8; 64]> = [&k1, &k2].iter().map(|k| k.sign(msg).to_bytes()).collect();
+    assert!(!verify_all::<Ed25519>(msg, &missing, &keys));
+    // An empty required set is NOT unanimity (fail-closed — an empty quorum must never pass).
+    assert!(!verify_all::<Ed25519>(msg, &all_sigs, &[]));
+}
