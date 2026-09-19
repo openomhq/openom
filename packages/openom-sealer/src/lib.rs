@@ -797,4 +797,30 @@ mod tests {
             b"aes path"
         );
     }
+
+    #[test]
+    fn scope_accessors_report_the_configured_ids() {
+        let s = sealer();
+        assert_eq!(s.tree_id(), b"tree-uuid-16byte");
+        assert_eq!(s.key_id(), b"epoch-0");
+        let set = SealerSet::single(sealer());
+        assert_eq!(set.tree_id(), b"tree-uuid-16byte");
+    }
+
+    #[test]
+    #[should_panic(expected = "current write epoch is absent")]
+    fn adopt_epochs_asserts_the_write_epoch_is_present() {
+        // A non-empty set whose write_key_id matches no held epoch violates the invariant that a member
+        // always holds its own write epoch. adopt_epochs must trip its debug assertion rather than silently
+        // lose the author — the guard is scoped by `!self.sealers.is_empty()`.
+        let dek = openom_crypto::generate_dek().unwrap().into_inner();
+        let mut set = SealerSet::new(
+            TreeId::new(b"tree-uuid-16byte".to_vec()),
+            ReplicaId::new(b"replica-0".to_vec()),
+            vec![(b"epoch-0".to_vec(), dek)],
+            KeyId::new(b"MISSING".to_vec()), // the write epoch is not among the held epochs
+        );
+        let dek1 = openom_crypto::generate_dek().unwrap().into_inner();
+        let _ = set.adopt_epochs(vec![(b"epoch-1".to_vec(), dek1)], b"epoch-1".to_vec(), b"gov".to_vec());
+    }
 }
