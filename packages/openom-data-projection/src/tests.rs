@@ -254,6 +254,25 @@ fn different_from_cuts_transitively() {
 }
 
 #[test]
+fn a_cut_blocks_only_its_exact_pair_not_a_single_matching_endpoint() {
+    // different_from(pA,pB) must NOT block merging pB with an unrelated pC: only placing pA and pB in
+    // one cluster is forbidden. The cut check has to require BOTH endpoints to land in the two clusters
+    // being merged — a single matching endpoint (here pB) is not a violation.
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pC"),
+        different_from("d1", "pA", "pB", "did:key:z6MkB"),
+        same_as("s1", "pB", "pC", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    let ids: Vec<_> = p.people.iter().map(|x| x.id.clone()).collect();
+    assert_eq!(ids, vec!["pA".to_string(), "pB".to_string()]); // pB+pC merged, pA separate
+    assert_eq!(p.people[1].also, vec!["pC".to_string()]);
+    assert!(p.conflicts.is_empty(), "the pA-pB constraint does not cut the pB-pC merge");
+}
+
+#[test]
 fn sex_resolves_by_author_majority() {
     let recs = vec![
         person("pA"),
@@ -712,6 +731,29 @@ fn equivalent_names_share_a_class() {
     assert_eq!(cls("n1"), cls("n2")); // equivalent → one class
     assert_ne!(cls("n1"), cls("n3")); // unrelated → separate class
     assert_eq!(cls("n1"), "n1"); // class label = min claim_id in the component
+}
+
+#[test]
+fn equiv_class_label_is_the_minimum_claim_id_not_the_first_visited() {
+    // The label is the MINIMUM claim id in the component, independent of union-find visit order. Here the
+    // rendering whose content-ref sorts first ("n9", given "Aaa") has the LARGER claim id, while the
+    // equivalent rendering that sorts later ("n1", given "Zzz") has the smaller one — so "first visited"
+    // and "minimum" disagree, and the label must be "n1".
+    let n1 = claim(
+        "n1",
+        P_NAME,
+        "pA",
+        json!({ "parts": { "given": "Zzz" }, "equivalent_to": [given_ref("Aaa")] }),
+        "did:key:z6MkA",
+    );
+    let recs = vec![person("pA"), name("n9", "pA", "Aaa"), n1];
+    let p = project(&recs, &Policy::default());
+    let names = &p.people[0].names;
+    let cls = |cid: &str| {
+        names.iter().find(|v| v.claim_id == cid).unwrap().equiv_class.clone()
+    };
+    assert_eq!(cls("n1"), cls("n9"), "the two renderings are equivalent");
+    assert_eq!(cls("n1"), "n1", "the class label is the minimum claim id, not the first visited");
 }
 
 #[test]
