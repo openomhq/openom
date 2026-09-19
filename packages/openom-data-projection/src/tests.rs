@@ -273,6 +273,24 @@ fn a_cut_blocks_only_its_exact_pair_not_a_single_matching_endpoint() {
 }
 
 #[test]
+fn a_cut_does_not_block_a_merge_matching_only_its_first_endpoint() {
+    // Mirror of the above isolating the cut check's OTHER conjunction: different_from(pA,pC) must not
+    // block merging pA with an unrelated pB — only pA's endpoint matches the edge, not pC's.
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pC"),
+        different_from("d1", "pA", "pC", "did:key:z6MkB"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    let ids: Vec<_> = p.people.iter().map(|x| x.id.clone()).collect();
+    assert_eq!(ids, vec!["pA".to_string(), "pC".to_string()]); // pA+pB merged, pC separate
+    assert_eq!(p.people[0].also, vec!["pB".to_string()]);
+    assert!(p.conflicts.is_empty(), "the pA-pC constraint does not cut the pA-pB merge");
+}
+
+#[test]
 fn sex_resolves_by_author_majority() {
     let recs = vec![
         person("pA"),

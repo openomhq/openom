@@ -637,7 +637,8 @@ fn governance_kind2_denominator_excludes_founder_and_departing_signers() {
     // Founder + departing both excluded: under threshold(3), remove "c" AND add a fresh co-owner "d" (so
     // it is not a lone self-removal), signed by a, b, and the departing c. The denominator is {a,b} —
     // the founder f and the departing c are BOTH excluded — so 3-of is unmeetable and three signatures
-    // still cannot authorize it. If the founder or the departing signer counted, this would pass.
+    // still cannot authorize it. The `&&`->`||` mutant re-includes the departing c, whose own signature
+    // then counts (a + b + c = three valid signers), wrongly meeting the 3-of threshold.
     let ruled3 = next(&g3, set_rule(2, 3), &[&f]);
     let a3 = verify_transition(&anchor(&g3), &ruled3).unwrap();
     let swap = |d: &mut TestDoc| {

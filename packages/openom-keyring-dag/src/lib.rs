@@ -1470,6 +1470,20 @@ mod tests {
             vec![("founder".to_string(), KeyringRole::OWNER)],
             "a well-formed Create seeds the empty group"
         );
+
+        // A Create carrying TWO Owners does NOT seed (the owner count must be exactly one).
+        let mut k2 = engine(&[]);
+        k2.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: vec![minit("founder", KeyringRole::OWNER, 1), minit("mallory", KeyringRole::OWNER, 9)],
+            },
+            &sk(1),
+        ))
+        .unwrap();
+        assert!(members(&k2).is_empty(), "a two-Owner Create must not seed the group");
     }
 
     #[test]
@@ -1539,4 +1553,5 @@ mod tests {
             "a removed (inactive) member cannot authorize a change"
         );
     }
+
 }

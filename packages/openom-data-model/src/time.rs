@@ -361,8 +361,10 @@ mod tests {
         // instants the round-trip tests happen to draw. A subtle slip in the day-of-era year arithmetic
         // (the `doe/36_524 - doe/146_096` correction) only changes the computed year at days where it
         // crosses a 365-boundary, and the day-of-era is 0 exactly at a 400-year era boundary — both are
-        // easy for a sparse sample to miss. Walk a dense range spanning several 146_097-day eras.
-        for days in 0i64..300_000 {
+        // easy for a sparse sample to miss. Walk a dense range spanning several 146_097-day eras on BOTH
+        // sides of the Unix epoch — the negative range drives `z < 0` in civil_from_days (and the negative
+        // -year branch of days_from_civil), the code path FromStr uses for years 0000..1969.
+        for days in -800_000i64..300_000 {
             let (y, m, d) = civil_from_days(days);
             assert_eq!(
                 days_from_civil(y, m, d),
