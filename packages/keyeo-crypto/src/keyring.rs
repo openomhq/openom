@@ -68,6 +68,10 @@ pub enum KekKind {
     Passphrase,
     /// A KEK derived from the printed recovery code.
     RecoveryCode,
+    /// A KEK that IS a stored-random account root key (supplied directly, not KDF-derived) — the wrapping
+    /// root that seals an account's identity master. A distinct source so an account-root wrap can never be
+    /// reinterpreted as a passphrase or recovery-code wrap.
+    AccountRoot,
 }
 
 /// How a DEK wrap was sealed, carrying that method's public parameters (the sealed bytes are
@@ -105,6 +109,7 @@ impl WrapMethod {
     pub const TAG_MEMBER_HPKE: i32 = 2;
     pub const TAG_RECOVERY_KEK: i32 = 3;
     pub const TAG_RRK_HPKE: i32 = 4;
+    pub const TAG_ACCOUNT_ROOT_KEK: i32 = 5;
 
     /// The discriminant fed into the wrap AAD (and used as a lookup key).
     #[must_use]
@@ -119,6 +124,10 @@ impl WrapMethod {
                 kind: KekKind::RecoveryCode,
                 ..
             } => Self::TAG_RECOVERY_KEK,
+            Self::Kek {
+                kind: KekKind::AccountRoot,
+                ..
+            } => Self::TAG_ACCOUNT_ROOT_KEK,
             Self::RrkHpke { .. } => Self::TAG_RRK_HPKE,
         }
     }

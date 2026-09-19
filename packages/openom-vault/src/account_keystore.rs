@@ -1,19 +1,20 @@
 //! The **account keystore** — openom's durable, user-level identity (OPE-542).
 //!
-//! One keystore per local profile. It holds a stored-random **account root** (the identity master, 32 bytes)
-//! wrapped under two credentials — the passphrase-KEK and the recovery-code-KEK — plus the plaintext public
-//! fields (`member_id`, author + HPKE public keys) the unlock gate reads *synchronously, before any KDF*.
+//! One keystore per local profile. **Model 2** (`design.durable-identity-dag.md` / ADR-004): two independent
+//! stored-random secrets —
+//! - `identity_master` (32 bytes): HKDF-derives the identity ([`openom_crypto::derive_account_keys`] →
+//!   Ed25519 signing + X25519 HPKE + a KEK); `member_id = uuid8(SHA-256(author_pubkey))`. It is the durable
+//!   identity, never changed, so `member_id` is stable across passphrase changes / trees / devices (the
+//!   property the Supabase `sub → member_id` binding needs).
+//! - `account_root` (32 bytes): a wrapping KEK that seals `identity_master`. **Rotatable** — a fresh
+//!   `account_root` re-wraps the *same* `identity_master`, so the storage layer can be re-keyed under new key
+//!   material with the identity (and `member_id`) unchanged (the crypto-hygiene capability Model 2 exists for).
 //!
-//! The identity is derived from the account root ([`openom_crypto::derive_account_keys`]), NOT from the
-//! passphrase, so `member_id = uuid8(SHA-256(author_pubkey))` is **stable** across passphrase changes, trees,
-//! and devices — a user-level identity, decoupled from any one tree (the property the Supabase `sub → member_id`
-//! binding needs). Model-1 of `design.durable-identity-dag.md` (identity *derived from* the root; the root is
-//! the single stored-random master — the `ADR-004` refinement, simpler than a wrapped-identity layer since
-//! true crypto-revocation of a durable identity is impossible anyway; anti-rollback is the `generation` floor).
-//!
-//! Reuses the keyeo `Wrap`/`kek_wrap`/`KekKind` primitives verbatim (a sibling of
-//! [`crate::vault_core::RecoveryEscrow`]); the only new wire artifact is this record. `generation` rides the
-//! wraps' `group_id` AAD scope, so a forged plaintext `generation` fails the unwrap.
+//! Layers: `identity_master` is wrapped under `account_root` (the INNER wrap, `KekKind::AccountRoot`);
+//! `account_root` is wrapped under the passphrase-KEK and the recovery-code-KEK (the OUTER wraps). The public
+//! fields (`member_id`, author + HPKE pubkeys) are plaintext so the unlock gate reads them synchronously before
+//! any KDF. `generation` rides the OUTER wraps' `group_id` AAD scope (an outer wrap is always opened on unlock,
+//! so a forged plaintext `generation` fails). Reuses the keyeo `Wrap`/`kek_wrap`/`KekKind` primitives.
 
 use keyeo_crypto::{
     kek_wrap as keyeo_kek_wrap, unwrap_kek as keyeo_unwrap_kek, GroupId as KeyeoGroupId,
@@ -21,8 +22,8 @@ use keyeo_crypto::{
 };
 use openom_crypto::{
     default_kdf_params, derive_account_keys, derive_kek, derive_member_id, generate_account_root,
-    generate_recovery_code, generate_salt, parse_recovery_code, recovery_kdf_params, RecoveryCode,
-    RootKeys,
+    generate_recovery_code, generate_salt, parse_recovery_code, recovery_kdf_params, Kek,
+    RecoveryCode, RootKeys,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -30,11 +31,13 @@ use zeroize::Zeroizing;
 use crate::vault_core::validated_kdf;
 use crate::VaultError;
 
-/// Domain tag pinned into the account-keystore wrap AAD scope, so an account-root wrap can never be confused
-/// with a tree-scoped keyring wrap (whose `group_id` is a raw `tree_id`). **Frozen.**
-const ACCOUNT_KEYSTORE_DOMAIN: &[u8] = b"openom:account-keystore:v1";
+/// AAD domain for the OUTER wraps (`account_root` under passphrase / recovery), carrying `generation`. Frozen.
+const ROOT_DOMAIN: &[u8] = b"openom:account-keystore:v1:root";
+/// AAD domain for the INNER wrap (`identity_master` under `account_root`). No `generation` — the identity
+/// master never changes, and a root rotation re-creates this wrap from the unlocked material. Frozen.
+const IDENTITY_DOMAIN: &[u8] = b"openom:account-keystore:v1:identity";
 
-/// The account keystore record (serde wire; a sibling of [`crate::vault_core::RecoveryEscrow`]).
+/// The account keystore record (serde wire; sibling of [`crate::vault_core::RecoveryEscrow`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountKeystore {
     /// `uuid8(SHA-256(author_public))` — plaintext, read by the synchronous unlock gate.
@@ -43,37 +46,52 @@ pub struct AccountKeystore {
     pub author_public: Vec<u8>,
     /// X25519 HPKE public key (32 bytes) — plaintext; verified on unlock.
     pub hpke_public: Vec<u8>,
-    /// Monotonic anti-rollback counter, bound into the wraps' AAD scope; the client/server floor on it.
+    /// Monotonic anti-rollback counter, bound into the OUTER wraps' AAD scope; the client/server floor on it.
     pub generation: u64,
-    /// The account root, KEK-wrapped once under the passphrase and once under the recovery code.
+    /// Three KEK wraps: `account_root` under the passphrase KEK, `account_root` under the recovery-code KEK,
+    /// and `identity_master` under `account_root` (`KekKind::AccountRoot`).
     pub wraps: Vec<KeyeoWrap<String>>,
 }
 
-/// An unlocked account: the derived [`RootKeys`] (identity / HPKE / KEK) plus the raw account root retained for
-/// re-wrapping on a passphrase change. Zeroizes the root on drop.
+/// An unlocked account: the derived [`RootKeys`] plus both raw masters, retained so `change_passphrase`
+/// re-wraps `account_root` and a future root rotation re-wraps `identity_master`. Zeroized on drop.
 pub struct UnlockedAccount {
-    /// The identity / HPKE / KEK keys derived from the account root.
+    /// Identity / HPKE / KEK keys derived from `identity_master`.
     pub root: RootKeys,
     /// The stable user-level `member_id`.
     pub member_id: String,
-    /// The account root master (kept so [`AccountKeystore::change_passphrase`] can re-wrap without re-minting).
+    /// The rotatable wrapping root (re-wrapped by `change_passphrase`).
     account_root: Zeroizing<[u8; 32]>,
+    /// The durable identity master (re-wrapped, unchanged, by a root rotation).
+    identity_master: Zeroizing<[u8; 32]>,
 }
 
-/// The AAD binding scope for an account-keystore wrap: `⟨domain ‖ member_id ‖ generation_le⟩`. `member_id` is a
-/// fixed-length uuid8 and `generation` a fixed 8 bytes, so the concatenation is injective. Binding `generation`
-/// here is what authenticates the plaintext `generation` field (a forged value makes the unwrap fail).
-fn account_group_id(member_id: &str, generation: u64) -> KeyeoGroupId {
-    let mut v =
-        Vec::with_capacity(ACCOUNT_KEYSTORE_DOMAIN.len() + member_id.len() + core::mem::size_of::<u64>());
-    v.extend_from_slice(ACCOUNT_KEYSTORE_DOMAIN);
+/// A placeholder KDF for the INNER wrap: its KEK is the raw `account_root` supplied directly at unwrap, so the
+/// wrap's stored `kdf` is never used to re-derive anything (mirrors `vault_core::open_rrk_secret`).
+fn inner_placeholder_kdf() -> KeyeoKdfParams {
+    KeyeoKdfParams { salt: Vec::new(), memory_kib: 0, iterations: 0, parallelism: 0 }
+}
+
+/// OUTER AAD scope: `⟨ROOT_DOMAIN ‖ member_id ‖ generation_le⟩`. Binds `generation` (authenticating the
+/// plaintext field) and `member_id`; fixed-length uuid8 + fixed 8-byte generation ⇒ injective.
+fn outer_group_id(member_id: &str, generation: u64) -> KeyeoGroupId {
+    let mut v = Vec::with_capacity(ROOT_DOMAIN.len() + member_id.len() + core::mem::size_of::<u64>());
+    v.extend_from_slice(ROOT_DOMAIN);
     v.extend_from_slice(member_id.as_bytes());
     v.extend_from_slice(&generation.to_le_bytes());
     KeyeoGroupId::new(v)
 }
 
-/// Find the KEK wrap for a credential source, returning its validated KDF params + the wrap.
-fn wrap_for(
+/// INNER AAD scope: `⟨IDENTITY_DOMAIN ‖ member_id⟩`.
+fn inner_group_id(member_id: &str) -> KeyeoGroupId {
+    let mut v = Vec::with_capacity(IDENTITY_DOMAIN.len() + member_id.len());
+    v.extend_from_slice(IDENTITY_DOMAIN);
+    v.extend_from_slice(member_id.as_bytes());
+    KeyeoGroupId::new(v)
+}
+
+/// Find an OUTER KEK wrap for a credential source, returning it + its validated KDF params.
+fn outer_wrap_for(
     wraps: &[KeyeoWrap<String>],
     kind: KekKind,
 ) -> Result<(&KeyeoWrap<String>, KeyeoKdfParams), VaultError> {
@@ -87,21 +105,43 @@ fn wrap_for(
     }
 }
 
+/// Find the INNER (`account_root`) wrap of the identity master.
+fn inner_wrap(wraps: &[KeyeoWrap<String>]) -> Result<&KeyeoWrap<String>, VaultError> {
+    wraps
+        .iter()
+        .find(|w| matches!(&w.method, KeyeoWrapMethod::Kek { kind: KekKind::AccountRoot, .. }))
+        .ok_or(VaultError::MissingWrap)
+}
+
 impl AccountKeystore {
-    /// Mint a brand-new account: a fresh random account root, its derived identity, and both credential wraps.
-    /// Returns the keystore, the one-time recovery code (show once), and the unlocked account.
+    /// Mint a brand-new account: independent random `identity_master` + `account_root`, the derived identity,
+    /// the inner wrap, and both credential (outer) wraps. Returns the keystore, the one-time recovery code, and
+    /// the unlocked account.
     ///
     /// # Errors
     /// [`VaultError`] on RNG / KDF / wrap failure.
     pub fn create(passphrase: &[u8]) -> Result<(Self, RecoveryCode, UnlockedAccount), VaultError> {
+        let identity_master = generate_account_root()?;
         let account_root = generate_account_root()?;
-        let root = derive_account_keys(&account_root);
+        let root = derive_account_keys(&identity_master);
         let author_public = root.identity.verifying_key().to_bytes().to_vec();
         let hpke_public = root.hpke_public.to_vec();
         let member_id = derive_member_id(&author_public);
         let generation = 0u64;
-        let gid = account_group_id(&member_id, generation);
 
+        // INNER: identity_master wrapped under account_root.
+        let account_root_kek: Kek = Zeroizing::new(*account_root).into();
+        let inner = keyeo_kek_wrap(
+            identity_master.as_slice(),
+            member_id.clone(),
+            KekKind::AccountRoot,
+            &account_root_kek,
+            inner_placeholder_kdf(),
+            &inner_group_id(&member_id),
+        )?;
+
+        // OUTER: account_root under the passphrase KEK + the recovery-code KEK.
+        let outer_gid = outer_group_id(&member_id, generation);
         let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
         let pass_kek = derive_kek(passphrase, &pass_kdf)?;
         let pass_wrap = keyeo_kek_wrap(
@@ -110,9 +150,8 @@ impl AccountKeystore {
             KekKind::Passphrase,
             &pass_kek,
             pass_kdf,
-            &gid,
+            &outer_gid,
         )?;
-
         let recovery_code = generate_recovery_code()?;
         let entropy = parse_recovery_code(&recovery_code)?;
         let rec_kdf = recovery_kdf_params(generate_salt()?.to_vec());
@@ -123,7 +162,7 @@ impl AccountKeystore {
             KekKind::RecoveryCode,
             &rec_kek,
             rec_kdf,
-            &gid,
+            &outer_gid,
         )?;
 
         let keystore = Self {
@@ -131,9 +170,9 @@ impl AccountKeystore {
             author_public,
             hpke_public,
             generation,
-            wraps: vec![pass_wrap, rec_wrap],
+            wraps: vec![pass_wrap, rec_wrap, inner],
         };
-        let unlocked = UnlockedAccount { root, member_id, account_root };
+        let unlocked = UnlockedAccount { root, member_id, account_root, identity_master };
         Ok((keystore, recovery_code, unlocked))
     }
 
@@ -156,32 +195,39 @@ impl AccountKeystore {
     }
 
     fn unlock_with(&self, secret: &[u8], kind: KekKind) -> Result<UnlockedAccount, VaultError> {
-        let (wrap, kdf) = wrap_for(&self.wraps, kind)?;
+        // OUTER: credential KEK → account_root.
+        let (outer, kdf) = outer_wrap_for(&self.wraps, kind)?;
         let kek = derive_kek(secret, &kdf)?;
-        let gid = account_group_id(&self.member_id, self.generation);
-        let unwrapped = keyeo_unwrap_kek(wrap, &kek, &gid)?;
-        let account_root = Zeroizing::new(*unwrapped);
-        let root = derive_account_keys(&account_root);
+        let account_root = keyeo_unwrap_kek(outer, &kek, &outer_group_id(&self.member_id, self.generation))?;
+        let account_root = Zeroizing::new(*account_root);
+
+        // INNER: account_root → identity_master.
+        let account_root_kek: Kek = Zeroizing::new(*account_root).into();
+        let identity_master =
+            keyeo_unwrap_kek(inner_wrap(&self.wraps)?, &account_root_kek, &inner_group_id(&self.member_id))?;
+        let identity_master = Zeroizing::new(*identity_master);
+
+        let root = derive_account_keys(&identity_master);
         self.verify_public_fields(&root)?;
         Ok(UnlockedAccount {
             root,
             member_id: self.member_id.clone(),
             account_root,
+            identity_master,
         })
     }
 
-    /// Re-wrap the account root under a NEW passphrase, keeping the same identity/`member_id` and the existing
-    /// recovery wrap. Per `keyring-rekey-boundary` this is a re-wrap, not a rotation — `generation` is
-    /// unchanged (the revocation/floor path lands with the rotate task).
+    /// Re-wrap `account_root` under a NEW passphrase, keeping the same identity/`member_id`, the recovery wrap,
+    /// and the inner wrap. Re-wrap, not rotate (per `keyring-rekey-boundary`) — `generation` unchanged.
     ///
     /// # Errors
-    /// [`VaultError`] on KDF / wrap failure or a missing recovery wrap.
+    /// [`VaultError`] on KDF / wrap failure or a missing recovery/inner wrap.
     pub fn change_passphrase(
         &self,
         unlocked: &UnlockedAccount,
         new_passphrase: &[u8],
     ) -> Result<Self, VaultError> {
-        let gid = account_group_id(&self.member_id, self.generation);
+        let outer_gid = outer_group_id(&self.member_id, self.generation);
         let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
         let pass_kek = derive_kek(new_passphrase, &pass_kdf)?;
         let pass_wrap = keyeo_kek_wrap(
@@ -190,21 +236,84 @@ impl AccountKeystore {
             KekKind::Passphrase,
             &pass_kek,
             pass_kdf,
-            &gid,
+            &outer_gid,
         )?;
-        let (rec_wrap, _) = wrap_for(&self.wraps, KekKind::RecoveryCode)?;
+        let (rec_wrap, _) = outer_wrap_for(&self.wraps, KekKind::RecoveryCode)?;
+        let inner = inner_wrap(&self.wraps)?;
         Ok(Self {
             member_id: self.member_id.clone(),
             author_public: self.author_public.clone(),
             hpke_public: self.hpke_public.clone(),
             generation: self.generation,
-            wraps: vec![pass_wrap, rec_wrap.clone()],
+            wraps: vec![pass_wrap, rec_wrap.clone(), inner.clone()],
         })
     }
 
+    /// Rotate the wrapping root (the Model-2 capability): mint a fresh `account_root`, re-wrap the SAME
+    /// `identity_master` under it, and re-wrap the fresh root under `passphrase` + a FRESH recovery code, at a
+    /// bumped `generation`. The identity and `member_id` are unchanged — this re-keys the storage layer only.
+    /// Returns the new keystore and the new one-time recovery code. The client/server generation FLOOR that
+    /// makes this a *revocation* (refuse a below-floor blob) is enforced in OPE-549, not here.
+    ///
+    /// # Errors
+    /// [`VaultError`] on RNG / KDF / wrap failure.
+    pub fn rotate_account_root(
+        &self,
+        unlocked: &UnlockedAccount,
+        passphrase: &[u8],
+    ) -> Result<(Self, RecoveryCode), VaultError> {
+        let generation = self.generation.saturating_add(1);
+        let account_root = generate_account_root()?;
+
+        let account_root_kek: Kek = Zeroizing::new(*account_root).into();
+        let inner = keyeo_kek_wrap(
+            unlocked.identity_master.as_slice(),
+            self.member_id.clone(),
+            KekKind::AccountRoot,
+            &account_root_kek,
+            inner_placeholder_kdf(),
+            &inner_group_id(&self.member_id),
+        )?;
+
+        let outer_gid = outer_group_id(&self.member_id, generation);
+        let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
+        let pass_kek = derive_kek(passphrase, &pass_kdf)?;
+        let pass_wrap = keyeo_kek_wrap(
+            account_root.as_slice(),
+            self.member_id.clone(),
+            KekKind::Passphrase,
+            &pass_kek,
+            pass_kdf,
+            &outer_gid,
+        )?;
+        let recovery_code = generate_recovery_code()?;
+        let entropy = parse_recovery_code(&recovery_code)?;
+        let rec_kdf = recovery_kdf_params(generate_salt()?.to_vec());
+        let rec_kek = derive_kek(entropy.as_slice(), &rec_kdf)?;
+        let rec_wrap = keyeo_kek_wrap(
+            account_root.as_slice(),
+            self.member_id.clone(),
+            KekKind::RecoveryCode,
+            &rec_kek,
+            rec_kdf,
+            &outer_gid,
+        )?;
+
+        Ok((
+            Self {
+                member_id: self.member_id.clone(),
+                author_public: self.author_public.clone(),
+                hpke_public: self.hpke_public.clone(),
+                generation,
+                wraps: vec![pass_wrap, rec_wrap, inner],
+            },
+            recovery_code,
+        ))
+    }
+
     /// Serialize to the persisted blob (JSON). The JS/host layer stores these bytes at rest and hands them back
-    /// to [`Self::from_bytes`] on open — openom-vault does not itself touch storage (per the "let the platform
-    /// persist" boundary). The wrapped account root is the only secret; the rest is public.
+    /// to [`Self::from_bytes`] on open — openom-vault does not itself touch storage. The wrapped roots are the
+    /// only secrets; the rest is public.
     ///
     /// # Errors
     /// [`VaultError`] if serialization fails.
@@ -222,8 +331,8 @@ impl AccountKeystore {
             .map_err(|e| VaultError::BadKeyring(format!("account keystore decode: {e}")))
     }
 
-    /// Verify the plaintext public fields against the identity derived from the unwrapped account root — closes
-    /// the KDF-downgrade / pubkey-swap tamper vector: a mutated public field is rejected rather than trusted.
+    /// Verify the plaintext public fields against the identity derived from the unwrapped `identity_master` —
+    /// closes the KDF-downgrade / pubkey-swap tamper vector.
     fn verify_public_fields(&self, root: &RootKeys) -> Result<(), VaultError> {
         let author = root.identity.verifying_key().to_bytes();
         let ok = author.as_slice() == self.author_public.as_slice()
@@ -250,6 +359,7 @@ mod tests {
     #[test]
     fn create_then_unlock_roundtrips_the_identity() {
         let (ks, _code, unlocked) = AccountKeystore::create(pass()).unwrap();
+        assert_eq!(ks.wraps.len(), 3, "passphrase + recovery + account-root wraps");
         let again = ks.unlock(pass()).unwrap();
         assert_eq!(unlocked.member_id, again.member_id);
         assert_eq!(
@@ -280,10 +390,8 @@ mod tests {
     fn change_passphrase_keeps_member_id_and_recovery() {
         let (ks, code, unlocked) = AccountKeystore::create(pass()).unwrap();
         let ks2 = ks.change_passphrase(&unlocked, b"a brand new passphrase").unwrap();
-        // member_id + identity unchanged
         assert_eq!(ks.member_id, ks2.member_id);
         assert_eq!(ks.author_public, ks2.author_public);
-        // new passphrase opens it, old one no longer does, recovery code still does
         let u2 = ks2.unlock(b"a brand new passphrase").unwrap();
         assert_eq!(u2.member_id, ks.member_id);
         assert!(ks2.unlock(pass()).is_err());
@@ -291,9 +399,28 @@ mod tests {
     }
 
     #[test]
+    fn rotate_account_root_keeps_identity_and_revokes_the_old_recovery_code() {
+        let (ks, old_code, unlocked) = AccountKeystore::create(pass()).unwrap();
+        let (ks2, new_code) = ks.rotate_account_root(&unlocked, pass()).unwrap();
+        // identity + member_id unchanged; generation bumped
+        assert_eq!(ks.member_id, ks2.member_id);
+        assert_eq!(ks.author_public, ks2.author_public);
+        assert_eq!(ks2.generation, ks.generation + 1);
+        // the storage layer was re-keyed: the account-root inner wrap ciphertext changed
+        let inner_before = inner_wrap(&ks.wraps).unwrap();
+        let inner_after = inner_wrap(&ks2.wraps).unwrap();
+        assert_ne!(inner_before.ciphertext.as_ref(), inner_after.ciphertext.as_ref());
+        // same identity still opens; the NEW recovery code works, the OLD one no longer does
+        let u2 = ks2.unlock(pass()).unwrap();
+        assert_eq!(u2.member_id, ks.member_id);
+        assert!(ks2.unlock_with_recovery(&new_code).is_ok());
+        assert!(ks2.unlock_with_recovery(&old_code).is_err());
+    }
+
+    #[test]
     fn tampered_author_public_is_rejected() {
         let (mut ks, _code, _u) = AccountKeystore::create(pass()).unwrap();
-        ks.author_public[0] ^= 0xff; // flip a bit — plaintext claim no longer matches the wrapped identity
+        ks.author_public[0] ^= 0xff;
         assert!(ks.unlock(pass()).is_err());
     }
 
@@ -303,7 +430,6 @@ mod tests {
         let bytes = ks.to_bytes().unwrap();
         let loaded = AccountKeystore::from_bytes(&bytes).unwrap();
         assert_eq!(ks, loaded);
-        // the reloaded blob still opens with both credentials, to the same identity
         let via_pass = loaded.unlock(pass()).unwrap();
         let via_code = loaded.unlock_with_recovery(&code).unwrap();
         assert_eq!(via_pass.member_id, unlocked.member_id);
@@ -312,13 +438,11 @@ mod tests {
 
     #[test]
     fn member_id_is_stable_uuid8_golden() {
-        // Frozen: a fixed author pubkey → a fixed uuid8 member_id (version 8 + RFC-4122 variant nibbles).
         let pubkey = [7u8; 32];
         let id = derive_member_id(&pubkey);
         assert_eq!(id.len(), 36);
         assert_eq!(id.as_bytes()[14], b'8', "version nibble must be 8");
         assert!(matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "RFC-4122 variant");
-        // determinism
         assert_eq!(id, derive_member_id(&pubkey));
     }
 }

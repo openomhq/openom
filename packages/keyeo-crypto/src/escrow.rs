@@ -22,6 +22,7 @@ const fn kek_method_tag(kind: KekKind) -> i32 {
     match kind {
         KekKind::Passphrase => WrapMethod::TAG_PASSPHRASE_KEK,
         KekKind::RecoveryCode => WrapMethod::TAG_RECOVERY_KEK,
+        KekKind::AccountRoot => WrapMethod::TAG_ACCOUNT_ROOT_KEK,
     }
 }
 
