@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       # The app loads ONE gitignored build artifact — the openom-app-core wasm. Compile it (Docker
       # is pre-installed on the runner; wasm-bindgen is version-pinned to Cargo.lock). ~a few minutes.
@@ -83,7 +83,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
-        run: printf '%s' "$STAGING_APP_GATE_PASSWORD" | npx --yes wrangler@3 pages secret put STAGING_APP_GATE_PASSWORD --project-name "$PAGES_PROJECT"
+        run: printf '%s' "$STAGING_APP_GATE_PASSWORD" | npx --yes wrangler@4 pages secret put STAGING_APP_GATE_PASSWORD --project-name "$PAGES_PROJECT"
 
       - name: Deploy to Cloudflare Pages
         env:
@@ -91,4 +91,7 @@ jobs:
           # job (a Pages-Edit-only token), so map it here. Account id is a var — it's not secret.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx --yes wrangler@3 pages deploy _site --project-name "$PAGES_PROJECT" --branch main --commit-hash "${{ github.sha }}"
+        # Deploy from INSIDE _site (deploy dir ".") — wrangler resolves the Pages `functions/` dir
+        # relative to the CWD (join(cwd(),"functions")), NOT the deploy dir, so deploying `_site` from
+        # the repo root would silently skip _site/functions and ship a static-only site (no gate).
+        run: cd _site && npx --yes wrangler@4 pages deploy . --project-name "$PAGES_PROJECT" --branch main --commit-hash "${{ github.sha }}"
