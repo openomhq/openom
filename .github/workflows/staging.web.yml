@@ -57,17 +57,19 @@ jobs:
           OPENOM_SERVER: ${{ env.API_URL }}
         run: node scripts/site-url.mjs ../_site
 
-      # Cloudflare Pages serves _headers. CSP starts as Report-Only: a strict policy on a buildless +
-      # wasm app can trip on things (inline handlers, worker/blob URLs) that only show up in a real
-      # browser — deploy report-only first, watch the console, then flip to enforcing (drop `-Report-Only`).
-      # `wasm-unsafe-eval` is required to instantiate WebAssembly without allowing JS eval.
+      # Enforced strict CSP (verified clean in a browser under Report-Only first). script-src 'self' +
+      # 'wasm-unsafe-eval' (WebAssembly, no eval) is the real XSS protection; style-src stays 'self' with
+      # NO 'unsafe-inline' — the one inline-style attribute was refactored to the CSSOM. img-src allows
+      # blob: for media/download object URLs; workers allow blob: for the wasm + sqlite/OPFS workers.
+      # Delivery-integrity story = HTTPS + this CSP + Cloudflare serving exact bytes (native SRI isn't
+      # feasible for a buildless ESM app; revisit if a build step / import-map integrity lands).
       - name: Write _headers (CSP + security + caching)
         env:
           R2: ${{ vars.R2_ENDPOINT }}
         run: |
           cat > _site/_headers <<EOF
           /*
-            Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' ${API_URL} ${R2}; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+            Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ${API_URL} ${R2}; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
             X-Content-Type-Options: nosniff
             Referrer-Policy: no-referrer
           /assets/*

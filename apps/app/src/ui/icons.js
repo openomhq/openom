@@ -22,7 +22,7 @@ export const icons = {
       svg('rect', { x: 9.25, y: 17.5, width: 9.5, height: 7.5, rx: 2.4 }),
       svg('path', { d: 'M7.75 10.5v3.5h12.5v-3.5M14 14v3.5' })
     ], s);
-    el.setAttribute('style', 'transform: scaleY(-1)');
+    el.style.transform = 'scaleY(-1)'; // CSSOM, not a style attribute — CSP style-src 'self' clean
     return el;
   },
   graph: (s) => wrap([
