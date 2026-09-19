@@ -1586,4 +1586,58 @@ mod tests {
             "the retired genesis authority (rvk1) cannot recover post-compaction"
         );
     }
+
+    #[test]
+    fn dag_pin_round_trips_through_its_encoding() {
+        let pin = DagPin {
+            genesis_op_id: [7; 32],
+            reset_authority: Some([9; 32]),
+            watermark: vec![1, 2, 3, 4],
+        };
+        let back = DagPin::decode(&pin.encode()).unwrap();
+        assert_eq!(back.genesis_op_id, pin.genesis_op_id);
+        assert_eq!(back.reset_authority, pin.reset_authority);
+        assert_eq!(back.watermark, pin.watermark);
+    }
+
+    #[test]
+    fn hex32_renders_the_first_eight_bytes_in_hex() {
+        let mut id = [0u8; 32];
+        id[..8].copy_from_slice(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(hex32(&id), "0123456789abcdef…");
+        // Distinct ids must render distinctly (a constant string would collapse them).
+        assert_ne!(hex32(&[0u8; 32]), hex32(&[1u8; 32]));
+    }
+
+    #[test]
+    fn append_change_role_promotes_a_member_and_resolves() {
+        let a0 = provision_anchor(b"tree-1", "founder", vpk(1), xpk(1), [42; 32], b"g".to_vec(), &sk(1));
+        let carol = minit("carol", KeyringRole::EDITOR, 3);
+        let a1 = append_add(&a0, "founder", &carol, Vec::new(), &sk(1)).unwrap();
+        let a2 = append_change_role(&a1, "founder", "carol", KeyringRole::CO_OWNER, &sk(1)).unwrap();
+        // The ChangeRole op must resolve and promote carol into the signer set (a constant/empty return
+        // would not decode as an anchor).
+        assert_eq!(
+            resolve(&a2).unwrap().members.signers().count(),
+            2,
+            "founder + the promoted carol are both signers"
+        );
+    }
+
+    #[test]
+    fn append_backfill_adds_a_reseal_that_resolves() {
+        let a0 = provision_anchor(b"tree-1", "founder", vpk(1), xpk(1), [42; 32], b"g".to_vec(), &sk(1));
+        let a1 = append_backfill(&a0, "founder", b"BACKFILL".to_vec(), &sk(1)).unwrap();
+        let resolved = resolve(&a1).unwrap();
+        assert!(
+            resolved.sealing.iter().any(|s| s.bytes.as_slice() == b"BACKFILL"),
+            "the reseal's sealing folds into the resolved state"
+        );
+    }
+
+    #[test]
+    fn client_errors_render_descriptive_messages() {
+        assert!(format!("{}", ClientError::Malformed("boom".into())).contains("boom"));
+        assert!(format!("{}", ClientError::RolledBack("x".into())).contains("rolled back"));
+    }
 }

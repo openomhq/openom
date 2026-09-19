@@ -1449,4 +1449,54 @@ mod tests {
         ok.apply(commit(5, vec![[4; 32]], "bob", 2)).unwrap();
         assert_eq!(q_role_of(&ok, "ed"), Some(KeyringRole::CO_OWNER), "3 of 4 signers meet the threshold");
     }
+
+    #[test]
+    fn an_in_dag_create_seeds_only_an_empty_group_with_one_owner_author() {
+        // The OPE-271 Create gate: a Create seeds ONLY an empty group, with EXACTLY one Owner, authored by
+        // one of the op's OWN members — the gate that stops a second attacker-signed Create from re-founding
+        // an established group.
+        let founder = minit("founder", KeyringRole::OWNER, 1);
+        let mut k = engine(&[]);
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create { initial_members: vec![founder] },
+            &sk(1),
+        ))
+        .unwrap();
+        assert_eq!(
+            members(&k),
+            vec![("founder".to_string(), KeyringRole::OWNER)],
+            "a well-formed Create seeds the empty group"
+        );
+    }
+
+    #[test]
+    fn a_promotion_into_the_signer_set_is_carved_out_by_a_concurrent_recovery() {
+        // A ChangeRole promoting an ordinary member INTO the signer set is PRIVILEGED (its new role is a
+        // signer), so — like a signer Add — it is voided when concurrent with a surviving recovery. If
+        // is_privileged required BOTH the new and the old role to be a signer, this promotion would wrongly
+        // auto-merge past the recovery.
+        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
+        let rvk_pub = rvk.verifying_key().to_bytes();
+        let mut k = engine_with_rvk(
+            &[minit("founder", KeyringRole::OWNER, 1), minit("carol", KeyringRole::EDITOR, 3)],
+            rvk_pub,
+        );
+        recovery_genesis(&mut k);
+        // (A) founder promotes carol EDITOR -> CO_OWNER, concurrent with (B) an RVK recovery re-founding.
+        let promote = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            "founder",
+            MembershipAction::ChangeRole { member: "carol".to_string(), new_role: KeyringRole::CO_OWNER },
+            &sk(1),
+        );
+        let recovery = sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk);
+        k.apply(promote).unwrap();
+        k.apply(recovery).unwrap();
+        let carol = members(&k).into_iter().find(|(id, _)| id == "carol").map(|(_, r)| r);
+        assert_eq!(carol, Some(KeyringRole::EDITOR), "the concurrent promotion is carved out");
+    }
 }

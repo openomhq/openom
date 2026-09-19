@@ -643,4 +643,30 @@ mod tests {
         sb.pull(&mut eb).unwrap();
         assert_eq!(members(&ea), members(&eb), "converges over FsBlob");
     }
+
+    #[test]
+    fn pull_counts_submitted_ops_and_errors_display() {
+        let store = Arc::new(MemoryBlob::new());
+        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
+        let mut ea = engine(&gm);
+        let mut eb = engine(&gm);
+        let mut sa = KeyringBlobSync::new(store.clone());
+        let mut sb = KeyringBlobSync::new(store.clone());
+
+        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        ea.apply(g.clone()).unwrap();
+        sa.push(&g).unwrap();
+        let ab = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        ea.apply(ab.clone()).unwrap();
+        sa.push(&ab).unwrap();
+
+        // Both new ops are counted as submitted (a `*=` counter would stay 0).
+        assert_eq!(sb.pull(&mut eb).unwrap().submitted, 2);
+        // A follow-up pull with nothing new submits zero.
+        assert_eq!(sb.pull(&mut eb).unwrap().submitted, 0);
+
+        // Error Display is descriptive, not empty.
+        assert!(format!("{}", BlobSyncError::Malformed("boom")).contains("boom"));
+        assert!(format!("{}", BlobSyncError::Decode("x".into())).contains("decode"));
+    }
 }

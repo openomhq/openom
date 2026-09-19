@@ -329,4 +329,18 @@ mod tests {
         assert!(out.changed, "and the owner key changed");
         assert_eq!(out.view.owner().unwrap().author_public_key, vk(7).to_vec());
     }
+
+    #[test]
+    fn a_genesis_with_a_bad_signature_is_refused() {
+        // The genesis Create authenticates against its own initial_members' key (founder = vk(1)), but this
+        // op is signed by an unrelated key — the engine must reject it, and `classify` must map that to an
+        // error rather than admitting it. (A classify that always returned Ok would admit a forged genesis.)
+        let v = DagVerifier;
+        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
+        let bad = sign_op([1; 32], vec![], "founder", create(&gm), &sk(9));
+        assert!(
+            v.admit(None, &bootstrap_update(&gm, None, &bad)).is_err(),
+            "a bad-signature genesis must not be admitted"
+        );
+    }
 }
