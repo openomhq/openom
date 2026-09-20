@@ -6,6 +6,7 @@
 //   docker compose up -d          # the stack must be running first
 //   node scripts/itest.mjs        # runs all ignored tests against it
 //   node scripts/itest.mjs media_lifecycle_and_gc   # filter to one test
+//   node scripts/itest.mjs --fresh register_         # recreate the dedicated test DB first
 //
 // Like scripts/cargo.mjs it runs cargo inside a Linux container (this host's policy
 // blocks executing freshly built binaries), reusing the same cargo cache volumes so
@@ -34,11 +35,32 @@ try {
 
 const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
 const HOST = 'host.docker.internal';
-const filter = process.argv.slice(2); // optional test-name filter passed to cargo test
+const cliArgs = process.argv.slice(2);
+const fresh = cliArgs.includes('--fresh');
+const filter = cliArgs.filter((arg) => arg !== '--fresh'); // optional test-name filter passed to cargo test
+const database = fresh ? 'openom_itest' : 'openom';
+
+function runPostgres(sql) {
+  const result = spawnSync(
+    'docker',
+    [
+      'compose', 'exec', '-T', 'postgres',
+      'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'openom', '-d', 'postgres', '-c', sql,
+    ],
+    { cwd: REPO, stdio: 'inherit' },
+  );
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
+if (fresh) {
+  console.error(`[itest] recreating dedicated database ${database}`);
+  runPostgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`);
+  runPostgres(`CREATE DATABASE ${database} OWNER openom;`);
+}
 
 const env = {
   CARGO_TARGET_DIR: '/tmp/target',
-  DATABASE_URL: `postgres://openom:openom@${HOST}:5432/openom`,
+  DATABASE_URL: `postgres://openom:openom@${HOST}:5432/${database}`,
   S3_ENDPOINT: `http://${HOST}:9000`,
   S3_PUBLIC_ENDPOINT: `http://${HOST}:9000`,
   S3_BUCKET: 'openom-trees',
@@ -61,6 +83,6 @@ for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
 // parallel makes the shared-state assertions non-deterministic (proposals_ttl_swept flaked). Serialize.
 args.push(IMAGE, 'cargo', 'test', '-p', 'openom', ...filter, '--', '--ignored', '--nocapture', '--test-threads=1');
 
-console.error(`[itest] cargo test -p openom ${filter.join(' ')} -- --ignored  (stack via ${HOST})`);
+console.error(`[itest] cargo test -p openom ${filter.join(' ')} -- --ignored  (db=${database}, stack via ${HOST})`);
 const r = spawnSync('docker', args, { stdio: 'inherit' });
 process.exit(r.status ?? 1);
