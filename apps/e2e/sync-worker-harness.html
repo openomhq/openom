@@ -391,6 +391,106 @@
         };
       },
 
+      // Phase 0 acceptance: one browser-profile account owns two trees, joins a third, changes its
+      // passphrase once, then reopens every tree through the verified founder/member role dispatch.
+      async durableAccountAcrossTrees(engine) {
+        const transport = makeTransport();
+        const nonce = crypto.randomUUID();
+        const profile = `durable-account-${engine}-${nonce}`;
+        const ownerProfile = `durable-owner-${engine}-${nonce}`;
+        const firstDoc = `durable-first-${engine}-${nonce}`;
+        const secondDoc = `durable-second-${engine}-${nonce}`;
+        const joinedDoc = `durable-joined-${engine}-${nonce}`;
+        const sharedDoc = `durable-shared-${engine}-${nonce}`;
+        const firstTree = new Uint8Array(16).fill(engine === 'dag' ? 21 : 22);
+        const secondTree = new Uint8Array(16).fill(engine === 'dag' ? 23 : 24);
+        const sharedTree = new Uint8Array(16).fill(engine === 'dag' ? 25 : 26);
+        const oldPass = 'one durable account passphrase';
+        const newPass = 'one replacement account passphrase';
+        const ownerPass = 'independent owner passphrase';
+
+        const member = spawnWorker(profile);
+        await member.warm();
+        const account = await member.accountCreate(oldPass);
+        const first = await member.provisionCore({
+          passphrase: oldPass, treeId: firstTree, memberId: 'ignored', docId: firstDoc, engine,
+        });
+        const second = await member.provisionCore({
+          passphrase: oldPass, treeId: secondTree, memberId: 'ignored', docId: secondDoc, engine,
+        });
+        const registrationProof = await member.accountRegisterProof({
+          issuer: 'https://issuer.example', subject: `subject-${nonce}`, timestamp: 1_800_000_000,
+        });
+        const rotated = await member.accountRotateRoot({ passphrase: oldPass });
+        const afterRotation = await member.accountPublicIdentity();
+
+        const owner = spawnWorker(ownerProfile);
+        await owner.warm();
+        await owner.provisionCore({
+          passphrase: ownerPass, treeId: sharedTree, memberId: 'ignored', docId: sharedDoc, engine,
+        });
+        await owner.attachTransport(sharedDoc, Comlink.proxy(transport));
+        const chainPin = engine === 'chain' ? await owner.keyringHash(sharedDoc) : null;
+        await owner.addMember(sharedDoc, {
+          passphrase: ownerPass,
+          treeId: sharedTree,
+          ownerMemberId: 'ignored',
+          minRevision: 1,
+          newMemberId: account.memberId,
+          role: 'editor',
+          memberAuthorPublic: account.authorPublicKey,
+          memberHpkePublic: account.hpkePublicKey,
+          engine,
+        });
+        const pin = engine === 'dag' ? await owner.dagAnchorPin(sharedDoc) : null;
+
+        await member.attachTransport(joinedDoc, Comlink.proxy(transport));
+        const joined = await member.joinAsMember(
+          engine === 'dag'
+            ? { engine, treeId: sharedTree, docId: joinedDoc, passphrase: oldPass, memberId: account.memberId, pin }
+            : {
+                engine,
+                treeId: sharedTree,
+                docId: joinedDoc,
+                passphrase: oldPass,
+                memberId: account.memberId,
+                pinnedRevision: chainPin.revision,
+                pinnedHash: chainPin.hash,
+              },
+        );
+
+        await member.accountChangePassphrase({ current: oldPass, next: newPass });
+        await member.close(firstDoc);
+        await member.close(secondDoc);
+        await member.close(joinedDoc);
+
+        let oldPassRejected = false;
+        try {
+          await member.accountUnlock(oldPass);
+        } catch {
+          oldPassRejected = true;
+        }
+        const unlocked = await member.accountUnlock(newPass);
+        const reopenedFirst = await member.unlockCore({
+          passphrase: newPass, treeId: firstTree, memberId: account.memberId, docId: firstDoc, engine,
+        });
+        const reopenedSecond = await member.unlockCore({
+          passphrase: newPass, treeId: secondTree, memberId: account.memberId, docId: secondDoc, engine,
+        });
+        const reopenedJoined = await member.unlockCore({
+          passphrase: newPass, treeId: sharedTree, memberId: account.memberId, docId: joinedDoc, engine,
+        });
+
+        return {
+          memberIds: [account.memberId, first.memberId, second.memberId, afterRotation.memberId, unlocked.memberId],
+          joinedDid: joined.didKey,
+          reopenedDids: [reopenedFirst.didKey, reopenedSecond.didKey, reopenedJoined.didKey],
+          oldPassRejected,
+          registrationProofLength: registrationProof.length,
+          rotatedRecoveryCodeLength: rotated.recoveryCode.length,
+        };
+      },
+
       // THE full sharing loop through the real worker: an owner provisions + shares a tree, a member joins
       // via the genesis-walk, and verify-on-ingest ACCEPTS the owner's signed write while REJECTING a forged
       // unsigned one — all in real Web Workers over the in-page keyring + log channels. Chain engine.

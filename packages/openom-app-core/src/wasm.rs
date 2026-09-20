@@ -747,7 +747,8 @@ pub struct OpenResult {
     #[wasm_bindgen(js_name = needsBackfill)]
     pub needs_backfill: bool,
     /// Advisory: a retained epoch's RRK wrap doesn't bind the current recovery escrow — a rotation orphan the
-    /// owner can't read until a MEMBER re-wraps it (`backfillRrk`). Always `false` for the chain (OPE-381 / F3).
+    /// owner can't read until a MEMBER re-wraps it (`backfillRrkWithAccount`). Always `false` for the chain
+    /// (OPE-381 / F3).
     #[wasm_bindgen(js_name = needsRrkBackfill)]
     pub needs_rrk_backfill: bool,
     /// Advisory: this unlocker's own DEK bag didn't reach the current write epoch — locally derived, so it holds
@@ -1101,45 +1102,6 @@ pub fn rotation_confirmed(
     dag.rotation_confirmed(synced_anchor, &expected).map_err(to_js)
 }
 
-/// Member-side heal of a rotation-orphaned epoch (OPE-381 / F3): an active member opens an epoch the owner
-/// can't read and re-wraps its DEK to the current escrow. Authorized by the member's passphrase + account
-/// KDF. Idempotent (`backfilled=false` when no orphan is reachable) — safe to call opportunistically.
-///
-/// # Errors
-/// Returns a [`JsError`] if the engine isn't the dag keyring, the KDF params are malformed, or the heal fails.
-#[wasm_bindgen(js_name = backfillRrk)]
-#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
-pub fn backfill_rrk(
-    engine: &str,
-    passphrase: String,
-    member_kdf_params: &[u8],
-    tree_id: &[u8],
-    member_id: &str,
-    replica_id: &[u8],
-    anchor: &[u8],
-    floor: &[u8],
-) -> Result<DagBackfilled, JsError> {
-    let dag = AppVault::from_kind(parse_engine(engine)?)
-        .as_dag()
-        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
-    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
-        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
-    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
-    let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
-    };
-    let r = dag
-        .backfill_rrk(&ctx, anchor, &Passphrase::new(passphrase.into_bytes()), &kdf, floor)
-        .map_err(to_js)?;
-    Ok(DagBackfilled {
-        keyring: r.anchor,
-        watermark: r.watermark,
-        backfilled: r.backfilled,
-    })
-}
-
 /// Member-side DAG wrap repair using the worker-resident durable account.
 ///
 /// # Errors
@@ -1207,43 +1169,11 @@ pub fn recovery_confirmed(
         .map_err(to_js)
 }
 
-/// A joining member's freshly-minted account identity (before they claim an invite): the KDF params to
-/// persist locally + the two public keys to hand the owner OOB for `addMember`. The secrets never leave the
-/// worker — they re-derive from the passphrase on `unlockAsMember`.
-#[wasm_bindgen(getter_with_clone)]
-pub struct MemberIdentity {
-    /// The account's KDF params (persist locally; replay on `unlockAsMember`).
-    #[wasm_bindgen(js_name = kdfParams)]
-    pub kdf_params: Vec<u8>,
-    /// The Ed25519 author public key (hand to the owner for `addMember`).
-    #[wasm_bindgen(js_name = authorPublicKey)]
-    pub author_public_key: Vec<u8>,
-    /// The X25519 HPKE public key (hand to the owner for `addMember`).
-    #[wasm_bindgen(js_name = hpkePublicKey)]
-    pub hpke_public_key: Vec<u8>,
-}
-
-/// Mint a joining member's account identity from their passphrase — the first step of the member flow (before
-/// the owner admits them). Returns the KDF params + the OOB-shareable public keys.
-///
-/// # Errors
-/// Returns a [`JsError`] if the member secret derivation fails.
-#[wasm_bindgen(js_name = provisionMember)]
-pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
-    let m = openom_vault::sharing::provision_member(&Passphrase::new(passphrase.into_bytes()))
-        .map_err(to_js)?;
-    Ok(MemberIdentity {
-        kdf_params: m.kdf_params,
-        author_public_key: m.author_public_key,
-        hpke_public_key: m.hpke_public_key,
-    })
-}
-
 /// The SELF-CERTIFYING member id (OPE-543): `member_id = derive_member_id(author_public_key)`, a `UUIDv8` over
 /// SHA-256(author key). Exposed so the JS seam NEVER re-implements the derivation (max-Rust): the worker calls
-/// it on a freshly-minted member key (the joiner's own id) and on a joiner's CLAIMED key at admission (never
-/// trusting the claim's id) — the byte-for-byte source the engines and `/register` enforce. The native seam
-/// has the equivalent Tauri `core_derive_member_id` over the same crate fn.
+/// it on a joiner's CLAIMED key at admission (never trusting the claim's id) — the byte-for-byte source the
+/// engines and `/register` enforce. The native seam has the equivalent Tauri `core_derive_member_id` over the
+/// same crate fn.
 #[wasm_bindgen(js_name = deriveMemberId)]
 #[must_use]
 pub fn derive_member_id(author_public_key: &[u8]) -> String {
@@ -1491,63 +1421,6 @@ pub fn change_role_with_account(
     })
 }
 
-/// Unlock a shared tree as a non-owner member — verify against the pinned `trusted_signers` (chain) / resolve
-/// the anchor (dag), HPKE-unwrap the member's DEKs with their passphrase + account KDF, and wrap the sealer in
-/// a ready core. Returns an [`OpenResult`] like [`unlock`], whose handle the worker drives.
-///
-/// # Errors
-/// Returns a [`JsError`] if the engine is unknown, or member unlock fails (wrong passphrase / unpinned signer
-/// / removed member).
-#[wasm_bindgen(js_name = unlockAsMember)]
-#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
-pub fn unlock_as_member(
-    engine: &str,
-    keyring: &[u8],
-    passphrase: String,
-    member_kdf_params: &[u8],
-    tree_id: &[u8],
-    member_id: &str,
-    trusted_signers: &[u8],
-    replica_id: &[u8],
-    min_revision: u32,
-    doc: String,
-) -> Result<OpenResult, JsError> {
-    // Shared rlib construction (crate::unlock_as_member) so this veneer and the native host build the member
-    // core identically — sealer + epoch-adopt secret (OPE-393) + a §B3 resolver AT CONSTRUCTION (never the
-    // accept-all state a pre-setMembership sync would fold forgeries into). Empty retained set here: older
-    // governing revisions Hold (fail-closed) until the worker supplies them via a later setMembership.
-    let m = crate::unlock_as_member(
-        MemoryBlob::new(),
-        parse_engine(engine)?,
-        keyring,
-        &Passphrase::new(passphrase.into_bytes()),
-        member_kdf_params,
-        tree_id,
-        member_id,
-        trusted_signers,
-        replica_id,
-        min_revision,
-        &[],
-        doc,
-    )
-    .map_err(to_js)?;
-    Ok(OpenResult {
-        handle: Some(AppCoreHandle { inner: m.core }),
-        keyring: Vec::new(),
-        keystore: Vec::new(),
-        recovery_code: String::new(),
-        did_key: m.did_key,
-        watermark: m.watermark,
-        needs_reseal: false,
-        needs_backfill: false,
-        // The member-unlock wrapper (sharing::unlock_as_member) doesn't thread the coverage advisories through
-        // yet — the member drives backfill_rrk opportunistically (idempotent) rather than off this flag.
-        needs_rrk_backfill: false,
-        // A linear chain always reaches its own write epoch on a member unlock (OPE-299).
-        write_epoch_unreachable: false,
-    })
-}
-
 /// Whether this tree HAS BEEN SHARED — a non-founder member was ever admitted. The worker calls this on
 /// unlock to decide whether to install a §B3 resolver (a solo tree needs none).
 ///
@@ -1612,7 +1485,7 @@ pub fn keyring_covers(
 pub struct KeyringWalk {
     /// The verified head revision.
     pub revision: u32,
-    /// The RAW head `Keyring` body — stored as the head and fed to `unlockAsMember`.
+    /// The RAW head `Keyring` body — stored as the head and fed to `unlockTreeAsMember`.
     #[wasm_bindgen(js_name = headKeyring)]
     pub head_keyring: Vec<u8>,
     /// The head's authorized signers as JSON `[{"memberId","authorPublicKey"(hex)}]`.
@@ -1701,7 +1574,7 @@ pub fn dag_anchor_pin(anchor: &[u8]) -> Result<Vec<u8>, JsError> {
 
 /// Verify a dag anchor served by the untrusted network against an OOB pin — a member's first-sight JOIN, the
 /// dag analog of [`verify_keyring_walk`]. Returns the validated anchor + watermark to persist; the worker then
-/// calls [`unlock_as_member`] to open the member core. Throws on any failed trust check.
+/// calls [`unlock_tree_as_member`] to open the member core. Throws on any failed trust check.
 ///
 /// # Errors
 /// Returns a [`JsError`] on a malformed anchor/pin or a failed trust check.
@@ -1782,13 +1655,6 @@ pub fn adopt_reset(
         keyring: a.keyring,
         watermark: a.watermark,
     })
-}
-
-/// Parse the `(tree, member, replica)` id triple every lifecycle/sharing flow builds a [`VaultContext`] from.
-/// The `VaultContext` itself stays at each call site: it BORROWS these owned ids, so it can't outlive a helper
-/// that returned it (the ids would drop) — folding the id construction is as far as this can cleanly go.
-fn parse_ids(tree_id: &[u8], member_id: &str, replica_id: &[u8]) -> (TreeId, MemberId, ReplicaId) {
-    (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id))
 }
 
 /// The engine tag mapping ([`EngineKind`]'s own `FromStr`, so this and the vault host can't drift).

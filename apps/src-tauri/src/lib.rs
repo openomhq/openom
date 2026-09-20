@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AddedMember, AppCoreHost, BlobData, BlobMeta, InviteMaterial, KeyringRevisionPayload, MemberAccount,
-    MemberToAdd, MemberUnlocked, PassphraseChanged, Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut,
-    Unlocked,
+    AccountChanged, AccountIdentity, AccountOpened, AddedMember, AppCoreHost, BlobData, BlobMeta,
+    InviteMaterial, KeyringRevisionPayload, MemberToAdd, MemberUnlocked, Provisioned,
+    RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
+use openom_protocol::ids::{MemberId, TreeId};
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::VaultStore;
 use tauri::{Manager, State};
@@ -56,13 +57,10 @@ async fn core_provision(
     state: State<'_, Host>,
     doc: String,
     tree_id: Vec<u8>,
-    member_id: String,
-    passphrase: String,
 ) -> Result<Provisioned, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.provision(&doc, &tree_id, &member_id, &Passphrase::new(passphrase.into_bytes()))
-            .map_err(e)
+        host.provision_tree(&doc, &TreeId::new(tree_id)).map_err(e)
     })
     .await
     .map_err(join_err)?
@@ -76,36 +74,52 @@ async fn core_unlock(
     state: State<'_, Host>,
     doc: String,
     tree_id: Vec<u8>,
-    member_id: String,
-    passphrase: String,
 ) -> Result<Unlocked, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.unlock(&doc, &tree_id, &member_id, &Passphrase::new(passphrase.into_bytes()))
+        host.open_tree(&doc, &TreeId::new(tree_id)).map_err(e)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+async fn account_create(
+    state: State<'_, Host>,
+    passphrase: String,
+) -> Result<AccountOpened, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.account_create(&Passphrase::new(passphrase.into_bytes()))
             .map_err(e)
     })
     .await
     .map_err(join_err)?
 }
 
-/// Recover owner access under a new passphrase using the recovery code: the host loads the stored keyring +
-/// watermark from native custody, re-keys, PERSISTS the fresh keyring, and registers the new core. Returns the
-/// rotated recovery code + the (freshly minted) owner identity.
 #[tauri::command]
-async fn core_recover(
+async fn account_unlock(
     state: State<'_, Host>,
-    doc: String,
-    tree_id: Vec<u8>,
-    member_id: String,
-    recovery_code: String,
-    new_passphrase: String,
-) -> Result<Recovered, String> {
+    passphrase: String,
+) -> Result<AccountIdentity, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.recover(
-            &doc,
-            &tree_id,
-            &member_id,
+        host.account_unlock(&Passphrase::new(passphrase.into_bytes()))
+            .map_err(e)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+async fn account_recover(
+    state: State<'_, Host>,
+    recovery_code: String,
+    new_passphrase: String,
+) -> Result<AccountOpened, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.account_recover(
             &RecoveryCode::new(recovery_code),
             &Passphrase::new(new_passphrase.into_bytes()),
         )
@@ -115,46 +129,49 @@ async fn core_recover(
     .map_err(join_err)?
 }
 
-/// Change the passphrase: the host loads the stored keyring + watermark, re-wraps under the new passphrase, and
-/// PERSISTS the fresh keyring natively. The DEK is unchanged, so the running core keeps working. Returns the
-/// rotated recovery code.
 #[tauri::command]
-async fn core_change_passphrase(
+fn account_public_identity(state: State<'_, Host>) -> Result<AccountIdentity, String> {
+    state.account_public_identity().map_err(e)
+}
+
+#[tauri::command]
+async fn account_change_passphrase(
     state: State<'_, Host>,
-    doc: String,
-    tree_id: Vec<u8>,
-    member_id: String,
-    old_passphrase: String,
     new_passphrase: String,
-) -> Result<PassphraseChanged, String> {
+) -> Result<AccountChanged, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.change_passphrase(
-            &doc,
-            &tree_id,
-            &member_id,
-            &Passphrase::new(old_passphrase.into_bytes()),
-            &Passphrase::new(new_passphrase.into_bytes()),
-        )
-        .map_err(e)
+        host.account_change_passphrase(&Passphrase::new(new_passphrase.into_bytes()))
+            .map_err(e)
     })
     .await
     .map_err(join_err)?
 }
 
-/// Mint a joining member's account from their passphrase (stateless): returns the KDF params to persist + the
-/// two OOB-shareable public keys the owner needs to admit them. Argon2id, so `spawn_blocking`.
 #[tauri::command]
-async fn core_provision_member(
+async fn account_rotate_root(
     state: State<'_, Host>,
     passphrase: String,
-) -> Result<MemberAccount, String> {
+) -> Result<AccountOpened, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.provision_member(&Passphrase::new(passphrase.into_bytes())).map_err(e)
+        host.account_rotate_root(&Passphrase::new(passphrase.into_bytes()))
+            .map_err(e)
     })
     .await
     .map_err(join_err)?
+}
+
+#[tauri::command]
+fn account_register_proof(
+    state: State<'_, Host>,
+    issuer: String,
+    subject: String,
+    timestamp: i64,
+) -> Result<Vec<u8>, String> {
+    state
+        .account_register_proof(&issuer, &subject, timestamp)
+        .map_err(e)
 }
 
 /// The SELF-CERTIFYING member id (OPE-543): `derive_member_id(author_public_key)` — the native mirror of the
@@ -174,20 +191,12 @@ async fn core_add_member(
     state: State<'_, Host>,
     doc: String,
     tree_id: Vec<u8>,
-    owner_member_id: String,
-    owner_passphrase: String,
     member: MemberToAdd,
 ) -> Result<AddedMember, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.add_member(
-            &doc,
-            &tree_id,
-            &owner_member_id,
-            &Passphrase::new(owner_passphrase.into_bytes()),
-            &member,
-        )
-        .map_err(e)
+        host.add_tree_member(&doc, &TreeId::new(tree_id), &member)
+            .map_err(e)
     })
     .await
     .map_err(join_err)?
@@ -202,18 +211,14 @@ async fn core_remove_member(
     state: State<'_, Host>,
     doc: String,
     tree_id: Vec<u8>,
-    owner_member_id: String,
-    owner_passphrase: String,
     remove_member_id: String,
 ) -> Result<RemovedMember, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.remove_member(
+        host.remove_tree_member(
             &doc,
-            &tree_id,
-            &owner_member_id,
-            &Passphrase::new(owner_passphrase.into_bytes()),
-            &remove_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(remove_member_id),
         )
         .map_err(e)
     })
@@ -230,19 +235,15 @@ async fn core_change_role(
     state: State<'_, Host>,
     doc: String,
     tree_id: Vec<u8>,
-    owner_member_id: String,
-    owner_passphrase: String,
     target_member_id: String,
     new_role: String,
 ) -> Result<RoleChanged, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.change_role(
+        host.change_tree_member_role(
             &doc,
-            &tree_id,
-            &owner_member_id,
-            &Passphrase::new(owner_passphrase.into_bytes()),
-            &target_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(target_member_id),
             &new_role,
         )
         .map_err(e)
@@ -261,21 +262,15 @@ async fn core_join_as_member(
     state: State<'_, Host>,
     doc: String,
     tree_id: Vec<u8>,
-    member_id: String,
-    passphrase: String,
-    member_kdf_params: Vec<u8>,
     hops: Vec<u8>,
     pinned_revision: u32,
     pinned_hash: Vec<u8>,
 ) -> Result<MemberUnlocked, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.join_as_member(
+        host.join_chain_tree(
             &doc,
-            &tree_id,
-            &member_id,
-            &Passphrase::new(passphrase.into_bytes()),
-            &member_kdf_params,
+            &TreeId::new(tree_id),
             &hops,
             pinned_revision,
             &pinned_hash,
@@ -294,42 +289,12 @@ async fn core_join_dag_anchor(
     state: State<'_, Host>,
     doc: String,
     tree_id: Vec<u8>,
-    member_id: String,
-    passphrase: String,
-    member_kdf_params: Vec<u8>,
     anchor: Vec<u8>,
     pin: Vec<u8>,
 ) -> Result<MemberUnlocked, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.join_dag_anchor(
-            &doc,
-            &tree_id,
-            &member_id,
-            &Passphrase::new(passphrase.into_bytes()),
-            &member_kdf_params,
-            &anchor,
-            &pin,
-        )
-        .map_err(e)
-    })
-    .await
-    .map_err(join_err)?
-}
-
-/// Re-open a shared tree as a member on a device that already joined: the host loads the keyring + member
-/// context from native custody (no webview trust inputs) and unlocks. Argon2id, so `spawn_blocking`.
-#[tauri::command]
-async fn core_unlock_as_member(
-    state: State<'_, Host>,
-    doc: String,
-    tree_id: Vec<u8>,
-    member_id: String,
-    passphrase: String,
-) -> Result<MemberUnlocked, String> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.unlock_as_member(&doc, &tree_id, &member_id, &Passphrase::new(passphrase.into_bytes()))
+        host.join_dag_tree(&doc, &TreeId::new(tree_id), &anchor, &pin)
             .map_err(e)
     })
     .await
@@ -341,7 +306,11 @@ async fn core_unlock_as_member(
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
 #[tauri::command]
 fn core_has_keyring(state: State<'_, Host>, doc: String) -> Result<bool, String> {
-    state.store().load_keyring(&doc).map(|k| k.is_some()).map_err(join_err)
+    state
+        .store()
+        .load_keyring(&doc)
+        .map(|k| k.is_some())
+        .map_err(join_err)
 }
 
 /// Rebuild `doc`'s engine from its durable local log — call once after [`core_unlock`] on open.
@@ -375,7 +344,11 @@ fn core_can_commit_directly(state: State<'_, Host>, doc: String) -> Result<bool,
 
 /// Open a historical delta envelope to its op-batch JSON (the decrypted change) for the change-history feed.
 #[tauri::command]
-fn core_open_history_delta(state: State<'_, Host>, doc: String, envelope: Vec<u8>) -> Result<String, String> {
+fn core_open_history_delta(
+    state: State<'_, Host>,
+    doc: String,
+    envelope: Vec<u8>,
+) -> Result<String, String> {
     state.open_history_delta(&doc, &envelope).map_err(e)
 }
 
@@ -387,7 +360,11 @@ fn core_propose(state: State<'_, Host>, doc: String) -> Result<Vec<u8>, String> 
 
 /// Maintainer: verify + commit an editor `proposal` as an attributed delta; returns the number of ops committed.
 #[tauri::command]
-fn core_approve_proposal(state: State<'_, Host>, doc: String, proposal: Vec<u8>) -> Result<usize, String> {
+fn core_approve_proposal(
+    state: State<'_, Host>,
+    doc: String,
+    proposal: Vec<u8>,
+) -> Result<usize, String> {
     state.approve_proposal(&doc, &proposal).map_err(e)
 }
 
@@ -440,7 +417,9 @@ fn core_assert_claim(
     predicate: String,
     value_json: String,
 ) -> Result<(), String> {
-    state.assert_claim(&doc, &target, &predicate, &value_json).map_err(e)
+    state
+        .assert_claim(&doc, &target, &predicate, &value_json)
+        .map_err(e)
 }
 
 #[tauri::command]
@@ -452,11 +431,17 @@ fn core_supersede_claim(
     predicate: String,
     value_json: String,
 ) -> Result<(), String> {
-    state.supersede_claim(&doc, &prior, &target, &predicate, &value_json).map_err(e)
+    state
+        .supersede_claim(&doc, &prior, &target, &predicate, &value_json)
+        .map_err(e)
 }
 
 #[tauri::command]
-fn core_remove_record(state: State<'_, Host>, doc: String, target: String) -> Result<String, String> {
+fn core_remove_record(
+    state: State<'_, Host>,
+    doc: String,
+    target: String,
+) -> Result<String, String> {
     state.remove_record(&doc, &target).map_err(e)
 }
 
@@ -471,7 +456,11 @@ fn core_reset(state: State<'_, Host>, doc: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn core_set_moderators(state: State<'_, Host>, doc: String, moderators: Vec<String>) -> Result<(), String> {
+fn core_set_moderators(
+    state: State<'_, Host>,
+    doc: String,
+    moderators: Vec<String>,
+) -> Result<(), String> {
     state.set_moderators(&doc, moderators).map_err(e)
 }
 
@@ -503,12 +492,20 @@ fn core_live_claims_of(
 }
 
 #[tauri::command]
-fn core_live_claims_of_any(state: State<'_, Host>, doc: String, target: String) -> Result<String, String> {
+fn core_live_claims_of_any(
+    state: State<'_, Host>,
+    doc: String,
+    target: String,
+) -> Result<String, String> {
     state.live_claims_of_any(&doc, &target).map_err(e)
 }
 
 #[tauri::command]
-fn core_resolve_id(state: State<'_, Host>, doc: String, anchor: String) -> Result<Option<String>, String> {
+fn core_resolve_id(
+    state: State<'_, Host>,
+    doc: String,
+    anchor: String,
+) -> Result<Option<String>, String> {
     state.resolve_id(&doc, &anchor).map_err(e)
 }
 
@@ -579,13 +576,6 @@ fn core_keyring_head(state: State<'_, Host>, doc: String) -> Result<u32, String>
     state.keyring_head(&doc).map_err(e)
 }
 
-/// Whether `doc` has a stored member context — the reopen path dispatches on this (member vs owner unlock) so one
-/// `unlockCore` covers both roles.
-#[tauri::command]
-fn core_has_member_context(state: State<'_, Host>, doc: String) -> Result<bool, String> {
-    state.has_member_context(&doc).map_err(e)
-}
-
 /// The wrapped `KeyringUpdate` (+ raw body for benign-409 comparison) for one retained chain keyring revision —
 /// the webview walks `server_head + 1 ..= local_head` and PUTs each to republish its produced tail.
 #[tauri::command]
@@ -639,7 +629,9 @@ struct BlobPutArgs {
 
 #[tauri::command]
 fn blob_put(state: State<'_, Host>, doc: String, args: BlobPutArgs) -> Result<String, String> {
-    state.blob_put(&doc, &args.bytes, args.mime, args.w, args.h).map_err(e)
+    state
+        .blob_put(&doc, &args.bytes, args.mime, args.w, args.h)
+        .map_err(e)
 }
 
 #[tauri::command]
@@ -648,7 +640,11 @@ fn blob_has(state: State<'_, Host>, doc: String, hash: String) -> Result<bool, S
 }
 
 #[tauri::command]
-fn blob_meta(state: State<'_, Host>, doc: String, hash: String) -> Result<Option<BlobMeta>, String> {
+fn blob_meta(
+    state: State<'_, Host>,
+    doc: String,
+    hash: String,
+) -> Result<Option<BlobMeta>, String> {
     state.blob_meta(&doc, &hash).map_err(e)
 }
 
@@ -665,13 +661,21 @@ fn blob_delete(state: State<'_, Host>, doc: String, hash: String) -> Result<(), 
 /// Seal arbitrary client-owned secret bytes under `doc`'s tree DEK (OPE-453) — the durable invite mint record.
 /// Returns the wire envelope the webview stores in place of the plaintext; the DEK stays native.
 #[tauri::command]
-fn core_seal_app_secret(state: State<'_, Host>, doc: String, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+fn core_seal_app_secret(
+    state: State<'_, Host>,
+    doc: String,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
     state.seal_app_secret(&doc, &bytes).map_err(e)
 }
 
 /// Open an app-secret envelope sealed by `core_seal_app_secret` under `doc`'s DEK.
 #[tauri::command]
-fn core_open_app_secret(state: State<'_, Host>, doc: String, sealed: Vec<u8>) -> Result<Vec<u8>, String> {
+fn core_open_app_secret(
+    state: State<'_, Host>,
+    doc: String,
+    sealed: Vec<u8>,
+) -> Result<Vec<u8>, String> {
     state.open_app_secret(&doc, &sealed).map_err(e)
 }
 
@@ -712,18 +716,21 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             core_has_keyring,
+            account_create,
+            account_unlock,
+            account_recover,
+            account_change_passphrase,
+            account_rotate_root,
+            account_register_proof,
+            account_public_identity,
             core_provision,
             core_unlock,
-            core_recover,
-            core_change_passphrase,
-            core_provision_member,
             core_derive_member_id,
             core_add_member,
             core_remove_member,
             core_change_role,
             core_join_as_member,
             core_join_dag_anchor,
-            core_unlock_as_member,
             core_bootstrap,
             core_assert_anchor,
             core_commit,
@@ -758,7 +765,6 @@ pub fn run() {
             core_sync_keyring,
             core_keyring_head,
             core_keyring_publish_payload_at,
-            core_has_member_context,
             core_sync,
             core_plan_fetch,
             blob_put,

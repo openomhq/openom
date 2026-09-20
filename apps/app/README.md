@@ -58,10 +58,13 @@ domain logic in Rust and re-implements none of it in JS; `src/core/` is the JS o
 claim-model engine (an openom-data-crdt set-union fold + an openom-data-projection read model); it replaced
 the former treelog engine at the claim-model cutover.
 
-The production web path hosts one unlocked durable account inside `appCore.worker.js`. Its opaque wrapped
-keystore and generation are persisted once per browser profile, while tree keyrings, watermarks, and logs stay
+The production web path hosts one unlocked durable account inside `appCore.worker.js`; the native path mirrors
+that ownership inside `openom-app-core-host`. The opaque wrapped keystore and generation are persisted once per
+profile (IndexedDB on web, native SQLite under Tauri), while tree keyrings, watermarks, and logs stay
 per document. Owned and joined trees both borrow that account handle; joined-tree reopen selects the founder or
 member path from the already-trusted keyring head rather than from a second persisted member credential.
+The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
+passphrase, rotate root, public identity, and registration proof), while keeping every secret handle in Rust/wasm.
 
 It is **not** a general-purpose SPA: there is no client-side router beyond the app's own
 `data-view` state, no CSS framework, and no dependency-injection container — `src/ui/dom.js`'s `h()`

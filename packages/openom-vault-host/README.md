@@ -4,8 +4,10 @@ The native **keyring/watermark custody seam** for the openom Tauri host: the [`V
 durable `SQLite` backing ([`sqlite::SqliteVaultStore`]).
 
 A tree's keyring is a *wrapped* DEK — not secret, but it must survive a relaunch — and its watermark is the
-engine-opaque anti-rollback cursor. `VaultStore` persists both, and `commit_keyring` writes them in **one
-transaction** so a crash can never leave the stored anchor disagreeing with its cursor. It's kept in its own
+engine-opaque anti-rollback cursor. The store also holds one profile-level wrapped account keystore together
+with its authenticated generation; it is never duplicated per tree. `VaultStore` persists these records, and
+`commit_keyring` writes each tree's keyring and watermark in **one transaction** so a crash can never leave the
+stored anchor disagreeing with its cursor. It's kept in its own
 file (`vault.sqlite`), separate from the doc/blob store, so copying or restoring the tree database can't drag
 the anti-rollback watermark backward with it.
 

@@ -167,37 +167,52 @@ export function createNativeAppCore() {
     warm: () => Promise.resolve(), // nothing to preload
     hasKeyring: (docId) => call('core_has_keyring', { doc: docId }),
 
-    provisionCore: ({ passphrase, treeId, memberId, docId }) => {
+    accountCreate: (passphrase) => call('account_create', { passphrase }),
+    accountUnlock: (passphrase) => call('account_unlock', { passphrase }),
+    accountRecover: ({ recoveryCode, newPassphrase }) =>
+      call('account_recover', { recoveryCode, newPassphrase }),
+    async accountChangePassphrase({ current, next }) {
+      await api.accountUnlock(current);
+      const changed = await call('account_change_passphrase', { newPassphrase: next });
+      return { recoveryCode: '', ...changed };
+    },
+    accountPublicIdentity: () => call('account_public_identity'),
+    accountRotateRoot: ({ passphrase }) => call('account_rotate_root', { passphrase }),
+    accountRegisterProof: ({ issuer, subject, timestamp }) =>
+      call('account_register_proof', { issuer, subject, timestamp }),
+
+    async provisionCore({ passphrase, treeId, docId }) {
+      let account;
+      try {
+        const opened = await api.accountCreate(passphrase);
+        account = { ...opened, ...(await api.accountPublicIdentity()) };
+      } catch {
+        account = await api.accountUnlock(passphrase);
+      }
       remember(docId, treeId);
       markNeedsCreateTree(docId); // owner-only: a new tree whose server row the first tick must mint
-      return call('core_provision', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
+      const tree = await call('core_provision', { doc: docId, treeId: bytes(treeId) });
+      return { ...account, ...tree };
     },
 
-    // ONE reopen entrypoint (matching the web worker's single unlockCore): the host dispatches on stored custody —
-    // a joined device (member context present) reopens via core_unlock_as_member, an owner via core_unlock. The
-    // caller never picks the trust path (the C2 rule: never a webview argument); it's derived from native custody.
-    async unlockCore({ passphrase, treeId, memberId, docId }) {
+    async unlockCore({ passphrase, treeId, docId }) {
       remember(docId, treeId);
-      const isMember = await call('core_has_member_context', { doc: docId });
-      const cmd = isMember ? 'core_unlock_as_member' : 'core_unlock';
-      const out = await call(cmd, { doc: docId, treeId: bytes(treeId), memberId, passphrase });
+      await api.accountUnlock(passphrase);
+      const out = await call('core_unlock', { doc: docId, treeId: bytes(treeId) });
       await call('core_bootstrap', { doc: docId }); // hydrate the durable log (the worker's unlockCore does this)
       return out;
     },
 
-    async recoverCore({ recoveryCode, newPassphrase, treeId, memberId, docId }) {
+    async recoverCore({ recoveryCode, newPassphrase, treeId, docId }) {
       remember(docId, treeId);
-      const out = await call('core_recover', {
-        doc: docId, treeId: bytes(treeId), memberId, recoveryCode, newPassphrase,
-      });
+      const account = await api.accountRecover({ recoveryCode, newPassphrase });
+      const out = await call('core_unlock', { doc: docId, treeId: bytes(treeId) });
       await call('core_bootstrap', { doc: docId });
-      return out;
+      return { ...account, ...out };
     },
 
-    changePassphraseCore: ({ current, next, treeId, memberId, docId }) =>
-      call('core_change_passphrase', {
-        doc: docId, treeId: bytes(treeId), memberId, oldPassphrase: current, newPassphrase: next,
-      }),
+    changePassphraseCore: ({ current, next }) =>
+      api.accountChangePassphrase({ current, next }),
 
     // The demo/dev core (reserved dev key) is web-only — the native host has no keyless dev path.
     openDev: () => Promise.reject(new Error('the demo (dev) core is not available on the native host')),
@@ -325,13 +340,20 @@ export function createNativeAppCore() {
 
     // --- membership / sharing (owner + member) ---
     provisionMember: async (passphrase) => {
-      const m = await call('core_provision_member', { passphrase });
+      let account;
+      try {
+        account = await api.accountUnlock(passphrase);
+      } catch {
+        account = await api.accountCreate(passphrase);
+      }
+      const m = await api.accountPublicIdentity();
       const authorPublicKey = u8(m.authorPublicKey);
       // SELF-CERT identity (OPE-543): the on-tree id derives from the author key IN RUST (core_derive_member_id)
       // — same single-source derivation as the worker's wasm `deriveMemberId`, never re-implemented in JS.
       return {
         memberId: await call('core_derive_member_id', { authorPublicKey }),
-        kdfParams: u8(m.kdfParams), authorPublicKey, hpkePublicKey: u8(m.hpkePublicKey),
+        kdfParams: null, authorPublicKey, hpkePublicKey: u8(m.hpkePublicKey),
+        recoveryCode: account?.recoveryCode ?? '',
       };
     },
     // Owner: mint a v3 share invite. The host supplies the engine pin (core_invite_material); the mint-time signer
@@ -370,9 +392,9 @@ export function createNativeAppCore() {
       });
       deleteMintRecord(inviteId);
     },
-    async addMember(docId, { passphrase, treeId, ownerMemberId, newMemberId, role, memberAuthorPublic, memberHpkePublic }) {
+    async addMember(docId, { treeId, ownerMemberId, newMemberId, role, memberAuthorPublic, memberHpkePublic }) {
       const out = await call('core_add_member', {
-        doc: docId, treeId: bytes(treeId), ownerMemberId, ownerPassphrase: passphrase,
+        doc: docId, treeId: bytes(treeId),
         member: { memberId: newMemberId, role, authorPublicKey: bytes(memberAuthorPublic), hpkePublicKey: bytes(memberHpkePublic) },
       });
       await publishAfterMembership(docId, false); // add: keyring-first, then advisory
@@ -384,16 +406,16 @@ export function createNativeAppCore() {
       }
       return { keyring: u8(out.keyring) };
     },
-    async removeMember(docId, { passphrase, treeId, ownerMemberId, removeMemberId }) {
+    async removeMember(docId, { treeId, removeMemberId }) {
       const out = await call('core_remove_member', {
-        doc: docId, treeId: bytes(treeId), ownerMemberId, ownerPassphrase: passphrase, removeMemberId,
+        doc: docId, treeId: bytes(treeId), removeMemberId,
       });
       await publishAfterMembership(docId, true); // remove: advisory-first, then the rotated keyring
       return { keyring: u8(out.keyring), historyPreserved: out.historyPreserved };
     },
-    async changeRole(docId, { passphrase, treeId, ownerMemberId, targetMemberId, newRole }) {
+    async changeRole(docId, { treeId, targetMemberId, newRole }) {
       const out = await call('core_change_role', {
-        doc: docId, treeId: bytes(treeId), ownerMemberId, ownerPassphrase: passphrase, targetMemberId, newRole,
+        doc: docId, treeId: bytes(treeId), targetMemberId, newRole,
       });
       await publishAfterMembership(docId, out.demote); // demote: advisory-first; promote: keyring-first
       return { keyring: u8(out.keyring), demote: out.demote };
@@ -401,8 +423,9 @@ export function createNativeAppCore() {
     // Fetches the keyring genesis-walk itself (transport.readKeyring → frameHops), so this presents the SAME
     // contract as the web worker's joinAsMember — the caller no longer pre-fetches `hops`. The transport must be
     // attached for `docId` first (attachTransport). Closes the OPE-434 join hops-fetch parity gap.
-    async joinAsMember({ docId, treeId, memberId, passphrase, memberKdfParams, engine, pin, pinnedRevision, pinnedHash }) {
+    async joinAsMember({ docId, treeId, passphrase, engine, pin, pinnedRevision, pinnedHash }) {
       remember(docId, treeId);
+      await api.accountUnlock(passphrase);
       const transport = transports.get(docId);
       if (!transport) {
         return Promise.reject(makeError('internal', { cause: `joinAsMember: no transport attached for ${docId}` }));
@@ -416,8 +439,7 @@ export function createNativeAppCore() {
         }
         const anchor = revisions[revisions.length - 1].bytes;
         const out = await call('core_join_dag_anchor', {
-          doc: docId, treeId: bytes(treeId), memberId, passphrase,
-          memberKdfParams: bytes(memberKdfParams), anchor: bytes(anchor), pin: bytes(u8(pin)),
+          doc: docId, treeId: bytes(treeId), anchor: bytes(anchor), pin: bytes(u8(pin)),
         });
         await call('core_bootstrap', { doc: docId });
         return out;
@@ -433,8 +455,7 @@ export function createNativeAppCore() {
       const { revisions } = await transport.readKeyring(docId, 1); // the full walk from genesis (rev 1)
       const hops = frameHops((revisions ?? []).map((r) => r.bytes));
       const out = await call('core_join_as_member', {
-        doc: docId, treeId: bytes(treeId), memberId, passphrase,
-        memberKdfParams: bytes(memberKdfParams), hops: bytes(hops), pinnedRevision, pinnedHash: bytes(pinnedHash),
+        doc: docId, treeId: bytes(treeId), hops: bytes(hops), pinnedRevision, pinnedHash: bytes(pinnedHash),
       });
       await call('core_bootstrap', { doc: docId });
       return out;

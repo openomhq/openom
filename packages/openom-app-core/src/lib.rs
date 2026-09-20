@@ -327,6 +327,111 @@ pub fn account_tree_role(
     openom_vault::sharing::account_tree_role(engine, keyring, &handle.account)
 }
 
+/// OOB-verified public admission material for a member being added to a tree.
+pub struct MemberAdmission<'a> {
+    pub member_id: &'a str,
+    pub role: &'a str,
+    pub author_public_key: &'a [u8],
+    pub hpke_public_key: &'a [u8],
+}
+
+/// Result of an account-authorized keyring mutation.
+pub struct MembershipChange {
+    pub keyring: Vec<u8>,
+    pub watermark: Vec<u8>,
+}
+
+/// Borrowed context shared by account-authorized tree membership mutations. The domain newtypes make tree and
+/// replica identifiers non-interchangeable while this wrapper keeps the call allocation-free.
+pub struct TreeMutationContext<'a> {
+    pub engine: EngineKind,
+    pub keyring: &'a [u8],
+    pub account: &'a AccountHandle,
+    pub tree_id: &'a TreeId,
+    pub replica_id: &'a ReplicaId,
+    pub min_revision: u32,
+}
+
+/// Add a member using the resident founder account.
+///
+/// # Errors
+/// Returns [`VaultError`] if the keyring is malformed, the account is unauthorized, or admission material is
+/// invalid.
+pub fn add_tree_member(
+    context: &TreeMutationContext<'_>,
+    member: &MemberAdmission<'_>,
+) -> Result<MembershipChange, VaultError> {
+    let changed = openom_vault::sharing::add_member_as_account(
+        context.engine,
+        context.keyring,
+        &context.account.account,
+        context.tree_id.as_bytes(),
+        context.account.member_id(),
+        context.replica_id.as_bytes(),
+        context.min_revision,
+        member.member_id,
+        member.role,
+        member.author_public_key,
+        member.hpke_public_key,
+    )?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
+/// Remove a member using the resident founder account.
+///
+/// # Errors
+/// Returns [`VaultError`] if the keyring is malformed, the account is unauthorized, or the target cannot be
+/// removed.
+pub fn remove_tree_member(
+    context: &TreeMutationContext<'_>,
+    member_id: &MemberId,
+) -> Result<MembershipChange, VaultError> {
+    let changed = openom_vault::sharing::remove_member_as_account(
+        context.engine,
+        context.keyring,
+        &context.account.account,
+        context.tree_id.as_bytes(),
+        context.account.member_id(),
+        context.replica_id.as_bytes(),
+        context.min_revision,
+        member_id.as_str(),
+    )?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
+/// Change a member role using the resident founder account.
+///
+/// # Errors
+/// Returns [`VaultError`] if the keyring is malformed, the account is unauthorized, or the requested role
+/// change is invalid.
+pub fn change_tree_member_role(
+    context: &TreeMutationContext<'_>,
+    member_id: &MemberId,
+    role: &str,
+) -> Result<MembershipChange, VaultError> {
+    let changed = openom_vault::sharing::change_role_as_account(
+        context.engine,
+        context.keyring,
+        &context.account.account,
+        context.tree_id.as_bytes(),
+        context.account.member_id(),
+        context.replica_id.as_bytes(),
+        context.min_revision,
+        member_id.as_str(),
+        role,
+    )?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
 /// The tree-specific output of [`provision_tree`]. Account persistence belongs to [`account_create`] and is
 /// deliberately absent here.
 pub struct TreeProvisioned<S: BlobStore> {
@@ -604,8 +709,8 @@ pub fn change_passphrase(
     })
 }
 
-/// The result of [`unlock_as_member`]: a ready member [`AppCore`] (already carrying its epoch-adopt secret and
-/// a §B3 resolver installed at construction) + the author identity + watermark.
+/// The result of [`unlock_tree_as_member`]: a ready member [`AppCore`] (already carrying its epoch-adopt secret
+/// and a §B3 resolver installed at construction) + the author identity + watermark.
 pub struct MemberUnlocked<S: BlobStore> {
     pub core: AppCore<S>,
     pub did_key: String,
@@ -655,50 +760,6 @@ pub fn unlock_tree_as_member<S: BlobStore>(
         did_key: unlocked.did_key,
         watermark: unlocked.watermark,
     })
-}
-
-/// Unlock a shared tree as a NON-owner member over `store`: verify against the pinned `trusted_signers` (chain)
-/// / resolve the anchor (dag), HPKE-unwrap the member DEKs with the passphrase + account KDF, and wrap a ready
-/// core that (a) retains the member's epoch-adopt secret so a later write-epoch rotation splices in without a
-/// passphrase (OPE-393) and (b) carries a §B3 resolver AT CONSTRUCTION — never the accept-all state where a
-/// sync before the first membership install would fold forgeries. `keyring` is the trusted member keyring head;
-/// `retained` is the prior-revision set for the look-behind (empty ⇒ older governing revisions Hold, fail-
-/// closed, until supplied); `trusted_signers` is the flat concatenated signer keys (empty for dag).
-///
-/// # Errors
-/// [`CoreError::Vault`] if member unlock fails (wrong passphrase / unpinned signer / removed member) or the
-/// resolver can't be built; [`CoreError`] if installing the resolver faults.
-#[allow(clippy::too_many_arguments)]
-pub fn unlock_as_member<S: BlobStore>(
-    store: S,
-    engine: EngineKind,
-    keyring: &[u8],
-    passphrase: &Passphrase,
-    member_kdf_params: &[u8],
-    tree_id: &[u8],
-    member_id: &str,
-    trusted_signers: &[u8],
-    replica_id: &[u8],
-    min_revision: u32,
-    retained: &[(u32, Vec<u8>)],
-    doc: impl Into<String>,
-) -> Result<MemberUnlocked<S>, CoreError> {
-    let u = openom_vault::sharing::unlock_as_member(
-        engine,
-        keyring,
-        passphrase,
-        member_kdf_params,
-        tree_id,
-        member_id,
-        trusted_signers,
-        replica_id,
-        min_revision,
-    )?;
-    let mut core = AppCore::new(u.did_key.clone(), u.sealer, Arc::new(store), doc, replica_id);
-    core.set_member_epoch_secret(u.epoch_secret);
-    let resolver = openom_vault::resolver_from(engine, keyring, retained)?;
-    core.set_membership(resolver)?;
-    Ok(MemberUnlocked { core, did_key: u.did_key, watermark: u.watermark })
 }
 
 #[cfg(test)]

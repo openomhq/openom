@@ -22,6 +22,7 @@ openom-app-core-host = { path = "../../packages/openom-app-core-host", features 
 openom-vault-host = { path = "../../packages/openom-vault-host", features = ["sqlite"] }
 # The keyring engine tag (chosen at runtime for NEW trees) + the passphrase newtype the lifecycle takes.
 openom-keyring-api = { path = "../../packages/openom-keyring-api" }
+openom-protocol = { path = "../../packages/openom-protocol" }
 openom-crypto = { path = "../../packages/openom-crypto" }
 tauri = { version = "2.11.5", features = [] }
 serde = { version = "1", features = ["derive"] }

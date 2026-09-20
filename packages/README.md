@@ -60,10 +60,11 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-keyring-dag** — Layer 2, the **dag** engine: openom's roles/signing/recovery wired onto `keyeo-dag`. Dependency-light but openom-domain-specific.
 - **openom-vault** — the lifecycle layer over both engines: provision/unlock/recover/change-passphrase + membership authoring behind `KeyringLifecycle`, with `AppVault` dispatching on the tree's `EngineKind`; owns the engine-neutral sealing core + the sharing/distribution + member epoch-adopt marshalling. rlib only (its wasm surface is `openom-app-core`). openom-coupled.
 - **openom-roles** — the authorization role model + capability→role policy (Viewer / Editor / Maintainer / Owner).
-- **openom-vault-host** — the native (Tauri) key-custody host: keeps Sealer sessions + keyring storage in Rust so the DEK never enters the webview.
+- **openom-vault-host** — the native persistence seam for one generation-stamped profile account plus per-tree keyring/watermark custody. Crypto and live sessions stay above it.
+- **openom-app-core-host** — the native (Tauri) application-core host: keeps one unlocked profile account and every live tree core in Rust, with role dispatch derived from verified keyrings.
 
 **App core** (the web app's single wasm worker)
-- **openom-app-core** — the web app's ONE Rust core, run inside a single Web Worker (wasm). Composes the claim engine (`openom-data-tree`) + the DEK sealer (`openom-sealer` / `openom-vault`) + the docsync loop (`openom-docsync`) over one local durable `store-blob` `BlobStore`, plus §B3 verify-on-ingest, the self-heal cover reader/writer, and the sharing/member-epoch-adopt marshalling. Keys never cross to JS; the native counterpart is `openom-vault-host` (Tauri).
+- **openom-app-core** — the shared Rust application core used by the browser worker (wasm) and `openom-app-core-host` (native). It composes claims, sealing, sync, durable account identity, and sharing/member-epoch operations.
 
 Dependencies point downward across those layers; the full graph is derivable from the `Cargo.toml`s
 (`cargo tree`). *(A generated dependency table belongs here — TODO once the rollout settles.)*

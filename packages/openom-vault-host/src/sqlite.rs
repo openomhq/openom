@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection};
 use store_schema::ResetPolicy;
 
-use crate::VaultStore;
+use crate::{AccountGeneration, AccountKeystore, AccountRecord, VaultStore};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
        tree_key TEXT PRIMARY KEY,
@@ -26,9 +26,10 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
        tree_key  TEXT PRIMARY KEY,
        watermark BLOB NOT NULL
      );
-     CREATE TABLE IF NOT EXISTS keystores (
-       tree_key TEXT PRIMARY KEY,
-       bytes    BLOB NOT NULL
+     CREATE TABLE IF NOT EXISTS account (
+       singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+       bytes      BLOB NOT NULL,
+       generation INTEGER NOT NULL
      );";
 
 /// The schema version stamped in the DB header (`PRAGMA user_version`). BUMP THIS whenever [`SCHEMA`] changes
@@ -36,8 +37,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
 /// the stale DB to a `.bak` — this store holds the only local wrapped-DEK copy + the anti-rollback watermark, so
 /// it is NEVER destroyed) and FAILS CLOSED in release (errors, touches nothing). See [`store_schema`].
 ///
-/// v2 (OPE-542/543): added the `keystores` table (the durable-account keystore blob).
-const SCHEMA_VERSION: i64 = 2;
+/// v3: replaced per-tree keystores with one generation-stamped profile account.
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct SqliteVaultStore {
     conn: Mutex<Connection>,
@@ -52,8 +53,13 @@ impl SqliteVaultStore {
     /// Returns an error string if the database can't be opened, or (release) if the on-disk schema version
     /// doesn't match this build.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
-        let conn = store_schema::open_versioned(path.as_ref(), SCHEMA_VERSION, SCHEMA, ResetPolicy::Preserve)
-            .map_err(|e| e.to_string())?;
+        let conn = store_schema::open_versioned(
+            path.as_ref(),
+            SCHEMA_VERSION,
+            SCHEMA,
+            ResetPolicy::Preserve,
+        )
+        .map_err(|e| e.to_string())?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -65,8 +71,10 @@ impl SqliteVaultStore {
     /// Returns an error string if the in-memory database can't be opened or the schema can't be applied.
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        conn.execute_batch(&format!("{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};"))
-            .map_err(|e| e.to_string())?;
+        conn.execute_batch(&format!(
+            "{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};"
+        ))
+        .map_err(|e| e.to_string())?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -134,12 +142,17 @@ impl VaultStore for SqliteVaultStore {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    fn load_keystore(&self, tree_key: &str) -> Result<Option<Vec<u8>>, String> {
+    fn load_account(&self) -> Result<Option<AccountRecord>, String> {
         self.conn()
             .query_row(
-                "SELECT bytes FROM keystores WHERE tree_key = ?1",
-                params![tree_key],
-                |r| r.get::<_, Vec<u8>>(0),
+                "SELECT bytes, generation FROM account WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(AccountRecord {
+                        keystore: AccountKeystore::new(row.get(0)?),
+                        generation: AccountGeneration::new(row.get(1)?),
+                    })
+                },
             )
             .map(Some)
             .or_else(|e| match e {
@@ -148,16 +161,20 @@ impl VaultStore for SqliteVaultStore {
             })
     }
 
-    fn commit_keystore(&self, tree_key: &str, keystore: &[u8]) -> Result<(), String> {
-        // Opaque write-through bytes (the account's wrapped identity/root; no crypto here), last write wins.
-        self.conn()
+    fn commit_account(&self, account: &AccountRecord) -> Result<(), String> {
+        let changed = self
+            .conn()
             .execute(
-                "INSERT INTO keystores (tree_key, bytes) VALUES (?1, ?2)
-                 ON CONFLICT(tree_key) DO UPDATE SET bytes = excluded.bytes",
-                params![tree_key, keystore],
+                "INSERT INTO account (singleton, bytes, generation) VALUES (1, ?1, ?2)
+                 ON CONFLICT(singleton) DO UPDATE SET bytes = excluded.bytes, generation = excluded.generation
+                 WHERE excluded.generation >= account.generation",
+                params![account.keystore.as_bytes(), account.generation.get()],
             )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err("account generation rollback".into());
+        }
+        Ok(())
     }
 }
 
@@ -177,6 +194,17 @@ mod tests {
                 .unwrap();
             s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 3])
                 .unwrap();
+            s.commit_account(&AccountRecord {
+                keystore: AccountKeystore::new(b"wrapped-account".to_vec()),
+                generation: AccountGeneration::new(7),
+            })
+            .unwrap();
+            assert!(s
+                .commit_account(&AccountRecord {
+                    keystore: AccountKeystore::new(b"rolled-back-account".to_vec()),
+                    generation: AccountGeneration::new(6),
+                })
+                .is_err());
         }
         {
             let s = SqliteVaultStore::open(&path).unwrap();
@@ -187,6 +215,13 @@ mod tests {
             assert_eq!(s.watermark("my-tree").unwrap(), vec![0, 0, 0, 3]);
             assert_eq!(s.load_keyring("absent").unwrap(), None);
             assert!(s.watermark("absent").unwrap().is_empty());
+            assert_eq!(
+                s.load_account().unwrap(),
+                Some(AccountRecord {
+                    keystore: AccountKeystore::new(b"wrapped-account".to_vec()),
+                    generation: AccountGeneration::new(7),
+                })
+            );
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(path.with_extension(format!("sqlite{suffix}")));
@@ -204,9 +239,9 @@ mod tests {
         assert_eq!(
             (SCHEMA_VERSION, shape.as_str()),
             (
-                2,
-                "keyrings(tree_key:TEXT nn=0 pk=1, bytes:BLOB nn=1 pk=0)\n\
-                 keystores(tree_key:TEXT nn=0 pk=1, bytes:BLOB nn=1 pk=0)\n\
+                3,
+                "account(singleton:INTEGER nn=0 pk=1, bytes:BLOB nn=1 pk=0, generation:INTEGER nn=1 pk=0)\n\
+                 keyrings(tree_key:TEXT nn=0 pk=1, bytes:BLOB nn=1 pk=0)\n\
                  watermarks(tree_key:TEXT nn=0 pk=1, watermark:BLOB nn=1 pk=0)\n"
             ),
             "SCHEMA changed: update this golden AND bump SCHEMA_VERSION"

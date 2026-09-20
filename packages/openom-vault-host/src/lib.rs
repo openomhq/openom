@@ -3,6 +3,46 @@
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
+/// Opaque serialized account-keystore bytes. A distinct type prevents keyring, watermark, and account bytes
+/// from being interchanged at the public persistence boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountKeystore(Vec<u8>);
+
+impl AccountKeystore {
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Highest authenticated account-keystore generation observed by this profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AccountGeneration(u64);
+
+impl AccountGeneration {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// The singleton profile account record. Keystore and generation are committed atomically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountRecord {
+    pub keystore: AccountKeystore,
+    pub generation: AccountGeneration,
+}
+
 // ---------------------------------------------------------------- storage seam
 
 /// Persistence for the keyring (a wrapped DEK — not secret, needs durability) and the keyring-revision
@@ -39,19 +79,15 @@ pub trait VaultStore: Send + Sync {
         watermark: &[u8],
     ) -> std::result::Result<(), String>;
 
-    /// The persisted durable-account keystore blob (OPE-542/543) for this tree (`None` if none). OPAQUE bytes —
-    /// the account's wrapped identity/root; no crypto lives here, the store just durably holds the blob the dag
-    /// (owner-as-member) engine hands back at provision and needs again on unlock / recover / passphrase change.
-    /// Empty / `None` for the chain engine, which has no account keystore.
+    /// The singleton profile account record (`None` before account creation).
     ///
     /// # Errors
     /// Returns an error string if the host store read fails.
-    fn load_keystore(&self, tree_key: &str) -> std::result::Result<Option<Vec<u8>>, String>;
+    fn load_account(&self) -> std::result::Result<Option<AccountRecord>, String>;
 
-    /// Persist the account keystore blob for this tree (write-through opaque bytes; last write wins). Called
-    /// at provision and after any flow that re-wraps the account (recover / change-passphrase).
+    /// Atomically persist the singleton account keystore and its authenticated generation.
     ///
     /// # Errors
     /// Returns an error string if the host store write fails.
-    fn commit_keystore(&self, tree_key: &str, keystore: &[u8]) -> std::result::Result<(), String>;
+    fn commit_account(&self, account: &AccountRecord) -> std::result::Result<(), String>;
 }

@@ -46,22 +46,19 @@ isn't duplicated here. **WSL-SETUP.md** has the full Windows→WSL2 Android brin
 
 The Tauri v2 native shell: it builds the desktop app and the Android app around the same
 `apps/app/` web frontend and exposes the Rust core to it through `#[tauri::command]` invoke
-handlers. Two pieces of managed state: `AppStore` (opaque ciphertext persistence — the doc store,
-unchanged in spirit from the web app's) and `Vault = Arc<VaultHost<SqliteVaultStore>>` — the
-key-custody host. The custody boundary is the reason this crate exists as a distinct native shell
-at all: the DEK lives in `VaultHost`, inside this process, and **never crosses the `invoke`
-boundary into the webview**. Every vault command hands JS back an opaque `sealerId` plus public
-metadata — never key material. The two SQLite files it opens in the Tauri app-data dir
-(`tree.sqlite`, `vault.sqlite`) are kept deliberately separate, so a copied/restored tree can't
-drag the anti-rollback watermark along with it.
+handlers. Its managed `Arc<AppCoreHost<SqliteVaultStore>>` owns one unlocked profile account and all live tree
+cores. The custody boundary is the reason this crate exists as a distinct native shell: account secrets and
+tree DEKs remain inside Rust and **never cross the `invoke` boundary into the webview**. `vault.sqlite` stores
+one generation-stamped wrapped account plus per-tree keyrings/watermarks, separately from each tree's local
+blob directory so restoring tree data cannot silently roll back the custody floor.
 
 It is **not** where the logic or the tests live. Every `#[command]` here is a thin wrapper: it
-(de)serializes arguments, runs the Argon2id-bearing flows
-(`provision`/`unlock`/`recover`/`change_passphrase`, and sharing) as `async` +
-`spawn_blocking` so the ~1s KDF doesn't freeze the Tauri IPC main thread, and calls straight into
-`openom-vault-host`'s `VaultHost` or `journal`'s `DocStore`. The substance — and the real,
+(de)serializes arguments, runs account create/unlock/recover/passphrase changes as `async` + `spawn_blocking`
+so the KDF does not freeze the Tauri IPC main thread, and calls straight into `openom-app-core-host`. Tree
+provision, reopen, join, and membership operations borrow the resident account and never accept per-tree
+passphrases or member KDF material. The substance — and the real,
 cargo-testable contract — lives in those crates, which build without `tauri`; see
-`packages/openom-vault-host/README.md` for the custody guarantees this crate just wires up. This
+`packages/openom-app-core-host/README.md` for the custody guarantees this crate just wires up. This
 crate also does not implement mobile hardening (mandatory background-lock, `FLAG_SECURE`,
 hardware-gated biometrics) — that's the not-yet-built `openom-mobile` Tauri plugin (see VERIFY.md,
 "Not yet built (Phase 2)").

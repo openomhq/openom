@@ -16,7 +16,9 @@ import init, {
   accountUnlock as wasmAccountUnlock,
   accountRecover as wasmAccountRecover,
   accountChangePassphrase as wasmAccountChangePassphrase,
+  accountRotateRoot as wasmAccountRotateRoot,
   accountPublicIdentity as wasmAccountPublicIdentity,
+  accountRegisterProof as wasmAccountRegisterProof,
   accountTreeRole as wasmAccountTreeRole,
   provisionTree as wasmProvisionTree,
   unlockTree as wasmUnlockTree,
@@ -483,6 +485,19 @@ function requireAccount() {
   return account;
 }
 
+function publicAccountIdentity() {
+  const identity = wasmAccountPublicIdentity(requireAccount());
+  try {
+    return {
+      memberId: identity.memberId,
+      authorPublicKey: identity.authorPublicKey,
+      hpkePublicKey: identity.hpkePublicKey,
+    };
+  } finally {
+    identity.free();
+  }
+}
+
 async function verifyAccountPassphrase(passphrase) {
   const saved = await loadAccount();
   if (!saved) throw new Error('no account keystore stored for this profile');
@@ -544,6 +559,117 @@ const api = {
   /** Pre-warm the wasm init so the first open is fast. */
   async warm() {
     await ensureInit();
+  },
+
+  /** Create and durably persist this browser profile's singleton account. */
+  async accountCreate(passphrase) {
+    await ensureInit();
+    if (account || await loadAccount()) throw new Error('profile account already exists');
+    let created;
+    try {
+      created = wasmAccountCreate(passphrase);
+      await saveAccount(created.keystore, created.generation);
+      replaceAccount(created.takeHandle());
+      return {
+        ...publicAccountIdentity(),
+        recoveryCode: created.recoveryCode,
+        generation: created.generation,
+      };
+    } catch (e) {
+      throw vaultError(e);
+    } finally {
+      created?.free();
+    }
+  },
+
+  /** Unlock the persisted singleton account and retain its secrets inside this worker. */
+  async accountUnlock(passphrase) {
+    await ensureInit();
+    const saved = await loadAccount();
+    if (!saved) throw new Error('no account keystore stored for this profile');
+    let unlocked;
+    try {
+      unlocked = wasmAccountUnlock(passphrase, saved.keystore, saved.generation);
+      replaceAccount(unlocked);
+      unlocked = null;
+      return publicAccountIdentity();
+    } catch (e) {
+      throw vaultError(e);
+    } finally {
+      unlocked?.free();
+    }
+  },
+
+  /** Recover the persisted account, rotating its recovery code and authenticated generation. */
+  async accountRecover({ recoveryCode, newPassphrase }) {
+    await ensureInit();
+    const saved = await loadAccount();
+    if (!saved) throw new Error('no account keystore stored for this profile');
+    let recovered;
+    try {
+      recovered = wasmAccountRecover(recoveryCode, newPassphrase, saved.keystore, saved.generation);
+      await saveAccount(recovered.keystore, recovered.generation);
+      replaceAccount(recovered.takeHandle());
+      return {
+        ...publicAccountIdentity(),
+        recoveryCode: recovered.recoveryCode,
+        generation: recovered.generation,
+      };
+    } catch (e) {
+      throw vaultError(e);
+    } finally {
+      recovered?.free();
+    }
+  },
+
+  /** Re-verify the current passphrase, then re-wrap only the profile account under the replacement. */
+  async accountChangePassphrase({ current, next }) {
+    await api.accountUnlock(current);
+    let changed;
+    try {
+      changed = wasmAccountChangePassphrase(requireAccount(), next);
+      await saveAccount(changed.keystore, changed.generation);
+      return { generation: changed.generation };
+    } catch (e) {
+      try { account?.free(); } catch { /* already freed */ }
+      account = null;
+      throw vaultError(e);
+    } finally {
+      changed?.free();
+    }
+  },
+
+  /** Return only the resident account's public admission identity. */
+  async accountPublicIdentity() {
+    await ensureInit();
+    return publicAccountIdentity();
+  },
+
+  /** Rotate the account root and recovery credential while retaining its stable identity keys. */
+  async accountRotateRoot({ passphrase }) {
+    await ensureInit();
+    let rotated;
+    try {
+      rotated = wasmAccountRotateRoot(requireAccount(), passphrase);
+      await saveAccount(rotated.keystore, rotated.generation);
+      return { recoveryCode: rotated.recoveryCode, generation: rotated.generation };
+    } catch (e) {
+      try { account?.free(); } catch { /* already freed */ }
+      account = null;
+      throw vaultError(e);
+    } finally {
+      rotated?.free();
+    }
+  },
+
+  /** Sign the server's frozen registration proof bytes without exposing the account signing key. */
+  async accountRegisterProof({ issuer, subject, timestamp }) {
+    await ensureInit();
+    try {
+      return wasmAccountRegisterProof(requireAccount(), issuer, subject, timestamp);
+    } catch (e) {
+      throw vaultError(e);
+    }
   },
 
   /** Set the compaction cadence K — the log-object count that triggers a snapshot per tick (OPE-409). */

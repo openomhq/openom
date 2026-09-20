@@ -132,6 +132,29 @@ test('app-core: real keyring lifecycle — provision, mint, reload, unlock', asy
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+for (const engine of ['chain', 'dag'] as const) {
+  test(`app-core: one durable account owns and joins multiple trees (${engine})`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+
+    await page.goto('/e2e/sync-worker-harness.html');
+    await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+    const result = await page.evaluate((eng) => (
+      window as any
+    ).__syncWorker.durableAccountAcrossTrees(eng), engine);
+
+    expect(new Set(result.memberIds).size, 'owned and joined identity stays profile-stable').toBe(1);
+    expect(result.registrationProofLength, 'registration proof is signed inside the worker').toBe(64);
+    expect(result.rotatedRecoveryCodeLength, 'root rotation returns a replacement recovery code').toBeGreaterThan(20);
+    expect(result.oldPassRejected, 'the old profile passphrase is revoked').toBe(true);
+    expect(result.joinedDid, 'the account joined the shared tree').toBeTruthy();
+    expect(result.reopenedDids.every((did: string) => did.length > 0), 'all trees reopen').toBe(true);
+    expect(result.reopenedDids[2], 'joined-tree reopen keeps the same author identity').toBe(result.joinedDid);
+    expect(errors, 'no uncaught page errors').toEqual([]);
+  });
+}
+
 test('app-core: an owner shares a tree and a member joins + verifies through the worker', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
