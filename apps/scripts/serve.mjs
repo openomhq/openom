@@ -58,8 +58,11 @@ createServer(async (req, res) => {
     // Same substitution the deploy does, so the placeholder never reaches a
     // browser — locally the origin is this server.
     if (extname(file) === '.html') {
-      // Local dev has the demo on by default (set OPENOM_DEMO=0 to match production).
-      const demo = process.env.OPENOM_DEMO === '0' ? 'false' : 'true';
+      // Local dev has the demo on by default. OPENOM_DEMO=0 → production welcome (start-only);
+      // OPENOM_DEMO=both → the e2e/test welcome that offers BOTH the demo AND the real start flow.
+      const demo = process.env.OPENOM_DEMO === '0' ? 'false'
+        : process.env.OPENOM_DEMO === 'both' ? 'both'
+        : 'true';
       // The managed sync backend: the docker-compose server by default, so synced mode works in dev
       // (set OPENOM_SERVER='' to run local-only). Substituted like %DEMO% so the placeholder never ships.
       const server = process.env.OPENOM_SERVER ?? 'http://localhost:6060';

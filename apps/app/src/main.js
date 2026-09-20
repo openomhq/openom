@@ -149,7 +149,11 @@ class App {
     // flag substituted into index.html (%DEMO% → false in production, true locally and on a demo
     // deployment). A production user can't turn it on: no welcome affordance, and the ?demo
     // shortcut below is inert unless the flag is set.
-    this.demoEnabled = document.querySelector('meta[name="openom:demo"]')?.content === 'true';
+    // %DEMO%: 'false' = production (start-only), 'true' = a demo/preview build (demo-only), 'both' = the
+    // e2e/test welcome offering both. The demo affordance and the real start flow are independent flags.
+    const demoFlag = document.querySelector('meta[name="openom:demo"]')?.content;
+    this.demoEnabled = demoFlag === 'true' || demoFlag === 'both';
+    this.startEnabled = demoFlag === 'false' || demoFlag === 'both';
     this.serverUrl = readServerUrl(); // null ⇒ local-only (sync stays off; no account wall)
     // A local account is the identity every provision/unlock binds to (memberId == the vault member ==
     // the token's sub). Ensure one exists for this dev context; the account UI (later) creates/switches more.

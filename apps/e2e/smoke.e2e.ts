@@ -2,8 +2,9 @@ import { test, expect } from '@playwright/test';
 
 // @integration — these boot the WHOLE app. Excluded from the default `test:e2e` run; invoke
 // with `pnpm test:e2e:full`. Each test gets a fresh browser context, so the keyring
-// (IndexedDB) starts empty → the app opens on the welcome gate. serve.mjs sets %DEMO%=true
-// locally, so the demo affordance is present here (it's absent in production).
+// (IndexedDB) starts empty → the app opens on the welcome gate. The Playwright webServer runs
+// serve.mjs with OPENOM_DEMO='both', so the welcome gate shows BOTH the demo affordance (used by
+// the demo test) and the real "start your family tree" onboarding (used by the rest).
 
 test('welcome → demo enters the (encrypted) tree @integration', async ({ page }) => {
   const errors: string[] = [];

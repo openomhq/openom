@@ -21,6 +21,10 @@ export default defineConfig({
   // serve.mjs is a plain static server; Playwright starts it and waits for the port.
   webServer: {
     command: 'node scripts/serve.mjs',
+    // @integration tests need BOTH the demo affordance (one test) and the "start your family tree" onboarding
+    // (the rest), so the welcome gate must show both — that's OPENOM_DEMO='both'. (Only applies to a server
+    // Playwright STARTS; kill any stale serve first so it isn't reused with the wrong flag.)
+    env: { ...process.env, OPENOM_DEMO: 'both' },
     port: 5173,
     reuseExistingServer: true,
     timeout: 30_000,
