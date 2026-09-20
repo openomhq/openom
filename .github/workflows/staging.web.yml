@@ -47,13 +47,13 @@ jobs:
           mkdir -p _site/functions
           cp apps/staging-gate/_middleware.js _site/functions/_middleware.js
 
-      # Fill %SITE_URL% / %DEMO% / %SERVER% (openom:server meta → the RemoteStore base URL). DEMO=false
-      # (real backend, account wall on), SERVER = the custom API domain (the raw Function URL is locked).
+      # Fill %SITE_URL% / %LANDING% / %SERVER% (openom:server meta → the RemoteStore base URL). LANDING=live
+      # (real onboarding + backend, account wall on), SERVER = the custom API domain (the raw Function URL is locked).
       - name: Substitute deploy-time placeholders
         working-directory: apps
         env:
           SITE_URL: ${{ env.SITE_URL }}
-          DEMO: "false"
+          OPENOM_LANDING: "live"
           OPENOM_SERVER: ${{ env.API_URL }}
         run: node scripts/site-url.mjs ../_site
 

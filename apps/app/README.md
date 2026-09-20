@@ -65,7 +65,7 @@ plus `tree.revision`-driven re-render is the entire rendering model.
 ## Layout
 
 ```
-index.html            entry HTML: loads src/main.js as a module, %SITE_URL%/%DEMO% placeholders
+index.html            entry HTML: loads src/main.js as a module, %SITE_URL%/%LANDING% placeholders
                        substituted at serve/deploy time.
 src/main.js            wires the store stack, the sealer/vault, the lock policy, and the view
                        router into one running app.

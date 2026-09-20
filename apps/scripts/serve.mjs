@@ -58,15 +58,16 @@ createServer(async (req, res) => {
     // Same substitution the deploy does, so the placeholder never reaches a
     // browser — locally the origin is this server.
     if (extname(file) === '.html') {
-      // Local dev has the demo on by default. OPENOM_DEMO=0 → production welcome (start-only);
-      // OPENOM_DEMO=both → the e2e/test welcome that offers BOTH the demo AND the real start flow.
-      const demo = process.env.OPENOM_DEMO === '0' ? 'false'
-        : process.env.OPENOM_DEMO === 'both' ? 'both'
-        : 'true';
+      // The first-run LANDING mode (substituted into %LANDING%). Local dev defaults to 'demo'; set
+      // OPENOM_LANDING=live for the production welcome (onboarding only) or =test for the e2e welcome that
+      // offers BOTH the demo and the onboarding. An unknown value falls back to 'demo'.
+      const landing = ['live', 'demo', 'test'].includes(process.env.OPENOM_LANDING)
+        ? process.env.OPENOM_LANDING
+        : 'demo';
       // The managed sync backend: the docker-compose server by default, so synced mode works in dev
-      // (set OPENOM_SERVER='' to run local-only). Substituted like %DEMO% so the placeholder never ships.
+      // (set OPENOM_SERVER='' to run local-only). Substituted like %LANDING% so the placeholder never ships.
       const server = process.env.OPENOM_SERVER ?? 'http://localhost:6060';
-      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL).replaceAll('%DEMO%', demo).replaceAll('%SERVER%', server);
+      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL).replaceAll('%LANDING%', landing).replaceAll('%SERVER%', server);
     }
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',

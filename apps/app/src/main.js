@@ -145,15 +145,14 @@ class App {
     this.autoLockMinutes = loadAutoLock();
     this.lockPolicy = createLockPolicy({ onLock: (reason) => this.lockNow(reason) });
     this.lockPolicy.setIdleMinutes(this.autoLockMinutes);
-    // The demo is not part of the product — dev / marketing only. It's enabled by a build-time
-    // flag substituted into index.html (%DEMO% → false in production, true locally and on a demo
-    // deployment). A production user can't turn it on: no welcome affordance, and the ?demo
-    // shortcut below is inert unless the flag is set.
-    // %DEMO%: 'false' = production (start-only), 'true' = a demo/preview build (demo-only), 'both' = the
-    // e2e/test welcome offering both. The demo affordance and the real start flow are independent flags.
-    const demoFlag = document.querySelector('meta[name="openom:demo"]')?.content;
-    this.demoEnabled = demoFlag === 'true' || demoFlag === 'both';
-    this.startEnabled = demoFlag === 'false' || demoFlag === 'both';
+    // The first-run LANDING experience is a build-time enum substituted into index.html (%LANDING% →
+    // the openom:landing meta): 'live' = production (real onboarding only), 'demo' = a demo/preview build
+    // (the sample-tree demo only), 'test' = the e2e build (both, so the demo + onboarding integration tests
+    // coexist). The demo and start affordances are INDEPENDENT flags derived from it; the ?demo=1 shortcut
+    // below is inert unless the demo affordance is on. Missing meta ⇒ 'live' (the safe, no-demo default).
+    const landing = document.querySelector('meta[name="openom:landing"]')?.content;
+    this.demoEnabled = landing === 'demo' || landing === 'test';
+    this.startEnabled = landing !== 'demo'; // 'live' or 'test' (and the safe default when unset)
     this.serverUrl = readServerUrl(); // null ⇒ local-only (sync stays off; no account wall)
     // A local account is the identity every provision/unlock binds to (memberId == the vault member ==
     // the token's sub). Ensure one exists for this dev context; the account UI (later) creates/switches more.

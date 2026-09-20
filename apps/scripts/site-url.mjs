@@ -41,16 +41,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   const url = await siteUrl();
-  // Demo affordance is OFF unless a demo deployment opts in (DEMO=true in the env or .env.demo).
-  // Production never sets it, so the flag defaults to false — the safe, no-demo state.
-  let demo = process.env.DEMO;
-  if (demo == null) {
+  // The first-run LANDING mode for the deploy: 'demo' (a demo/preview deployment) or 'live' (production —
+  // real onboarding). Read from OPENOM_LANDING (the env or the .env.demo fallback); anything but 'demo'
+  // defaults to 'live', the safe no-demo state. ('test' is e2e-only and never a deploy value.)
+  let landing = process.env.OPENOM_LANDING;
+  if (landing == null) {
     try {
       const env = await readFile(join(HERE, '..', '.env.demo'), 'utf8');
-      demo = env.match(/^\s*DEMO\s*=\s*(.+?)\s*$/m)?.[1];
-    } catch { /* no .env.demo — demo stays off */ }
+      landing = env.match(/^\s*OPENOM_LANDING\s*=\s*(.+?)\s*$/m)?.[1];
+    } catch { /* no .env.demo — landing stays live */ }
   }
-  demo = demo === 'true' ? 'true' : 'false';
+  landing = landing === 'demo' ? 'demo' : 'live';
   // The managed sync backend URL: empty unless a deployment sets OPENOM_SERVER, so production is
   // local-only (no account wall) until a server is wired.
   const server = process.env.OPENOM_SERVER ?? '';
@@ -58,7 +59,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   for await (const file of htmlFiles(target)) {
     const before = await readFile(file, 'utf8');
     if (!before.includes('%SITE_URL%')) continue;
-    await writeFile(file, before.replaceAll('%SITE_URL%', url).replaceAll('%DEMO%', demo).replaceAll('%SERVER%', server));
+    await writeFile(file, before.replaceAll('%SITE_URL%', url).replaceAll('%LANDING%', landing).replaceAll('%SERVER%', server));
     touched++;
   }
   console.log('site-url → ' + url + ' · demo=' + demo + ' · server=' + (server || '(none)') + ' (' + touched + ' file' + (touched === 1 ? '' : 's') + ')');

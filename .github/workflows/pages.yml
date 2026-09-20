@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages
 
 # Publishes the web app to GitHub Pages. The app ships as Tauri loads it — no bundler — but it loads ONE
 # gitignored build artifact, the openom-app-core wasm, which CI must compile before assembling the site.
-# Then %SITE_URL% / %DEMO% are filled in.
+# Then %SITE_URL% / %LANDING% are filled in.
 
 on:
   workflow_dispatch:
@@ -53,13 +53,13 @@ jobs:
 
       # Absolute origin for the social-preview meta. The deploy knows its own
       # URL, so .env.demo is only the fallback for local and fork runs.
-      # This Pages deploy is a public DEMO/preview (no managed server wired → local-only), so turn the demo
-      # affordance ON. Production builds that want the no-demo state simply don't set DEMO.
+      # This Pages deploy is a public DEMO/preview (no managed server wired → local-only), so the landing is
+      # the demo. A production deploy sets OPENOM_LANDING=live (or omits it — 'live' is the default).
       - name: Fill in SITE_URL
         working-directory: apps
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
-          DEMO: "true"
+          OPENOM_LANDING: "demo"
         run: node scripts/site-url.mjs ../_site
 
       - uses: actions/upload-pages-artifact@v3
