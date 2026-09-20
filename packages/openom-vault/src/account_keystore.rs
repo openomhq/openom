@@ -332,6 +332,34 @@ impl AccountKeystore {
             .map_err(|e| VaultError::BadKeyring(format!("account keystore decode: {e}")))
     }
 
+    /// Refuse a keystore whose `generation` is below the client's floor — the CLIENT half of credential
+    /// revocation (OPE-549). After [`Self::rotate_account_root`] bumps `generation` to lock out a leaked
+    /// passphrase/recovery code, a malicious or merely stale server that served the pre-rotation blob would
+    /// silently re-enable the revoked credential; the client, holding a persisted monotonic floor (the max
+    /// generation it has ever seen for this account), refuses any blob beneath it. Equal is allowed — an
+    /// idempotent re-fetch of the current blob. Floor *persistence* and the fetch call site are the session
+    /// layer's (OPE-8); this is the pure, always-enforceable check, mirroring the server's PUT floor.
+    ///
+    /// # Errors
+    /// [`VaultError::KeystoreGenerationRollback`] if `self.generation < floor`.
+    pub fn check_generation_floor(&self, floor: u64) -> Result<(), VaultError> {
+        if self.generation < floor {
+            return Err(VaultError::KeystoreGenerationRollback { floor, got: self.generation });
+        }
+        Ok(())
+    }
+
+    /// Decode a keystore blob and enforce the generation floor in one step — the guarded sibling of
+    /// [`Self::from_bytes`] for the session's keystore-fetch path.
+    ///
+    /// # Errors
+    /// As [`Self::from_bytes`], plus [`VaultError::KeystoreGenerationRollback`] below the floor.
+    pub fn from_bytes_with_floor(bytes: &[u8], floor: u64) -> Result<Self, VaultError> {
+        let ks = Self::from_bytes(bytes)?;
+        ks.check_generation_floor(floor)?;
+        Ok(ks)
+    }
+
     /// Verify the plaintext public fields against the identity derived from the unwrapped `identity_master` —
     /// closes the KDF-downgrade / pubkey-swap tamper vector.
     fn verify_public_fields(&self, root: &RootKeys) -> Result<(), VaultError> {
@@ -416,6 +444,29 @@ mod tests {
         assert_eq!(u2.member_id, ks.member_id);
         assert!(ks2.unlock_with_recovery(&new_code).is_ok());
         assert!(ks2.unlock_with_recovery(&old_code).is_err());
+    }
+
+    #[test]
+    fn generation_floor_refuses_a_rolled_back_keystore() {
+        let (ks, _old_code, unlocked) = AccountKeystore::create(pass()).unwrap();
+        let (ks2, _new_code) = ks.rotate_account_root(&unlocked, pass()).unwrap();
+        let floor = ks2.generation; // the client has now seen generation 1
+        assert_eq!(floor, 1);
+
+        // a server serving the pre-rotation blob (generation 0) is refused — the revoked recovery code stays
+        // revoked because the stale keystore never loads.
+        let stale = ks.to_bytes().unwrap();
+        assert!(matches!(
+            AccountKeystore::from_bytes_with_floor(&stale, floor),
+            Err(VaultError::KeystoreGenerationRollback { floor: 1, got: 0 })
+        ));
+        assert!(ks.check_generation_floor(floor).is_err());
+
+        // the current blob at the floor loads (equal ⇒ idempotent re-fetch), and so would a higher generation.
+        let current = ks2.to_bytes().unwrap();
+        assert!(AccountKeystore::from_bytes_with_floor(&current, floor).is_ok());
+        assert!(ks2.check_generation_floor(floor).is_ok());
+        assert!(ks2.check_generation_floor(0).is_ok());
     }
 
     #[test]

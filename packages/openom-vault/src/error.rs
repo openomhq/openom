@@ -60,6 +60,11 @@ pub enum VaultError {
     /// refused rather than silently dropped, since dropping the floor would drop rollback protection.
     #[error("malformed anti-rollback watermark")]
     MalformedWatermark,
+    /// The loaded/served account keystore blob is below the client's generation floor (the max generation ever
+    /// seen for this account) — a rollback that would silently re-enable a passphrase/recovery code revoked by a
+    /// root rotation. The keystore analogue of [`Self::RevisionRollback`]; refused, never accepted.
+    #[error("account keystore generation rolled back: floor {floor}, loaded {got}")]
+    KeystoreGenerationRollback { floor: u64, got: u64 },
     /// A keyring/membership ORCHESTRATION failure raised by [`crate::sharing`] — a served history that
     /// forks/rolls back, an invite-pin mismatch, a malformed hop buffer, etc. Carries the verbatim
     /// diagnostic (these are boundary-marshalling checks, not one of the typed domain failures above).
