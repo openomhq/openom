@@ -28,6 +28,31 @@ use crate::AppCore;
 /// [`import`](AppCoreHandle::import), and an OPFS-backed `BlobStore` swaps in here later.
 type Store = MemoryBlob;
 
+/// One profile's unlocked durable account. The worker owns exactly one of these and borrows it for every
+/// tree operation; secret key material never crosses into JavaScript.
+#[wasm_bindgen]
+pub struct AccountHandle {
+    inner: crate::AccountHandle,
+}
+
+#[wasm_bindgen]
+impl AccountHandle {
+    /// The stable self-certifying member id shared by every owned and joined tree.
+    #[wasm_bindgen(getter, js_name = memberId)]
+    #[must_use]
+    pub fn member_id(&self) -> String {
+        self.inner.member_id().to_string()
+    }
+
+    /// The authenticated account-keystore generation currently resident in this handle.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // account generations remain far below JS's exact-integer ceiling
+    pub fn generation(&self) -> f64 {
+        self.inner.generation() as f64
+    }
+}
+
 /// One tree's core, as the worker sees it. Owns the engine + sealer (DEK) + local store + replicator.
 #[wasm_bindgen]
 pub struct AppCoreHandle {
@@ -518,6 +543,178 @@ impl AppCoreHandle {
 }
 
 /// The result of a lifecycle flow (`provision` / `unlock`): the ready core `handle` plus the non-secret
+/// The public admission material for the worker-resident account.
+#[wasm_bindgen(getter_with_clone)]
+pub struct AccountPublicIdentity {
+    #[wasm_bindgen(js_name = memberId)]
+    pub member_id: String,
+    #[wasm_bindgen(js_name = authorPublicKey)]
+    pub author_public_key: Vec<u8>,
+    #[wasm_bindgen(js_name = hpkePublicKey)]
+    pub hpke_public_key: Vec<u8>,
+}
+
+/// A created or recovered account: the worker takes the live handle once and persists the opaque keystore
+/// plus generation before showing the one-time recovery code.
+#[wasm_bindgen(getter_with_clone)]
+pub struct AccountOpenResult {
+    handle: Option<AccountHandle>,
+    pub keystore: Vec<u8>,
+    #[wasm_bindgen(js_name = recoveryCode)]
+    pub recovery_code: String,
+    pub generation: f64,
+}
+
+#[wasm_bindgen]
+impl AccountOpenResult {
+    #[wasm_bindgen(js_name = takeHandle)]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports cannot be const
+    pub fn take_handle(&mut self) -> Option<AccountHandle> {
+        self.handle.take()
+    }
+}
+
+/// Persisted output of an account credential change or root rotation.
+#[wasm_bindgen(getter_with_clone)]
+pub struct AccountUpdateResult {
+    pub keystore: Vec<u8>,
+    #[wasm_bindgen(js_name = recoveryCode)]
+    pub recovery_code: String,
+    pub generation: f64,
+}
+
+/// Create one profile-level durable account.
+#[wasm_bindgen(js_name = accountCreate)]
+pub fn account_create(passphrase: String) -> Result<AccountOpenResult, JsValue> {
+    let created = crate::account_create(&Passphrase::new(passphrase.into_bytes()))
+        .map_err(|error| vault_err_to_js(&error))?;
+    Ok(AccountOpenResult {
+        handle: Some(AccountHandle { inner: created.handle }),
+        keystore: created.keystore,
+        recovery_code: created.recovery_code,
+        generation: generation_to_js(created.generation)?,
+    })
+}
+
+/// Unlock the singleton account keystore after enforcing the highest locally-observed generation.
+#[wasm_bindgen(js_name = accountUnlock)]
+pub fn account_unlock(
+    passphrase: String,
+    keystore: &[u8],
+    generation_floor: f64,
+) -> Result<AccountHandle, JsValue> {
+    let handle = crate::account_unlock(
+        &Passphrase::new(passphrase.into_bytes()),
+        keystore,
+        as_u64(generation_floor, "generationFloor")?,
+    )
+    .map_err(|error| vault_err_to_js(&error))?;
+    Ok(AccountHandle { inner: handle })
+}
+
+/// Re-wrap the resident account under a new passphrase without touching any tree keyring.
+#[wasm_bindgen(js_name = accountChangePassphrase)]
+pub fn account_change_passphrase(
+    account: &mut AccountHandle,
+    new_passphrase: String,
+) -> Result<AccountUpdateResult, JsValue> {
+    let changed = crate::account_change_passphrase(
+        &mut account.inner,
+        &Passphrase::new(new_passphrase.into_bytes()),
+    )
+    .map_err(|error| vault_err_to_js(&error))?;
+    Ok(AccountUpdateResult {
+        keystore: changed.keystore,
+        recovery_code: String::new(),
+        generation: generation_to_js(changed.generation)?,
+    })
+}
+
+/// Recover the singleton account, revoking the submitted code and returning a refreshed live handle.
+#[wasm_bindgen(js_name = accountRecover)]
+pub fn account_recover(
+    recovery_code: String,
+    new_passphrase: String,
+    keystore: &[u8],
+    generation_floor: f64,
+) -> Result<AccountOpenResult, JsValue> {
+    let recovered = crate::account_recover(
+        &RecoveryCode::new(recovery_code),
+        &Passphrase::new(new_passphrase.into_bytes()),
+        keystore,
+        as_u64(generation_floor, "generationFloor")?,
+    )
+    .map_err(|error| vault_err_to_js(&error))?;
+    Ok(AccountOpenResult {
+        handle: Some(AccountHandle { inner: recovered.handle }),
+        keystore: recovered.keystore,
+        recovery_code: recovered.recovery_code,
+        generation: generation_to_js(recovered.generation)?,
+    })
+}
+
+/// Rotate the account wrapping root and its recovery code while retaining the stable identity keys.
+#[wasm_bindgen(js_name = accountRotateRoot)]
+pub fn account_rotate_root(
+    account: &mut AccountHandle,
+    passphrase: String,
+) -> Result<AccountUpdateResult, JsValue> {
+    let rotated = crate::account_rotate_root(
+        &mut account.inner,
+        &Passphrase::new(passphrase.into_bytes()),
+    )
+    .map_err(|error| vault_err_to_js(&error))?;
+    Ok(AccountUpdateResult {
+        keystore: rotated.keystore,
+        recovery_code: rotated.recovery_code,
+        generation: generation_to_js(rotated.generation)?,
+    })
+}
+
+/// Return the account's public invite/admission identity without exposing secret material.
+#[wasm_bindgen(js_name = accountPublicIdentity)]
+#[must_use]
+pub fn account_public_identity(account: &AccountHandle) -> AccountPublicIdentity {
+    let identity = crate::account_public_identity(&account.inner);
+    AccountPublicIdentity {
+        member_id: identity.member_id,
+        author_public_key: identity.author_public_key,
+        hpke_public_key: identity.hpke_public_key,
+    }
+}
+
+/// Sign the server's frozen account-registration proof bytes inside Rust.
+#[wasm_bindgen(js_name = accountRegisterProof)]
+pub fn account_register_proof(
+    account: &AccountHandle,
+    issuer: &str,
+    subject: &str,
+    timestamp: f64,
+) -> Result<Vec<u8>, JsError> {
+    Ok(crate::account_register_proof(
+        &account.inner,
+        issuer,
+        subject,
+        as_i64(timestamp, "timestamp")?,
+    ))
+}
+
+/// Resolve the account's role from a trusted local keyring head. Returns `founder`, `member`, or `absent`.
+#[wasm_bindgen(js_name = accountTreeRole)]
+pub fn account_tree_role(
+    account: &AccountHandle,
+    engine: &str,
+    keyring: &[u8],
+) -> Result<String, JsError> {
+    let role = crate::account_tree_role(parse_engine(engine)?, keyring, &account.inner).map_err(to_js)?;
+    Ok(match role {
+        Some(openom_vault::sharing::AccountTreeRole::Founder) => "founder",
+        Some(openom_vault::sharing::AccountTreeRole::Member) => "member",
+        None => "absent",
+    }
+    .to_string())
+}
+
 /// outputs the caller persists — the keyring `anchor` to store, the one-time `recoveryCode` (provision
 /// only), the author `didKey`, and the engine-opaque `watermark`. No secret key material crosses to JS;
 /// the DEK lives inside the handle's `SealerSet` in this module's memory. Mirrors the vault's
@@ -568,6 +765,112 @@ impl OpenResult {
     pub fn take_handle(&mut self) -> Option<AppCoreHandle> {
         self.handle.take()
     }
+}
+
+/// Provision a fresh tree under the already-unlocked profile account.
+#[wasm_bindgen(js_name = provisionTree)]
+pub fn provision_tree(
+    account: &AccountHandle,
+    engine: &str,
+    tree_id: &[u8],
+    replica_id: &[u8],
+    doc: String,
+) -> Result<OpenResult, JsError> {
+    let provisioned = crate::provision_tree(
+        MemoryBlob::new(),
+        parse_engine(engine)?,
+        &account.inner,
+        tree_id,
+        replica_id,
+        doc,
+    )
+    .map_err(to_js)?;
+    Ok(OpenResult {
+        handle: Some(AppCoreHandle { inner: provisioned.core }),
+        keyring: provisioned.keyring,
+        keystore: Vec::new(),
+        recovery_code: String::new(),
+        did_key: provisioned.did_key,
+        watermark: provisioned.watermark,
+        needs_reseal: false,
+        needs_backfill: false,
+        needs_rrk_backfill: false,
+        write_epoch_unreachable: false,
+    })
+}
+
+/// Re-open a founder-owned tree under the already-unlocked profile account.
+#[wasm_bindgen(js_name = unlockTree)]
+pub fn unlock_tree(
+    account: &AccountHandle,
+    engine: &str,
+    tree_id: &[u8],
+    replica_id: &[u8],
+    anchor: &[u8],
+    doc: String,
+) -> Result<OpenResult, JsValue> {
+    let unlocked = crate::unlock_tree(
+        MemoryBlob::new(),
+        parse_engine(engine)?,
+        &account.inner,
+        tree_id,
+        replica_id,
+        anchor,
+        doc,
+    )
+    .map_err(|error| vault_err_to_js(&error))?;
+    Ok(OpenResult {
+        handle: Some(AppCoreHandle { inner: unlocked.core }),
+        keyring: Vec::new(),
+        keystore: Vec::new(),
+        recovery_code: String::new(),
+        did_key: unlocked.did_key,
+        watermark: unlocked.watermark,
+        needs_reseal: unlocked.needs_reseal,
+        needs_backfill: unlocked.needs_backfill,
+        needs_rrk_backfill: unlocked.needs_rrk_backfill,
+        write_epoch_unreachable: unlocked.write_epoch_unreachable,
+    })
+}
+
+/// Re-open an admitted tree member through the same profile account used by owned trees.
+#[wasm_bindgen(js_name = unlockTreeAsMember)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list is the JS contract
+pub fn unlock_tree_as_member(
+    account: &AccountHandle,
+    engine: &str,
+    keyring: &[u8],
+    tree_id: &[u8],
+    trusted_signers: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+    doc: String,
+) -> Result<OpenResult, JsError> {
+    let unlocked = crate::unlock_tree_as_member(
+        MemoryBlob::new(),
+        parse_engine(engine)?,
+        &account.inner,
+        keyring,
+        tree_id,
+        trusted_signers,
+        replica_id,
+        min_revision,
+        &[],
+        doc,
+    )
+    .map_err(to_js)?;
+    Ok(OpenResult {
+        handle: Some(AppCoreHandle { inner: unlocked.core }),
+        keyring: Vec::new(),
+        keystore: Vec::new(),
+        recovery_code: String::new(),
+        did_key: unlocked.did_key,
+        watermark: unlocked.watermark,
+        needs_reseal: false,
+        needs_backfill: false,
+        needs_rrk_backfill: false,
+        write_epoch_unreachable: false,
+    })
 }
 
 /// Create a brand-new encrypted tree: provision the keyring, then wrap its `SealerSet` in a ready core.
@@ -837,6 +1140,40 @@ pub fn backfill_rrk(
     })
 }
 
+/// Member-side DAG wrap repair using the worker-resident durable account.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is not DAG or the account cannot authorize the repair.
+#[wasm_bindgen(js_name = backfillRrkWithAccount)]
+pub fn backfill_rrk_with_account(
+    account: &AccountHandle,
+    engine: &str,
+    tree_id: &[u8],
+    replica_id: &[u8],
+    anchor: &[u8],
+    floor: &[u8],
+) -> Result<DagBackfilled, JsError> {
+    let dag = AppVault::from_kind(parse_engine(engine)?)
+        .as_dag()
+        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
+    let tree = TreeId::new(tree_id);
+    let member = MemberId::new(account.inner.member_id());
+    let replica = ReplicaId::new(replica_id);
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let result = dag
+        .backfill_rrk_as_account(&ctx, anchor, &account.inner.account, floor)
+        .map_err(to_js)?;
+    Ok(DagBackfilled {
+        keyring: result.anchor,
+        watermark: result.watermark,
+        backfilled: result.backfilled,
+    })
+}
+
 /// The resolved Owner's identity key at `anchor` — recorded right after a recovery so
 /// [`recovery_confirmed`] can later check the recovery survived. Empty if the roster has no owner.
 ///
@@ -1038,6 +1375,110 @@ pub fn change_role(
         owner_keystore,
         tree_id,
         owner_member_id,
+        replica_id,
+        min_revision,
+        target_member_id,
+        new_role,
+    )
+    .map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
+/// Add a member with the worker-resident founder account.
+///
+/// # Errors
+/// Returns a [`JsError`] for an unknown engine, malformed keyring, bad joiner keys, or unauthorized add.
+#[wasm_bindgen(js_name = addMemberWithAccount)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list is the JS contract
+pub fn add_member_with_account(
+    account: &AccountHandle,
+    engine: &str,
+    keyring: &[u8],
+    tree_id: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+    new_member_id: &str,
+    role: &str,
+    member_author_public: &[u8],
+    member_hpke_public: &[u8],
+) -> Result<MembershipChange, JsError> {
+    let changed = openom_vault::sharing::add_member_as_account(
+        parse_engine(engine)?,
+        keyring,
+        &account.inner.account,
+        tree_id,
+        account.inner.member_id(),
+        replica_id,
+        min_revision,
+        new_member_id,
+        role,
+        member_author_public,
+        member_hpke_public,
+    )
+    .map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
+/// Remove a member with the worker-resident founder account.
+///
+/// # Errors
+/// Returns a [`JsError`] for an unknown engine, malformed keyring, or unauthorized removal.
+#[wasm_bindgen(js_name = removeMemberWithAccount)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list is the JS contract
+pub fn remove_member_with_account(
+    account: &AccountHandle,
+    engine: &str,
+    keyring: &[u8],
+    tree_id: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+    remove_member_id: &str,
+) -> Result<MembershipChange, JsError> {
+    let changed = openom_vault::sharing::remove_member_as_account(
+        parse_engine(engine)?,
+        keyring,
+        &account.inner.account,
+        tree_id,
+        account.inner.member_id(),
+        replica_id,
+        min_revision,
+        remove_member_id,
+    )
+    .map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
+/// Change a member role with the worker-resident founder account.
+///
+/// # Errors
+/// Returns a [`JsError`] for an unknown engine, malformed keyring, or unauthorized role change.
+#[wasm_bindgen(js_name = changeRoleWithAccount)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list is the JS contract
+pub fn change_role_with_account(
+    account: &AccountHandle,
+    engine: &str,
+    keyring: &[u8],
+    tree_id: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+    target_member_id: &str,
+    new_role: &str,
+) -> Result<MembershipChange, JsError> {
+    let changed = openom_vault::sharing::change_role_as_account(
+        parse_engine(engine)?,
+        keyring,
+        &account.inner.account,
+        tree_id,
+        account.inner.member_id(),
         replica_id,
         min_revision,
         target_member_id,
@@ -1425,6 +1866,27 @@ fn vault_err_to_js(e: &VaultError) -> JsValue {
 }
 
 const MAX_SAFE: f64 = 9_007_199_254_740_991.0; // 2^53 - 1
+const MAX_SAFE_U64: u64 = 9_007_199_254_740_991;
+
+fn as_u64(n: f64, field: &str) -> Result<u64, JsError> {
+    if n.is_nan() || n.fract() != 0.0 || !(0.0..=MAX_SAFE).contains(&n) {
+        return Err(JsError::new(&format!(
+            "{field} must be a non-negative integer within 2^53"
+        )));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let value = n as u64;
+    Ok(value)
+}
+
+fn generation_to_js(generation: u64) -> Result<f64, JsError> {
+    if generation > MAX_SAFE_U64 {
+        return Err(JsError::new("account generation exceeds JavaScript's exact-integer range"));
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let value = generation as f64;
+    Ok(value)
+}
 
 fn as_i64(n: f64, field: &str) -> Result<i64, JsError> {
     if n.is_nan() || n.fract() != 0.0 || n.abs() > MAX_SAFE {

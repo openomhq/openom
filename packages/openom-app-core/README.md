@@ -30,6 +30,7 @@ registration signature, generation, and one-time recovery code.
 | **APP-CORE-1** | One unlocked account provisions and reopens multiple trees under both keyring engines with one stable identity; changing its passphrase once leaves every tree openable. | Account identity and credentials are profile-level, never copied into each tree. | `lifecycle_tests::one_account_handle_owns_and_reopens_multiple_trees_on_both_engines` |
 | **APP-CORE-2** | Recovery and explicit root rotation preserve `member_id`, advance the generation, refresh the live handle, and revoke the prior recovery material. | A stale handle or old recovery code must not silently restore revoked account custody. | `lifecycle_tests::recovery_and_root_rotation_refresh_the_handle_and_revoke_old_material` |
 | **APP-CORE-3** | Registration proof signs the shared, domain-separated issuer/subject/member/timestamp encoding and fails verification when a bound claim changes. | The auth subject can only bind itself to an account whose signing key the client controls. | `lifecycle_tests::registration_proof_matches_the_server_verification_bytes` |
+| **APP-CORE-4** | One durable account uses the same identity for an owned tree and for joined trees on both engines, including after dropping and reopening the account handle. | Joined membership must not mint a second passphrase-derived identity or depend on per-tree member credentials. | `lifecycle_tests::one_account_identity_joins_and_reopens_trees_on_both_engines` |
 
 Run: `node scripts/cargo.mjs test -p openom-app-core --all-features` (from the repo root).
 
@@ -45,6 +46,9 @@ assert_eq!(first.did_key, second.did_key);
 Entry points: account custody (`AccountHandle`, `account_create`, `account_unlock`,
 `account_change_passphrase`, `account_recover`, `account_rotate_root`, `account_register_proof`), tree custody
 (`provision_tree`, `unlock_tree`), and the live local-first engine (`AppCore`).
+Joined-tree custody enters through `account_public_identity`, `account_tree_role`, and
+`unlock_tree_as_member`; role dispatch reads a trusted keyring head rather than a persisted secret context.
+Chain trust pins remain non-secret caller-owned metadata, while DAG resolves membership from its trusted anchor.
 
 ## Position
 

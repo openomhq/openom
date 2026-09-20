@@ -204,8 +204,10 @@
       };
     }
 
-    function spawnWorker() {
-      const w = new Worker(new URL('../app/src/core/appCore.worker.js', import.meta.url), { type: 'module' });
+    function spawnWorker(accountProfile = null) {
+      const workerUrl = new URL('../app/src/core/appCore.worker.js', import.meta.url);
+      if (accountProfile !== null) workerUrl.searchParams.set('accountProfile', accountProfile);
+      const w = new Worker(workerUrl, { type: 'module' });
       return Comlink.wrap(w);
     }
 
@@ -353,6 +355,16 @@
         await w0.commit(doc);
         const before = JSON.parse(await w0.project(doc));
 
+        // Closing the final tree must also drop the profile account handle; otherwise a subsequent unlock in
+        // the same long-lived worker could bypass the passphrase by reusing resident account secrets.
+        await w0.close(doc);
+        let sameWorkerWrongRejected = false;
+        try {
+          await w0.unlockCore({ passphrase: 'WRONG', treeId, memberId, docId: doc });
+        } catch {
+          sameWorkerWrongRejected = true;
+        }
+
         // Reload: a fresh worker unlocks with the passphrase → loads the keyring → hydrates the log.
         const w1 = spawnWorker();
         await w1.warm();
@@ -375,6 +387,7 @@
           beforePeople: before.people,
           afterPeople: after.people,
           wrongRejected,
+          sameWorkerWrongRejected,
         };
       },
 
@@ -391,7 +404,7 @@
         const memberPass = 'member passphrase here';
 
         // Owner provisions the tree (genesis) and mints the invite pin over rev 1.
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         const ownerProv = await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
@@ -399,7 +412,7 @@
         const pin = await owner.keyringHash(ownerDoc); // { revision: 1, hash }
 
         // Member mints an account, owner admits them (→ shared keyring, published to the server).
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -422,15 +435,15 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         const joined = await member.joinAsMember({
           treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
-          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+          pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         const sync = await member.syncNow(memberDoc);
         const memberProj = JSON.parse(await member.project(memberDoc));
 
         // MEMBER REOPEN (OPE-543 #2): a FRESH worker (models a browser reload; IndexedDB is shared per origin)
-        // reopens the JOINED tree via unlockCore. It must take the MEMBER path (persisted member custody), not
+        // reopens the JOINED tree via unlockCore. It must dispatch from the verified keyring role, not
         // the owner path, and recover the same identity + see the shared data.
-        const memberReload = spawnWorker();
+        const memberReload = spawnWorker(`${memberDoc}:member`);
         await memberReload.warm();
         await memberReload.attachTransport(memberDoc, Comlink.proxy(transport));
         const reopened = await memberReload.unlockCore({ passphrase: memberPass, treeId, memberId: acct.memberId, docId: memberDoc });
@@ -462,7 +475,7 @@
         const ownerPass = 'owner passphrase here';
         const memberPass = 'member passphrase here';
 
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
@@ -478,7 +491,7 @@
         try { looksPlaintext = Object.hasOwn(JSON.parse(asText), 'sMacClaim'); } catch { looksPlaintext = false; }
 
         // Member provisions an account, builds a claim from the link; owner admits → OPENS the sealed record.
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -512,14 +525,14 @@
         const memberPass = 'member passphrase here';
 
         // Owner provisions + shares the tree with an editor; the editor joins via the genesis-walk.
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
         const pin = await owner.keyringHash(ownerDoc);
 
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -532,7 +545,7 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         const joined = await member.joinAsMember({
           treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
-          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+          pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.syncNow(memberDoc); // pull the shared base
 
@@ -592,7 +605,7 @@
         const ownerPass = 'owner passphrase here';
         const memberPass = 'member passphrase here';
 
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine });
@@ -606,7 +619,7 @@
         await owner.syncNow(ownerDoc);
 
         // Owner SHARES with a maintainer — the first-share base seal fires inside addMember.
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -624,8 +637,8 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember(
           engine === 'dag'
-            ? { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId, memberKdfParams: acct.kdfParams, pin: dagPin }
-            : { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId, memberKdfParams: acct.kdfParams, pinnedRevision: chainPin.revision, pinnedHash: chainPin.hash },
+            ? { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId, pin: dagPin }
+            : { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId, pinnedRevision: chainPin.revision, pinnedHash: chainPin.hash },
         );
         await member.syncNow(memberDoc);
         const proj = JSON.parse(await member.project(memberDoc)).people;
@@ -675,14 +688,14 @@
         const memberPass = 'member passphrase here';
 
         // Owner provisions the tree + mints the invite pin; member mints an account; owner admits them.
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         const ownerProv = await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
         const pin = await owner.keyringHash(ownerDoc);
 
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -699,7 +712,7 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
           treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
-          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+          pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.syncNow(memberDoc);
         const beforeRemoval = JSON.parse(await member.project(memberDoc)).people.map((p) => p.id);
@@ -719,7 +732,7 @@
 
         // A REMOVED member is locked out: a fresh worker with the member's account can no longer join the
         // rotated tree (the walk is valid, but the member is absent from the head membership → unlock fails).
-        const rejoin = spawnWorker();
+        const rejoin = spawnWorker(`${memberDoc}:member`);
         await rejoin.warm();
         await rejoin.clearPersisted(rejoinDoc);
         await rejoin.attachTransport(rejoinDoc, Comlink.proxy(transport));
@@ -727,7 +740,7 @@
         try {
           await rejoin.joinAsMember({
             treeId, docId: rejoinDoc, passphrase: memberPass, memberId: acct.memberId,
-            memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+            pinnedRevision: pin.revision, pinnedHash: pin.hash,
           });
         } catch {
           lockedOut = true;
@@ -758,7 +771,7 @@
         const ownerPass = 'owner passphrase here';
         const memberPass = 'member passphrase here';
 
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
@@ -766,7 +779,7 @@
         const pin = await owner.keyringHash(ownerDoc);
 
         // Admit the member as a MAINTAINER so they can commit data deltas.
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -780,7 +793,7 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
           treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
-          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+          pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.assertAnchor(memberDoc, 'pMemberWrite', PERSON);
         await member.commit(memberDoc);
@@ -795,7 +808,7 @@
 
         // COLD reload of the owner — fresh worker, NO transport, pure local hydrate + bootstrap under the
         // post-removal head.
-        const reloaded = spawnWorker();
+        const reloaded = spawnWorker(`${ownerDoc}:owner`);
         await reloaded.warm();
         await reloaded.unlockCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         const seenAfterReload = JSON.parse(await reloaded.project(ownerDoc)).people.map((p) => p.id);
@@ -817,14 +830,14 @@
         const ownerPass = 'owner passphrase here';
         const memberPass = 'member passphrase here';
 
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
         const pin = await owner.keyringHash(ownerDoc);
 
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -841,7 +854,7 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
           treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
-          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+          pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
 
         // Owner DEMOTES the co-owner to editor.
@@ -867,7 +880,7 @@
         const liveAfterApprove = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
 
         // Cold reload: the approved edit survives (recovered from the pin).
-        const reloaded = spawnWorker();
+        const reloaded = spawnWorker(`${ownerDoc}:owner`);
         await reloaded.warm();
         await reloaded.unlockCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         const seenAfterReload = JSON.parse(await reloaded.project(ownerDoc)).people.map((p) => p.id);
@@ -895,13 +908,13 @@
         const memberPass = 'member passphrase here';
 
         // Owner provisions a DAG tree, mints a member account, admits it as a Maintainer (so it can commit).
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine: 'dag' });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
 
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -919,7 +932,7 @@
 
         // A WRONG pin is refused (the trust gate): flip a byte of the pin → the join must throw.
         const badPin = new Uint8Array(pin); badPin[0] ^= 0xff;
-        const bad = spawnWorker();
+        const bad = spawnWorker(`${memberDoc}:member`);
         await bad.warm();
         await bad.clearPersisted(badDoc);
         await bad.attachTransport(badDoc, Comlink.proxy(transport));
@@ -927,7 +940,7 @@
         try {
           await bad.joinAsMember({
             engine: 'dag', treeId, docId: badDoc, passphrase: memberPass, memberId: acct.memberId,
-            memberKdfParams: acct.kdfParams, pin: badPin,
+            pin: badPin,
           });
         } catch { wrongPinRejected = true; }
 
@@ -935,7 +948,7 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         const joined = await member.joinAsMember({
           engine: 'dag', treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
-          memberKdfParams: acct.kdfParams, pin,
+          pin,
         });
         await member.syncNow(memberDoc);
         const memberSees = JSON.parse(await member.project(memberDoc)).people.map((p) => p.id);
@@ -979,13 +992,13 @@
         const ownerPass = 'owner passphrase here';
         const memberPass = 'member passphrase here';
 
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine: 'dag' });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
 
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -1022,14 +1035,14 @@
         const ownerPass = 'owner passphrase here';
         const memberPass = 'member passphrase here';
 
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
         const pin = await owner.keyringHash(ownerDoc); // rev 1
 
-        const member = spawnWorker();
+        const member = spawnWorker(`${memberDoc}:member`);
         await member.warm();
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
@@ -1049,7 +1062,7 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
           treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
-          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+          pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.assertAnchor(memberDoc, 'pMemberWrite', PERSON);
         await member.commit(memberDoc);
@@ -1062,7 +1075,7 @@
         const afterDemote = roleOf(acct.memberId);
 
         // Cold reload of the owner: the demoted member's pre-demote commit survives (recovered from the pin).
-        const reloaded = spawnWorker();
+        const reloaded = spawnWorker(`${ownerDoc}:owner`);
         await reloaded.warm();
         await reloaded.unlockCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         const seenAfterReload = JSON.parse(await reloaded.project(ownerDoc)).people.map((p) => p.id);
@@ -1086,15 +1099,15 @@
         const carolPass = 'carol passphrase here';
 
         // Owner provisions a dag tree and admits bob + carol, both Maintainers (so they commit deltas).
-        const owner = spawnWorker();
+        const owner = spawnWorker(`${ownerDoc}:owner`);
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
         await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine: 'dag' });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
 
-        const bob = spawnWorker(); await bob.warm(); await bob.clearPersisted(bobDoc);
+        const bob = spawnWorker(`${bobDoc}:bob`); await bob.warm(); await bob.clearPersisted(bobDoc);
         const bobAcct = await bob.provisionMember(bobPass);
-        const carol = spawnWorker(); await carol.warm(); await carol.clearPersisted(carolDoc);
+        const carol = spawnWorker(`${carolDoc}:carol`); await carol.warm(); await carol.clearPersisted(carolDoc);
         const carolAcct = await carol.provisionMember(carolPass);
 
         await owner.addMember(ownerDoc, {
@@ -1109,9 +1122,9 @@
 
         // bob + carol join. They share the current epoch, so carol can later decrypt bob's write.
         await bob.attachTransport(bobDoc, Comlink.proxy(transport));
-        await bob.joinAsMember({ engine: 'dag', treeId, docId: bobDoc, passphrase: bobPass, memberId: bobAcct.memberId, memberKdfParams: bobAcct.kdfParams, pin });
+        await bob.joinAsMember({ engine: 'dag', treeId, docId: bobDoc, passphrase: bobPass, memberId: bobAcct.memberId, pin });
         await carol.attachTransport(carolDoc, Comlink.proxy(transport));
-        await carol.joinAsMember({ engine: 'dag', treeId, docId: carolDoc, passphrase: carolPass, memberId: carolAcct.memberId, memberKdfParams: carolAcct.kdfParams, pin });
+        await carol.joinAsMember({ engine: 'dag', treeId, docId: carolDoc, passphrase: carolPass, memberId: carolAcct.memberId, pin });
 
         // bob writes a signed entry and pushes it; the owner pulls it (so its store holds bob's entry to cover).
         await bob.assertAnchor(bobDoc, 'pBob', PERSON);

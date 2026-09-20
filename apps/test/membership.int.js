@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   inviteMember, pendingInvites, admitMember, submitJoinClaim, completeJoin, joinTree,
-  WaitingForApproval, InviteUnavailable,
+  WaitingForApproval, InviteUnavailable, _internal,
 } from '../app/src/core/membership.js';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
 import { mint, verifyClaim, signerIds, signersRetained } from '../app/src/core/invite.js';
@@ -111,7 +111,7 @@ function makeJoinerWorker(server, ownerWorker) {
       ownerWorker.provisions.count += 1;
       // `memberId` is the worker's SELF-CERTIFYING id (OPE-543, derived from the author key in the real
       // worker); the double returns a fixed one — the derivation itself is covered by the e2e suite.
-      return { memberId: JOINER_ID, kdfParams: new Uint8Array(8).fill(7), authorPublicKey: new Uint8Array(32).fill(0x22), hpkePublicKey: new Uint8Array(32).fill(0x33) };
+      return { memberId: JOINER_ID, authorPublicKey: new Uint8Array(32).fill(0x22), hpkePublicKey: new Uint8Array(32).fill(0x33) };
     },
     async joinAsMember({ docId }) {
       if (server.keyringOf(docId).length === 0) throw Object.assign(new Error('no keyring history to verify'), { name: 'JoinError' });
@@ -182,6 +182,8 @@ describe('membership two-account loop v3 (App API)', () => {
     const invite = await inviteMember({ worker: ownerWorker, remote }, { docId: DOC, treeId: TREE_ID, role: 'editor' });
     await submitJoinClaim(joinerDeps, { link: invite.link, passphrase: 'pw', memberId: JOINER_ID });
     expect(ownerWorker.provisions.count).toBe(1);
+    const persisted = storage.getItem(_internal.JOIN_KEY(invite.inviteId));
+    expect(persisted).not.toMatch(/kdfParams|memberKdfParams/);
     // "Restart": a fresh submit for the same invite+account reuses the persisted context.
     const ctx = await submitJoinClaim({ ...joinerDeps }, { link: invite.link, passphrase: 'pw', memberId: JOINER_ID });
     expect(ownerWorker.provisions.count).toBe(1); // did NOT re-provision

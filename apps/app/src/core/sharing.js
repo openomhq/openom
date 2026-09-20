@@ -61,7 +61,7 @@ function freshReplicaId() {
   return id;
 }
 
-/** A member-join failed terminally (bad walk / pin / passphrase) — nothing was persisted. */
+/** A member-join failed terminally (bad walk / pin / account unlock) — nothing was persisted. */
 export class JoinError extends Error {
   constructor(message) {
     super(message);
@@ -160,13 +160,13 @@ export async function publishKeyring(deps, { docId }) {
  * persists nothing. Returns the wasm `OpenResult` (its handle is the ready member core).
  *
  * `deps`: { wasm: { verifyKeyringWalk, unlockAsMember }, transport: { readKeyring }, keyringStore,
- *           verifyFingerprint? }. `opts`: { treeId(bytes), treeUuid(server id), docId, passphrase, memberId,
- *           memberKdfParams(bytes), pinnedRevision, pinnedHash(bytes), fp?, engine? }.
+ *           verifyFingerprint? }. `opts`: { treeId(bytes), treeUuid(server id), docId, pinnedRevision,
+ *           pinnedHash(bytes), fp?, engine? }.
  */
 export async function joinAsMember(deps, opts) {
   const { wasm, transport, keyringStore, verifyFingerprint } = deps;
   const {
-    treeId, docId, passphrase, memberId, memberKdfParams,
+    treeId, docId,
     pinnedRevision, pinnedHash, fp, engine = 'chain',
   } = opts;
   if (engine !== 'chain') throw new JoinError('genesis-walk join is chain-only');
@@ -199,12 +199,11 @@ export async function joinAsMember(deps, opts) {
   const bodies = unframe(walk.bodiesFramed);
   if (bodies.length !== walk.revision) throw new JoinError('walk returned a mismatched revision count');
 
-  // 4. Unlock at the verified head BEFORE persisting (a wrong passphrase then leaves no partial state).
+  // 4. Unlock at the verified head BEFORE persisting (an account unlock failure leaves no partial state).
   let res;
   try {
     res = wasm.unlockAsMember(
-      engine, walk.headKeyring, passphrase, memberKdfParams, treeId, memberId,
-      concatSigners(signers), freshReplicaId(), walk.revision, docId,
+      engine, walk.headKeyring, treeId, concatSigners(signers), freshReplicaId(), walk.revision, docId,
     );
   } catch (e) {
     throw new JoinError(e?.message ?? String(e));
@@ -236,12 +235,12 @@ export async function joinAsMember(deps, opts) {
  * OOB pin (founder authenticity + invite-time freshness + no-checkpoint — all in the wasm `verifyDagAnchor`),
  * then unlock as the member and retain the anchor as head. Fail-closed — any check throws a `JoinError` and
  * persists nothing. `deps`: { wasm: { unwrapDagKeyring, verifyDagAnchor, unlockAsMember }, transport:
- * { readKeyring }, keyringStore }. `opts`: { treeId(bytes), docId, passphrase, memberId, memberKdfParams(bytes),
- * pin(bytes) }. Returns the wasm `OpenResult` (its handle is the ready member core).
+ * { readKeyring }, keyringStore }. `opts`: { treeId(bytes), docId, pin(bytes) }. Returns the wasm `OpenResult`
+ * (its handle is the ready member core).
  */
 export async function joinDagAnchor(deps, opts) {
   const { wasm, transport, keyringStore } = deps;
-  const { treeId, docId, passphrase, memberId, memberKdfParams, pin } = opts;
+  const { treeId, docId, pin } = opts;
   if (await keyringStore.load(docId)) throw new JoinError('tree already present locally — use sync, not join');
 
   const { revisions } = await transport.readKeyring(docId, 1);
@@ -261,8 +260,7 @@ export async function joinDagAnchor(deps, opts) {
   let res;
   try {
     res = wasm.unlockAsMember(
-      'dag', verified.keyring, passphrase, memberKdfParams, treeId, memberId,
-      new Uint8Array(0), freshReplicaId(), 0, docId,
+      'dag', verified.keyring, treeId, new Uint8Array(0), freshReplicaId(), 0, docId,
     );
   } catch (e) {
     throw new JoinError(e?.message ?? String(e));

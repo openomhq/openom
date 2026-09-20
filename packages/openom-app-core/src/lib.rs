@@ -129,6 +129,14 @@ pub struct AccountHandle {
     account: openom_vault::UnlockedAccount,
 }
 
+/// Public admission material for the durable account. These values are safe to send through the invite
+/// handshake; the corresponding signing and HPKE secrets remain inside [`AccountHandle`].
+pub struct AccountPublicIdentity {
+    pub member_id: String,
+    pub author_public_key: Vec<u8>,
+    pub hpke_public_key: Vec<u8>,
+}
+
 impl AccountHandle {
     /// The stable self-certifying identity shared by every owned and joined tree.
     #[must_use]
@@ -292,6 +300,31 @@ pub fn account_register_proof(
     let member_id = derive_member_id_bytes(handle.author_public_key());
     let message = registration_signing_bytes(issuer, subject, member_id, timestamp);
     handle.account.root.identity.sign(&message).to_bytes().to_vec()
+}
+
+/// Return the account's stable, self-certifying public admission material.
+#[must_use]
+pub fn account_public_identity(handle: &AccountHandle) -> AccountPublicIdentity {
+    AccountPublicIdentity {
+        member_id: handle.member_id().to_string(),
+        author_public_key: handle.author_public_key().to_vec(),
+        hpke_public_key: handle.hpke_public_key().to_vec(),
+    }
+}
+
+/// Resolve whether the durable account is this trusted tree's founder or an admitted member.
+///
+/// The supplied keyring must already be a trusted local head; this function only selects the correct unlock
+/// path and verifies that the account's author key matches its self-certifying membership record.
+///
+/// # Errors
+/// Returns [`VaultError`] if the keyring is malformed or substitutes another author key for the account id.
+pub fn account_tree_role(
+    engine: EngineKind,
+    keyring: &[u8],
+    handle: &AccountHandle,
+) -> Result<Option<openom_vault::sharing::AccountTreeRole>, VaultError> {
+    openom_vault::sharing::account_tree_role(engine, keyring, &handle.account)
 }
 
 /// The tree-specific output of [`provision_tree`]. Account persistence belongs to [`account_create`] and is
@@ -579,6 +612,51 @@ pub struct MemberUnlocked<S: BlobStore> {
     pub watermark: Vec<u8>,
 }
 
+/// Unlock a joined tree using the profile's durable account. The caller supplies only non-secret chain trust
+/// pins (empty for DAG); member passphrases and per-tree KDF records are deliberately absent.
+///
+/// # Errors
+/// [`CoreError::Vault`] if account membership/trust verification fails; [`CoreError`] if installing the
+/// membership resolver fails.
+#[allow(clippy::too_many_arguments)]
+pub fn unlock_tree_as_member<S: BlobStore>(
+    store: S,
+    engine: EngineKind,
+    account: &AccountHandle,
+    keyring: &[u8],
+    tree_id: &[u8],
+    trusted_signers: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+    retained: &[(u32, Vec<u8>)],
+    doc: impl Into<String>,
+) -> Result<MemberUnlocked<S>, CoreError> {
+    let unlocked = openom_vault::sharing::unlock_as_account_member(
+        engine,
+        keyring,
+        &account.account,
+        tree_id,
+        trusted_signers,
+        replica_id,
+        min_revision,
+    )?;
+    let mut core = AppCore::new(
+        unlocked.did_key.clone(),
+        unlocked.sealer,
+        Arc::new(store),
+        doc,
+        replica_id,
+    );
+    core.set_member_epoch_secret(unlocked.epoch_secret);
+    let resolver = openom_vault::resolver_from(engine, keyring, retained)?;
+    core.set_membership(resolver)?;
+    Ok(MemberUnlocked {
+        core,
+        did_key: unlocked.did_key,
+        watermark: unlocked.watermark,
+    })
+}
+
 /// Unlock a shared tree as a NON-owner member over `store`: verify against the pinned `trusted_signers` (chain)
 /// / resolve the anchor (dag), HPKE-unwrap the member DEKs with the passphrase + account KDF, and wrap a ready
 /// core that (a) retains the member's epoch-adopt secret so a later write-epoch rotation splices in without a
@@ -745,6 +823,92 @@ mod lifecycle_tests {
             )
             .unwrap();
             assert_eq!(reopened.did_key, did_key);
+        }
+    }
+
+    #[test]
+    fn one_account_identity_joins_and_reopens_trees_on_both_engines() {
+        let owner_passphrase = Passphrase::new(b"owner profile passphrase".to_vec());
+        let owner = super::account_create(&owner_passphrase).unwrap();
+        let member_passphrase = Passphrase::new(b"member profile passphrase".to_vec());
+        let member = super::account_create(&member_passphrase).unwrap();
+        let member_public = super::account_public_identity(&member.handle);
+
+        let owned = super::provision_tree(
+            store_blob::MemoryBlob::new(),
+            EngineKind::Chain,
+            &member.handle,
+            &[50; 16],
+            &[51; 16],
+            "member-owned",
+        )
+        .unwrap();
+        let mut joined_trees = Vec::new();
+
+        for (index, engine) in [EngineKind::Chain, EngineKind::Dag].into_iter().enumerate() {
+            let tree_id = [60 + index as u8; 16];
+            let replica_id = [70 + index as u8; 16];
+            let provisioned = super::provision_tree(
+                store_blob::MemoryBlob::new(),
+                engine,
+                &owner.handle,
+                &tree_id,
+                &replica_id,
+                format!("owner-{index}"),
+            )
+            .unwrap();
+            assert_eq!(
+                super::account_tree_role(engine, &provisioned.keyring, &owner.handle).unwrap(),
+                Some(openom_vault::sharing::AccountTreeRole::Founder)
+            );
+            let added = openom_vault::sharing::add_member_as_account(
+                engine,
+                &provisioned.keyring,
+                &owner.handle.account,
+                &tree_id,
+                owner.handle.member_id(),
+                &replica_id,
+                0,
+                &member_public.member_id,
+                "editor",
+                &member_public.author_public_key,
+                &member_public.hpke_public_key,
+            )
+            .unwrap();
+            assert_eq!(
+                super::account_tree_role(engine, &added.keyring, &member.handle).unwrap(),
+                Some(openom_vault::sharing::AccountTreeRole::Member)
+            );
+            let trusted_signers = if engine == EngineKind::Chain {
+                owner.handle.author_public_key().to_vec()
+            } else {
+                Vec::new()
+            };
+            joined_trees.push((engine, tree_id, replica_id, added.keyring, trusted_signers));
+        }
+
+        let member_keystore = member.keystore;
+        let member_generation = member.generation;
+        drop(member.handle);
+        let reopened_account =
+            super::account_unlock(&member_passphrase, &member_keystore, member_generation).unwrap();
+        assert_eq!(reopened_account.member_id(), member_public.member_id);
+
+        for (engine, tree_id, replica_id, keyring, trusted_signers) in joined_trees {
+            let joined = super::unlock_tree_as_member(
+                store_blob::MemoryBlob::new(),
+                engine,
+                &reopened_account,
+                &keyring,
+                &tree_id,
+                &trusted_signers,
+                &replica_id,
+                0,
+                &[],
+                "joined",
+            )
+            .unwrap();
+            assert_eq!(joined.did_key, owned.did_key);
         }
     }
 

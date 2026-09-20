@@ -12,17 +12,20 @@ import * as Comlink from '../vendor/comlink.js';
 import { makeError, normalizeUnknown, isAppError } from './errorModel.js';
 import init, {
   AppCoreHandle,
-  provision as wasmProvision,
-  unlock as wasmUnlock,
-  recover as wasmRecover,
-  changePassphrase as wasmChangePassphrase,
-  addMember as wasmAddMember,
-  removeMember as wasmRemoveMember,
-  changeRole as wasmChangeRole,
-  provisionMember as wasmProvisionMember,
+  accountCreate as wasmAccountCreate,
+  accountUnlock as wasmAccountUnlock,
+  accountRecover as wasmAccountRecover,
+  accountChangePassphrase as wasmAccountChangePassphrase,
+  accountPublicIdentity as wasmAccountPublicIdentity,
+  accountTreeRole as wasmAccountTreeRole,
+  provisionTree as wasmProvisionTree,
+  unlockTree as wasmUnlockTree,
+  unlockTreeAsMember as wasmUnlockTreeAsMember,
+  addMemberWithAccount as wasmAddMember,
+  removeMemberWithAccount as wasmRemoveMember,
+  changeRoleWithAccount as wasmChangeRole,
   deriveMemberId,
   verifyKeyringWalk as wasmVerifyKeyringWalk,
-  unlockAsMember as wasmUnlockAsMember,
   wrapChainKeyringUpdate as wasmWrapKeyringUpdate,
   unwrapChainKeyring as wasmUnwrapKeyring,
   keyringHash as wasmKeyringHash,
@@ -35,7 +38,7 @@ import init, {
   wrapDagKeyringUpdate as wasmWrapDagKeyringUpdate,
   unwrapDagKeyring as wasmUnwrapDagKeyring,
   rotationConfirmed as wasmRotationConfirmed,
-  backfillRrk as wasmBackfillRrk,
+  backfillRrkWithAccount as wasmBackfillRrk,
   resolvedOwnerKey as wasmResolvedOwnerKey,
   recoveryConfirmed as wasmRecoveryConfirmed,
   keyringSummary as wasmKeyringSummary,
@@ -91,42 +94,25 @@ async function loadWatermark(docId) {
   return s ? s.bytes : new Uint8Array(0);
 }
 
-// The durable-account keystore blob (OPE-542/543), persisted per doc so a later unlock/recover/change can
-// re-derive the owner identity: the Rust `unlock` REQUIRES it, and `provision`/`recover`/`change_passphrase`
-// hand back the blob to store. Same per-doc meta slot as the watermark (no localStorage in a Worker). A
-// re-wrap (recover / change-passphrase on the dag) returns a fresh blob to overwrite; an EMPTY return (a chain
-// re-key that never touches the account blob) leaves the stored blob intact, so unlock still finds a valid one.
-// NOTE: per-doc here mirrors today's per-tree account minting; the durable-identity rework moves this to ONE
-// account keystore per profile.
-const KS_KEY = (docId) => `${docId}::keystore`;
-async function saveKeystore(docId, ks) {
-  if (!ks || ks.length === 0) return; // empty ⇒ nothing to rotate; keep the existing blob
-  const prev = await store().readSnapshot(KS_KEY(docId));
-  await store().putSnapshot(KS_KEY(docId), ks, prev?.version ?? null);
+// One account record per browser profile. Tree keyrings, watermarks, and logs remain per document; only the
+// encrypted account keystore and its highest-seen generation are profile-scoped. Keeping blob + floor in one
+// CAS record prevents a credential update from advancing one without the other.
+const accountProfile = new URL(globalThis.location?.href ?? 'http://localhost/').searchParams.get('accountProfile') ?? 'default';
+const ACCOUNT_KEY = `profile::account::${accountProfile}`;
+async function saveAccount(keystore, generation) {
+  const bytes = new TextEncoder().encode(JSON.stringify({ generation, keystore: Array.from(keystore) }));
+  const prev = await store().readSnapshot(ACCOUNT_KEY);
+  await store().putSnapshot(ACCOUNT_KEY, bytes, prev?.version ?? null);
+  const saved = await store().readSnapshot(ACCOUNT_KEY);
+  if (!saved || saved.bytes.length !== bytes.length || saved.bytes.some((byte, index) => byte !== bytes[index])) {
+    throw new Error('account persistence verification failed');
+  }
 }
-async function loadKeystore(docId) {
-  const s = await store().readSnapshot(KS_KEY(docId));
-  return s ? s.bytes : new Uint8Array(0);
-}
-
-// MEMBER custody: for a JOINED tree (this device is a member, not the owner), the durable state a reopen needs
-// to re-derive the member's DEK access via `unlockAsMember` — the member's own account KDF params + the
-// SELF-CERTIFYING member id + the engine. Persisted per doc on join and read on reopen (the owner reopens via
-// the account keystore instead; native keeps the equivalent host-side and dispatches on `core_has_member_context`).
-// Its PRESENCE is the owner-vs-member reopen discriminator. Trusted signers are NOT stored here — they are
-// re-derived from the current persisted keyring head at reopen so they stay current across a co-owner change.
-const MC_KEY = (docId) => `${docId}::member-ctx`;
-async function saveMemberContext(docId, { memberKdfParams, memberId, engine }) {
-  const kdf = btoa(String.fromCharCode(...memberKdfParams));
-  const blob = new TextEncoder().encode(JSON.stringify({ memberId, engine, kdf }));
-  const prev = await store().readSnapshot(MC_KEY(docId));
-  await store().putSnapshot(MC_KEY(docId), blob, prev?.version ?? null);
-}
-async function loadMemberContext(docId) {
-  const s = await store().readSnapshot(MC_KEY(docId));
-  if (!s) return null;
-  const { memberId, engine, kdf } = JSON.parse(new TextDecoder().decode(s.bytes));
-  return { memberId, engine, memberKdfParams: Uint8Array.from(atob(kdf), (c) => c.charCodeAt(0)) };
+async function loadAccount() {
+  const saved = await store().readSnapshot(ACCOUNT_KEY);
+  if (!saved) return null;
+  const record = JSON.parse(new TextDecoder().decode(saved.bytes));
+  return { generation: record.generation, keystore: Uint8Array.from(record.keystore) };
 }
 
 // OPE-407 (explicit create-tree): a DURABLE per-doc marker that this device provisioned a NEW tree whose
@@ -164,6 +150,9 @@ const store = () => (idb ??= new IndexedDbStore());
 
 /** docId -> Core. Two replicas of the SAME tree run in SEPARATE workers (same docId, distinct core). */
 const cores = new Map();
+
+/** The profile's one unlocked account. Every owned and joined tree borrows this wasm handle. */
+let account = null;
 
 /** docId -> network transport. Keyed here (not on the Core) so a member JOIN can fetch the keyring history
  * BEFORE its core exists. Set by `attachTransport`, read by the sync tick + join. */
@@ -455,6 +444,96 @@ function storageError(e) {
   return makeError('storage_blocked', { cause: String(e?.message ?? e) });
 }
 
+function replaceAccount(next) {
+  if (account && account !== next) {
+    try { account.free(); } catch { /* already freed */ }
+  }
+  account = next;
+}
+
+async function ensureAccount(passphrase, createIfMissing = false) {
+  if (account) return { created: false, recoveryCode: '' };
+  const saved = await loadAccount();
+  if (saved) {
+    try {
+      replaceAccount(wasmAccountUnlock(passphrase, saved.keystore, saved.generation));
+    } catch (e) {
+      throw vaultError(e);
+    }
+    return { created: false, recoveryCode: '' };
+  }
+  if (!createIfMissing) throw new Error('no account keystore stored for this profile');
+  let created;
+  try {
+    created = wasmAccountCreate(passphrase);
+  } catch (e) {
+    throw vaultError(e);
+  }
+  try {
+    await saveAccount(created.keystore, created.generation);
+    replaceAccount(created.takeHandle());
+    return { created: true, recoveryCode: created.recoveryCode };
+  } finally {
+    created.free();
+  }
+}
+
+function requireAccount() {
+  if (!account) throw new Error('account is locked');
+  return account;
+}
+
+async function verifyAccountPassphrase(passphrase) {
+  const saved = await loadAccount();
+  if (!saved) throw new Error('no account keystore stored for this profile');
+  let verified;
+  try {
+    verified = wasmAccountUnlock(passphrase, saved.keystore, saved.generation);
+  } catch (e) {
+    throw vaultError(e);
+  }
+  verified.free();
+}
+
+async function openStoredTree({ treeId, docId, engine = KEYRING_ENGINE }) {
+  const head = await keyringStore().loadHead(docId);
+  if (!head) throw new Error(`no keyring stored for ${docId}`);
+  const eng = head.engine || engine;
+  const role = wasmAccountTreeRole(requireAccount(), eng, head.bytes);
+  if (role === 'absent') throw new Error('account is not a member of this tree');
+  const replica = freshReplica();
+  let opened;
+  try {
+    if (role === 'founder') {
+      opened = wasmUnlockTree(requireAccount(), eng, treeId, replica, head.bytes, docId);
+    } else {
+      const signers = eng === 'chain' ? wasmChainHeadSigners(head.bytes) : new Uint8Array(0);
+      const minRevision = eng === 'chain' ? chainRevision(await loadWatermark(docId)) : 0;
+      opened = wasmUnlockTreeAsMember(
+        requireAccount(), eng, head.bytes, treeId, signers, replica, minRevision, docId,
+      );
+    }
+  } catch (e) {
+    throw vaultError(e);
+  }
+  try {
+    await saveWatermark(docId, opened.watermark);
+    const openedCore = new Core(opened.takeHandle(), docId, true, treeId, eng);
+    await installMembership(openedCore, docId, eng, head.bytes);
+    await hydrate(openedCore);
+    cores.set(docId, openedCore);
+    return {
+      didKey: opened.didKey,
+      needsReseal: opened.needsReseal,
+      needsBackfill: opened.needsBackfill,
+      needsRrkBackfill: opened.needsRrkBackfill,
+      writeEpochUnreachable: opened.writeEpochUnreachable,
+    };
+  } finally {
+    opened.free();
+  }
+}
+
 const api = {
   /** Liveness probe (C3): a trivial round-trip the main-thread heartbeat uses to detect a wedged/silent
    *  worker (one that stopped answering without firing an `error` event). Needs no core. */
@@ -493,14 +572,14 @@ const api = {
    */
   async provisionCore({ passphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
     await ensureInit();
-    const res = wasmProvision(engine, passphrase, treeId, memberId, freshReplica(), docId);
+    const accountState = await ensureAccount(passphrase, true);
+    const res = wasmProvisionTree(requireAccount(), engine, treeId, freshReplica(), docId);
     try {
       await keyringStore().saveHead(docId, engine, res.keyring); // persist genesis for later unlock
       // Retain the genesis under revision 1 (chain) so a later share can PUBLISH it — a joining member's
       // genesis-walk must fetch rev 1 from the server.
       if (engine === 'chain') await keyringStore().save(docId, 1, res.keyring);
-      await saveWatermark(docId, res.watermark); // the anti-rollback floor for recover / change-passphrase
-      await saveKeystore(docId, res.keystore); // the durable-account blob `unlock` re-derives the owner from
+      await saveWatermark(docId, res.watermark);
       // OPE-407: this device provisioned a NEW tree, so it owns it and must mint the server `trees` row
       // before its first push (`put_blob` no longer mints — it 404s on a missing tree). Recorded DURABLY
       // and performed on the first sync tick, NOT inline here, so provisioning stays local-first: an
@@ -513,10 +592,10 @@ const api = {
       // The owner's SELF-CERTIFYING on-tree member id (OPE-543): provision derives it from the account key
       // (the caller's `memberId` label is ignored for the owner) — read it off the genesis keyring, whose
       // single member IS the owner. Callers use it wherever an owner id is asserted (e.g. the members UI).
-      const ownerMemberId = JSON.parse(wasmKeyringSummary(engine, res.keyring)).members[0]?.memberId ?? null;
+      const ownerMemberId = requireAccount().memberId;
       return {
         memberId: ownerMemberId,
-        recoveryCode: res.recoveryCode,
+        recoveryCode: accountState.recoveryCode,
         didKey: res.didKey,
         needsReseal: res.needsReseal,
         needsBackfill: res.needsBackfill,
@@ -535,122 +614,58 @@ const api = {
    */
   async unlockCore({ passphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
     await ensureInit();
-    const head = await keyringStore().loadHead(docId);
-    if (!head) throw new Error(`no keyring stored for ${docId}`);
-    const eng = head.engine || engine;
-    // Owner vs MEMBER reopen — the presence of a persisted member custody blob decides (mirrors the native
-    // seam's core_has_member_context dispatch). A JOINED tree reopens the member's DEK access via unlockAsMember
-    // (they own no account keystore for it); the trusted signers are re-derived from the CURRENT head (chain, so
-    // they stay right across a co-owner change) or empty (dag, anchor-verified). The caller's `memberId` is
-    // advisory — the real on-tree id is the persisted self-cert one.
-    const member = await loadMemberContext(docId);
-    if (member) {
-      const signers = eng === 'chain' ? wasmChainHeadSigners(head.bytes) : new Uint8Array(0);
-      const minRevision = eng === 'chain' ? chainRevision(await loadWatermark(docId)) : 0;
-      let mres;
-      try {
-        mres = wasmUnlockAsMember(
-          eng, head.bytes, passphrase, member.memberKdfParams, treeId, member.memberId,
-          signers, freshReplica(), minRevision, docId,
-        );
-      } catch (e) {
-        throw vaultError(e);
-      }
-      try {
-        await saveWatermark(docId, mres.watermark);
-        const core = new Core(mres.takeHandle(), docId, true, treeId, eng);
-        await installMembership(core, docId, eng, head.bytes);
-        await hydrate(core);
-        cores.set(docId, core);
-        return { didKey: mres.didKey, needsReseal: mres.needsReseal, needsBackfill: mres.needsBackfill, needsRrkBackfill: mres.needsRrkBackfill, writeEpochUnreachable: mres.writeEpochUnreachable };
-      } finally {
-        mres.free();
-      }
-    }
-
-    const keystore = await loadKeystore(docId); // the durable-account blob persisted at provision (owner path)
-    let res;
-    try {
-      res = wasmUnlock(eng, passphrase, treeId, memberId, freshReplica(), head.bytes, keystore, docId);
-    } catch (e) {
-      throw vaultError(e); // a rollback becomes revision_rollback so the gate shows tamper, not wrong-pass
-    }
-    try {
-      await saveWatermark(docId, res.watermark); // refresh the persisted floor
-      const core = new Core(res.takeHandle(), docId, true, treeId, eng);
-      // Install §B3 verify BEFORE hydrate: bootstrap re-folds the WHOLE local mirror on every reopen, and a core
-      // with membership == None accepts every entry unverified — so a forged snapshot/delta already in the store
-      // would be re-adopted on a plain reload. Installing the resolver first gates that fold.
-      await installMembership(core, docId, eng, head.bytes); // activate §B3 verify if the tree is shared
-      await hydrate(core); // load the persisted log + bootstrap — now gated by the installed membership
-      cores.set(docId, core);
-      return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, needsRrkBackfill: res.needsRrkBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
-    } finally {
-      res.free();
-    }
+    void memberId;
+    await ensureAccount(passphrase);
+    return openStoredTree({ treeId, docId, engine });
   },
 
-  /**
-   * Recover owner access with the recovery code under a new passphrase: re-establishes the keyring, opens
-   * a durable core (recovery mints a fresh identity → a new `didKey`), and persists the new keyring +
-   * watermark + shows a NEW recovery code. `opts`: { recoveryCode, newPassphrase, treeId, memberId, docId, engine? }.
+  /** Recover the profile account under a new passphrase, preserving its identity, then reopen the selected
+   * tree through the unchanged trusted keyring. The submitted recovery code is revoked and replaced.
    */
   async recoverCore({ recoveryCode, newPassphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
     await ensureInit();
-    const head = await keyringStore().loadHead(docId);
-    if (!head) throw new Error(`no keyring stored for ${docId}`);
-    const floor = await loadWatermark(docId);
-    const keystore = await loadKeystore(docId); // the durable-account blob recover re-wraps under the new pass
-    let res;
+    void memberId;
+    const saved = await loadAccount();
+    if (!saved) throw new Error('no account keystore stored for this profile');
+    let recovered;
     try {
-      res = wasmRecover(
-        head.engine || engine, recoveryCode, newPassphrase, treeId, memberId, freshReplica(), head.bytes, keystore, floor, docId,
-      );
+      recovered = wasmAccountRecover(recoveryCode, newPassphrase, saved.keystore, saved.generation);
     } catch (e) {
-      throw vaultError(e); // a rollback becomes revision_rollback so the gate shows tamper, not a bad code
+      throw vaultError(e);
     }
     try {
-      const eng = head.engine || engine;
-      await keyringStore().saveHead(docId, eng, res.keyring); // the recovered keyring
-      await saveWatermark(docId, res.watermark);
-      await saveKeystore(docId, res.keystore); // the re-wrapped account blob (dag); empty (chain) keeps the old
-      const core = new Core(res.takeHandle(), docId, true, treeId, eng);
-      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
-      await installMembership(core, docId, eng, res.keyring); // a recovered shared tree keeps verifying
-      await hydrate(core);
-      cores.set(docId, core);
-      return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, needsRrkBackfill: res.needsRrkBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
+      await saveAccount(recovered.keystore, recovered.generation);
+      const nextRecoveryCode = recovered.recoveryCode;
+      replaceAccount(recovered.takeHandle());
+      return { recoveryCode: nextRecoveryCode, ...(await openStoredTree({ treeId, docId, engine })) };
     } finally {
-      res.free();
+      recovered.free();
     }
   },
 
-  /**
-   * Change the passphrase: re-wrap the keyring under a new KEK + rotate the recovery code. The DEK is
-   * unchanged, so the RUNNING core keeps working (no new core). Returns the fresh recovery code to show.
-   * `opts`: { current, next, treeId, memberId, docId, engine? }.
+  /** Re-wrap the profile account under a new passphrase. Tree keyrings, tree sessions, and the recovery code
+   * remain unchanged, so the running cores keep working and there is no new code to display.
    */
   async changePassphraseCore({ current, next, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
     await ensureInit();
-    const head = await keyringStore().loadHead(docId);
-    if (!head) throw new Error(`no keyring stored for ${docId}`);
-    const floor = await loadWatermark(docId);
-    const keystore = await loadKeystore(docId); // the durable-account blob change-passphrase re-wraps
-    let res;
+    void treeId; void memberId; void docId; void engine;
+    const saved = await loadAccount();
+    if (!saved) throw new Error('no account keystore stored for this profile');
+    let verified;
     try {
-      res = wasmChangePassphrase(
-        head.engine || engine, current, next, treeId, memberId, freshReplica(), head.bytes, keystore, floor,
-      );
+      verified = wasmAccountUnlock(current, saved.keystore, saved.generation);
     } catch (e) {
-      throw vaultError(e); // a rollback becomes revision_rollback so the gate shows tamper, not wrong-pass
+      throw vaultError(e);
     }
+    if (account) verified.free();
+    else replaceAccount(verified);
+    let changed;
     try {
-      await keyringStore().saveHead(docId, head.engine || engine, res.keyring); // the re-wrapped keyring
-      await saveWatermark(docId, res.watermark);
-      await saveKeystore(docId, res.keystore); // the re-wrapped account blob (dag); empty (chain) keeps the old
-      return { recoveryCode: res.recoveryCode };
+      changed = wasmAccountChangePassphrase(requireAccount(), next);
+      await saveAccount(changed.keystore, changed.generation);
+      return { recoveryCode: '' };
     } finally {
-      res.free();
+      changed?.free();
     }
   },
 
@@ -671,15 +686,15 @@ const api = {
    * Member-side heal of a rotation-orphaned epoch (DAG only, OPE-381 / F3): open an epoch the owner can't
    * read (its RRK wrap targets the retired escrow) and re-wrap its DEK to the current escrow. Idempotent
    * (`backfilled` false when there is nothing to heal) — safe to call whenever `needsRrkBackfill` is set.
-   * `opts`: { passphrase, memberKdf: Uint8Array, treeId, memberId, docId, engine? }.
+   * `opts`: { treeId, docId, engine? }.
    */
-  async backfillRrkCore({ passphrase, memberKdf, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
+  async backfillRrkCore({ treeId, docId, engine = KEYRING_ENGINE }) {
     await ensureInit();
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const eng = head.engine || engine;
     const floor = await loadWatermark(docId);
-    const res = wasmBackfillRrk(eng, passphrase, memberKdf, treeId, memberId, freshReplica(), head.bytes, floor);
+    const res = wasmBackfillRrk(requireAccount(), eng, treeId, freshReplica(), head.bytes, floor);
     try {
       if (res.backfilled) {
         await keyringStore().saveHead(docId, eng, res.keyring);
@@ -741,6 +756,7 @@ const api = {
     docId,
     { passphrase, treeId, ownerMemberId, newMemberId, role, memberAuthorPublic, memberHpkePublic, engine = KEYRING_ENGINE },
   ) {
+    await verifyAccountPassphrase(passphrase);
     const c = core(docId);
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
@@ -751,11 +767,10 @@ const api = {
     // Anti-rollback floor = the CURRENT keyring revision (from the stored watermark), computed here rather than
     // taken from the caller — matching the native host. It used to default to 0 (no floor at all). OPE-443.
     const minRevision = chainRevision(await loadWatermark(docId));
-    // OPE-543: membership ops authorize with the owner's durable ACCOUNT, re-derived from the persisted
-    // keystore blob + passphrase (both engines) — loaded once here, reused by the re-unlock below.
-    const ownerKeystore = await loadKeystore(docId);
+    // Membership authoring borrows the already-unlocked account; the passphrase prompt above only re-verifies
+    // local possession before this sensitive action.
     const change = wasmAddMember(
-      eng, head.bytes, passphrase, ownerKeystore, treeId, ownerMemberId, freshReplica(), minRevision,
+      requireAccount(), eng, head.bytes, treeId, freshReplica(), minRevision,
       newMemberId, role, memberAuthorPublic, memberHpkePublic,
     );
     await keyringStore().saveHead(docId, eng, change.keyring);
@@ -767,7 +782,7 @@ const api = {
     // A solo→shared transition: the running sealer (built while solo) does NOT sign, so its writes would be
     // rejected by peers. Re-unlock the owner on the shared keyring (the DEK is unchanged) → a signing sealer +
     // the §B3 resolver — so subsequent writes are attributed. Mirrors unlockCore; hydrate preserves the log.
-    const re = wasmUnlock(eng, passphrase, treeId, ownerMemberId, freshReplica(), change.keyring, ownerKeystore, docId);
+    const re = wasmUnlockTree(requireAccount(), eng, treeId, freshReplica(), change.keyring, docId);
     try {
       await saveWatermark(docId, re.watermark);
       const nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
@@ -816,6 +831,7 @@ const api = {
     docId,
     { passphrase, treeId, ownerMemberId, removeMemberId, engine = KEYRING_ENGINE },
   ) {
+    await verifyAccountPassphrase(passphrase);
     const c = core(docId);
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
@@ -833,11 +849,10 @@ const api = {
       try { await syncData(c, 1); } catch { /* preserve-history is best-effort; removal still proceeds */ }
     }
     const minRevision = chainRevision(await loadWatermark(docId)); // anti-rollback floor = current revision (OPE-443)
-    // OPE-543: membership ops authorize with the owner's durable ACCOUNT, re-derived from the persisted
-    // keystore blob + passphrase (both engines) — loaded once here, reused by the re-unlock below.
-    const ownerKeystore = await loadKeystore(docId);
+    // Membership authoring borrows the already-unlocked account; the passphrase prompt above only re-verifies
+    // local possession before this sensitive action.
     const change = wasmRemoveMember(
-      eng, head.bytes, passphrase, ownerKeystore, treeId, ownerMemberId, freshReplica(), minRevision, removeMemberId,
+      requireAccount(), eng, head.bytes, treeId, freshReplica(), minRevision, removeMemberId,
     );
     await keyringStore().saveHead(docId, eng, change.keyring);
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
@@ -851,7 +866,7 @@ const api = {
     // dag, author a self-heal cover so that member's already-accepted history stays verifiable on a fresh
     // replay (the chain retains per-revision membership, so its history needs no cover). hydrate reloads the
     // durable log, which is what authorCover sweeps.
-    const re = wasmUnlock(eng, passphrase, treeId, ownerMemberId, freshReplica(), change.keyring, ownerKeystore, docId);
+    const re = wasmUnlockTree(requireAccount(), eng, treeId, freshReplica(), change.keyring, docId);
     let nc = null;
     try {
       await saveWatermark(docId, re.watermark);
@@ -895,6 +910,7 @@ const api = {
     docId,
     { passphrase, treeId, ownerMemberId, targetMemberId, newRole, engine = KEYRING_ENGINE },
   ) {
+    await verifyAccountPassphrase(passphrase);
     const c = core(docId);
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
@@ -908,10 +924,9 @@ const api = {
       try { await syncData(c, 1); } catch { /* preserve-history is best-effort; the demote still proceeds */ }
     }
     const minRevision = chainRevision(await loadWatermark(docId)); // anti-rollback floor = current revision (OPE-443)
-    // OPE-543: membership ops authorize with the owner's durable ACCOUNT (keystore blob + passphrase, both engines).
-    const ownerKeystore = await loadKeystore(docId);
+    // Membership authoring borrows the already-unlocked account after the passphrase re-verification above.
     const change = wasmChangeRole(
-      eng, head.bytes, passphrase, ownerKeystore, treeId, ownerMemberId, freshReplica(), minRevision, targetMemberId, newRole,
+      requireAccount(), eng, head.bytes, treeId, freshReplica(), minRevision, targetMemberId, newRole,
     );
     await keyringStore().saveHead(docId, eng, change.keyring);
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
@@ -1023,31 +1038,33 @@ const api = {
     await deleteMintRecord(inviteId);
   },
 
-  /**
-   * Mint a joining member's account identity from their passphrase (the first member-flow step, before the
-   * owner admits them). Returns { memberId, kdfParams, authorPublicKey, hpkePublicKey } — the caller persists
-   * kdfParams, hands the two public keys to the owner out-of-band, and uses `memberId` (the SELF-CERTIFYING
-   * id derived from the author key, OPE-543) for the claim + the later `joinAsMember`. The secrets stay in
-   * the worker.
+  /** Return this profile account's public admission identity. The passphrase only creates/unlocks the singleton
+   * account; no per-tree member credential or KDF record is minted.
    */
   async provisionMember(passphrase) {
     await ensureInit();
-    const m = wasmProvisionMember(passphrase);
-    return {
-      memberId: deriveMemberId(m.authorPublicKey),
-      kdfParams: m.kdfParams, authorPublicKey: m.authorPublicKey, hpkePublicKey: m.hpkePublicKey,
+    const accountState = await ensureAccount(passphrase, true);
+    const identity = wasmAccountPublicIdentity(requireAccount());
+    const publicIdentity = {
+      memberId: identity.memberId,
+      authorPublicKey: identity.authorPublicKey,
+      hpkePublicKey: identity.hpkePublicKey,
+      recoveryCode: accountState.recoveryCode,
     };
+    identity.free();
+    return publicIdentity;
   },
 
   /**
    * Join a shared tree as a member: fetch the keyring history, genesis-walk + invite-pin verify it, retain
    * every verified revision, and unlock as the member — opening a durable, verify-active core. `opts`:
-   * { treeId, treeUuid, docId, passphrase, memberId, memberKdfParams, pinnedRevision, pinnedHash, engine? }.
+   * { treeId, treeUuid, docId, passphrase, pinnedRevision, pinnedHash, engine? }.
    * `transport` must already be reachable for the keyring fetch (attach it before joining). Returns didKey.
    */
   async joinAsMember(opts) {
     await ensureInit();
     const { docId, pin } = opts;
+    await ensureAccount(opts.passphrase);
     // The v3 invite flow ALWAYS passes the VERIFIED engine; a bare `undefined` (a low-level direct caller) falls
     // back to the build's engine, but an UNKNOWN non-empty engine THROWS — never a lenient fall-through to chain.
     const engine = opts.engine ?? KEYRING_ENGINE;
@@ -1055,10 +1072,14 @@ const api = {
     // The opaque `pin` is interpreted here, the one place that knows the engine: chain unpacks rev‖kh; dag passes
     // the anchor pin straight through.
     const deps = { transport: transportFor(docId), keyringStore: keyringStore() };
+    const unlockAsMember = (eng, keyringBytes, treeId, trustedSigners, replicaId, minRevision, joinedDocId) =>
+      wasmUnlockTreeAsMember(
+        requireAccount(), eng, keyringBytes, treeId, trustedSigners, replicaId, minRevision, joinedDocId,
+      );
     let res;
     if (engine === 'dag') {
       res = await joinDagAnchor(
-        { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, verifyDagAnchor: wasmVerifyDagAnchor, unlockAsMember: wasmUnlockAsMember }, ...deps },
+        { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, verifyDagAnchor: wasmVerifyDagAnchor, unlockAsMember }, ...deps },
         opts,
       );
     } else if (engine === 'chain') {
@@ -1072,7 +1093,7 @@ const api = {
         pinnedHash = pin.slice(4);
       }
       res = await joinAsMember(
-        { wasm: { verifyKeyringWalk: wasmVerifyKeyringWalk, unlockAsMember: wasmUnlockAsMember }, ...deps },
+        { wasm: { verifyKeyringWalk: wasmVerifyKeyringWalk, unlockAsMember }, ...deps },
         { ...opts, pinnedRevision, pinnedHash },
       );
     } else {
@@ -1080,10 +1101,6 @@ const api = {
     }
     try {
       await saveWatermark(docId, res.watermark);
-      // Persist the member custody so a later reopen takes the member path (see `unlockCore`) — the join
-      // context in the JS seam is cleared on completion, so without this a returning member would fall through
-      // to the owner-unlock path and fail.
-      await saveMemberContext(docId, { memberKdfParams: opts.memberKdfParams, memberId: opts.memberId, engine });
       const c = new Core(res.takeHandle(), docId, true, opts.treeId, engine);
       // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
       await installMembership(c, docId, engine, (await keyringStore().loadHead(docId)).bytes);
@@ -1326,6 +1343,10 @@ const api = {
     }
     cores.delete(docId);
     transports.delete(docId);
+    if (cores.size === 0 && account) {
+      try { account.free(); } catch { /* already gone */ }
+      account = null;
+    }
   },
 };
 

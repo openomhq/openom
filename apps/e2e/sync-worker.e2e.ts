@@ -128,6 +128,7 @@ test('app-core: real keyring lifecycle — provision, mint, reload, unlock', asy
   expect(r.sameDid).toBe(true); // unlock re-derived the same author identity
   expect(r.afterPeople.map((p: any) => p.id)).toContain('pLife'); // unlock loaded the keyring + hydrated
   expect(r.wrongRejected).toBe(true); // a wrong passphrase is refused
+  expect(r.sameWorkerWrongRejected).toBe(true); // closing the last tree also dropped the account handle
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 

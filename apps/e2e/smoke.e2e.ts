@@ -44,7 +44,7 @@ test('start → passphrase → recovery code → onboarding → reload → unloc
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
-test('settings → change passphrase → old rejected, new unlocks @integration', async ({ page }) => {
+test('settings → change passphrase → old rejected, new unlocks without recovery rotation @integration', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
 
@@ -64,9 +64,7 @@ test('settings → change passphrase → old rejected, new unlocks @integration'
   await page.locator('#gate-pass').fill('second passphrase bbb');
   await page.locator('#gate-pass2').fill('second passphrase bbb');
   await page.getByRole('button', { name: /^change passphrase$/i }).click();
-  await expect(page.locator('#gate-recovery-code')).toBeVisible({ timeout: 20_000 }); // rotated code
-  await page.getByRole('button', { name: /i saved it/i }).click();
-  // Back in the app, not re-provisioned.
+  // Account passphrase change only re-wraps the account root; it does not rotate or redisplay recovery.
   await expect(page.getByText(/end-to-end encrypted/i)).toBeVisible();
 
   // Reload → the NEW passphrase unlocks; the OLD one does not.

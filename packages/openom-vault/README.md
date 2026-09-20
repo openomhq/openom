@@ -13,7 +13,8 @@ profile-level [`UnlockedAccount`] to provision and unlock any number of independ
 session receives fresh owned keys derived from the account's stored-random identity master, so the account
 remains resident and reusable while session secrets remain independently owned. Recovery and credential
 changes remain explicit lifecycle operations. The vault also drives membership operations: add/remove a
-member and promote/demote a co-owner. [`AppVault`] dispatches each call to the right engine — [`ChainVault`] over
+member and promote/demote a co-owner. Joined-member unlock can borrow that same durable account while keeping
+the chain's signer pins as separate non-secret trust metadata. [`AppVault`] dispatches each call to the right engine — [`ChainVault`] over
 `openom-keyring-chain` or [`DagVault`] over `openom-keyring-dag` — on the tree's bound [`openom_keyring_api::EngineKind`], so one binary
 serves both. Underneath sits the engine-neutral **sealing core** (`vault_core`: DEK / epoch / RRK / KDF /
 recovery-code / `SealerSet` machinery), extracted so both engines share one implementation of the

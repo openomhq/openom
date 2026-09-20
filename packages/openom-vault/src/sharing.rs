@@ -30,6 +30,71 @@ fn err(msg: impl Into<String>) -> VaultError {
     VaultError::Sharing(msg.into())
 }
 
+/// How one durable account participates in a trusted tree keyring.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountTreeRole {
+    /// The account is the tree's founder and may use the owner lifecycle path.
+    Founder,
+    /// The account is an admitted non-founder member, including a co-owner.
+    Member,
+}
+
+/// Resolve an account's role from an already-trusted local keyring head.
+///
+/// This is a dispatch helper, not a trust bootstrap: callers must first establish the keyring head through
+/// provision, a verified join, or authenticated keyring synchronization. The account's author key must match
+/// the key recorded for its self-certifying member id; a substituted keyring entry fails closed.
+///
+/// # Errors
+/// Returns [`VaultError`] when the keyring is malformed or binds the account id to another author key.
+pub fn account_tree_role(
+    engine: EngineKind,
+    keyring: &[u8],
+    account: &UnlockedAccount,
+) -> Result<Option<AccountTreeRole>, VaultError> {
+    let author_public = account.root.identity.verifying_key().to_bytes();
+    let is_founder = match engine {
+        EngineKind::Chain => {
+            let decoded = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
+            let member = decoded.members.iter().find(|member| member.member_id == account.member_id);
+            let Some(member) = member else {
+                return Ok(None);
+            };
+            if member.author_public_key.as_slice() != author_public.as_slice() {
+                return Err(err("account author key does not match its keyring member"));
+            }
+            decoded
+                .members
+                .iter()
+                .find(|member| member.role == MEMBER_OWNER)
+                .is_some_and(|founder| founder.member_id == account.member_id)
+        }
+        EngineKind::Dag => {
+            let resolved = dag_client::resolve(keyring).map_err(|e| err(e.to_string()))?;
+            let member = resolved
+                .members
+                .members
+                .iter()
+                .find(|member| member.member_id == account.member_id);
+            let Some(member) = member else {
+                return Ok(None);
+            };
+            if member.author_public_key.as_slice() != author_public.as_slice() {
+                return Err(err("account author key does not match its keyring member"));
+            }
+            resolved
+                .members
+                .owner()
+                .is_some_and(|founder| founder.member_id == account.member_id)
+        }
+    };
+    Ok(Some(if is_founder {
+        AccountTreeRole::Founder
+    } else {
+        AccountTreeRole::Member
+    }))
+}
+
 // --- result shapes (plain Rust; a veneer wraps these in its wasm-bindgen struct) -------------------
 
 /// The accepted head of a walked / reset keyring run: the RAW head `Keyring` body to store + the opaque
@@ -808,15 +873,46 @@ pub fn add_member(
     member_author_public: &[u8],
     member_hpke_public: &[u8],
 ) -> Result<AcceptedKeyring, VaultError> {
+    let account = owner_account(owner_keystore, owner_passphrase)?;
+    add_member_as_account(
+        engine,
+        keyring,
+        &account,
+        tree_id,
+        owner_member_id,
+        replica_id,
+        min_revision,
+        new_member_id,
+        role,
+        member_author_public,
+        member_hpke_public,
+    )
+}
+
+/// Add a member using an already-unlocked durable account.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, a bad joiner key, or an unauthorized add.
+#[allow(clippy::too_many_arguments)]
+pub fn add_member_as_account(
+    engine: EngineKind,
+    keyring: &[u8],
+    account: &UnlockedAccount,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    new_member_id: &str,
+    role: &str,
+    member_author_public: &[u8],
+    member_hpke_public: &[u8],
+) -> Result<AcceptedKeyring, VaultError> {
     let joiner_id = MemberId::new(new_member_id);
     match engine {
         EngineKind::Chain => {
-            // OPE-543 durable identity: the chain owner authorizes with their durable ACCOUNT (re-derived
-            // from the persisted keystore blob + passphrase), symmetric with the dag.
-            let account = owner_account(owner_keystore, owner_passphrase)?;
             let added = vault::add_member(
                 keyring,
-                &account,
+                account,
                 &TreeId::new(tree_id),
                 min_revision,
                 &vault::Joiner::from_bytes(
@@ -852,8 +948,7 @@ pub fn add_member(
                 member_author_public,
                 member_hpke_public,
             )?;
-            let account = owner_account(owner_keystore, owner_passphrase)?;
-            let anchor = DagVault.add_member(&ctx, keyring, &account, &joiner)?;
+            let anchor = DagVault.add_member(&ctx, keyring, account, &joiner)?;
             let watermark = DagVault.watermark(&anchor)?;
             Ok(AcceptedKeyring {
                 keyring: anchor,
@@ -885,12 +980,39 @@ pub fn remove_member(
     min_revision: u32,
     remove_member_id: &str,
 ) -> Result<AcceptedKeyring, VaultError> {
+    let account = owner_account(owner_keystore, owner_passphrase)?;
+    remove_member_as_account(
+        engine,
+        keyring,
+        &account,
+        tree_id,
+        owner_member_id,
+        replica_id,
+        min_revision,
+        remove_member_id,
+    )
+}
+
+/// Remove a member using an already-unlocked durable account.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, unknown member, founder removal, or unauthorized change.
+#[allow(clippy::too_many_arguments)]
+pub fn remove_member_as_account(
+    engine: EngineKind,
+    keyring: &[u8],
+    account: &UnlockedAccount,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    remove_member_id: &str,
+) -> Result<AcceptedKeyring, VaultError> {
     match engine {
         EngineKind::Chain => {
-            let account = owner_account(owner_keystore, owner_passphrase)?;
             let removed = vault::remove_member(
                 keyring,
-                &account,
+                account,
                 &TreeId::new(tree_id),
                 min_revision,
                 &MemberId::new(remove_member_id),
@@ -916,8 +1038,7 @@ pub fn remove_member(
                 member_id: &owner,
                 replica_id: &replica,
             };
-            let account = owner_account(owner_keystore, owner_passphrase)?;
-            let anchor = DagVault.remove_member(&ctx, keyring, &account, remove_member_id)?;
+            let anchor = DagVault.remove_member(&ctx, keyring, account, remove_member_id)?;
             let watermark = DagVault.watermark(&anchor)?;
             Ok(AcceptedKeyring {
                 keyring: anchor,
@@ -956,19 +1077,48 @@ pub fn change_role(
     target_member_id: &str,
     new_role: &str,
 ) -> Result<AcceptedKeyring, VaultError> {
+    let account = owner_account(founder_keystore, founder_passphrase)?;
+    change_role_as_account(
+        engine,
+        keyring,
+        &account,
+        tree_id,
+        founder_member_id,
+        replica_id,
+        min_revision,
+        target_member_id,
+        new_role,
+    )
+}
+
+/// Change a member role using an already-unlocked durable account.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, unknown target, founder target, or unauthorized change.
+#[allow(clippy::too_many_arguments)]
+pub fn change_role_as_account(
+    engine: EngineKind,
+    keyring: &[u8],
+    account: &UnlockedAccount,
+    tree_id: &[u8],
+    founder_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    target_member_id: &str,
+    new_role: &str,
+) -> Result<AcceptedKeyring, VaultError> {
     let promote = new_role == "co-owner";
     match engine {
         EngineKind::Chain => {
             let (tree, target) = (TreeId::new(tree_id), MemberId::new(target_member_id));
             // PROMOTE adds to the signer set; DEMOTE lowers the co-owner to a non-signer role (admin/editor/
             // viewer) — forward-secure via the OPE-421 look-behind. Both return the same `CoOwnerChanged`.
-            let account = owner_account(founder_keystore, founder_passphrase)?;
             let changed = if promote {
-                vault::add_co_owner(keyring, &account, &tree, min_revision, &target)?
+                vault::add_co_owner(keyring, account, &tree, min_revision, &target)?
             } else {
                 vault::remove_co_owner(
                     keyring,
-                    &account,
+                    account,
                     &tree,
                     min_revision,
                     &target,
@@ -995,11 +1145,10 @@ pub fn change_role(
                 member_id: &owner,
                 replica_id: &replica,
             };
-            let account = owner_account(founder_keystore, founder_passphrase)?;
             let anchor = DagVault.change_role(
                 &ctx,
                 keyring,
-                &account,
+                account,
                 target_member_id,
                 parse_keyring_role(new_role)?,
             )?;
@@ -1076,6 +1225,74 @@ pub fn unlock_as_member(
                 watermark: u.watermark,
                 epoch_secret: epoch_secret(EngineKind::Dag, hpke_secret),
                 write_epoch_unreachable: u.write_epoch_unreachable,
+            })
+        }
+    }
+}
+
+/// Unlock a shared tree as a non-owner member through one already-unlocked durable account. The account's
+/// self-certifying member id is the sole identity input; only non-secret chain trust pins remain caller-owned.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, an unpinned chain signer, a foreign/removed account, or an
+/// epoch the account cannot reach.
+#[allow(clippy::too_many_arguments)]
+pub fn unlock_as_account_member(
+    engine: EngineKind,
+    keyring: &[u8],
+    account: &UnlockedAccount,
+    tree_id: &[u8],
+    trusted_signers: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+) -> Result<MemberUnlock, VaultError> {
+    let member_id = account.member_id.clone();
+    let member = MemberId::new(&member_id);
+    let epoch_secret = |engine, hpke_secret| MemberEpochSecret {
+        engine,
+        hpke_secret,
+        tree_id: tree_id.to_vec(),
+        member_id: member_id.clone(),
+    };
+    match engine {
+        EngineKind::Chain => {
+            let trusted = parse_trusted_signers(trusted_signers)?;
+            let (unlocked, hpke_secret) = vault::unlock_as_account_member(
+                keyring,
+                account,
+                &trusted,
+                &TreeId::new(tree_id),
+                &ReplicaId::new(replica_id),
+                min_revision,
+            )?;
+            Ok(MemberUnlock {
+                sealer: unlocked.sealer,
+                did_key: unlocked.did_key.into_string(),
+                watermark: chain_wm_pinned(
+                    unlocked.revision,
+                    &unlocked.write_key_id,
+                    &unlocked.write_dek_hash,
+                ),
+                epoch_secret: epoch_secret(EngineKind::Chain, hpke_secret),
+                write_epoch_unreachable: false,
+            })
+        }
+        EngineKind::Dag => {
+            let tree = TreeId::new(tree_id);
+            let replica = ReplicaId::new(replica_id);
+            let ctx = VaultContext {
+                tree_id: &tree,
+                member_id: &member,
+                replica_id: &replica,
+            };
+            let (unlocked, hpke_secret) =
+                DagVault.unlock_as_account_member(&ctx, keyring, account)?;
+            Ok(MemberUnlock {
+                sealer: unlocked.sealer,
+                did_key: unlocked.did_key.into_string(),
+                watermark: unlocked.watermark,
+                epoch_secret: epoch_secret(EngineKind::Dag, hpke_secret),
+                write_epoch_unreachable: unlocked.write_epoch_unreachable,
             })
         }
     }

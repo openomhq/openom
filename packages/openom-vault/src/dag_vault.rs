@@ -23,7 +23,7 @@
 
 use did::DidKey;
 use openom_crypto::{
-    derive_root, generate_dek, generate_salt, CryptoError, Passphrase, RecoveryCode,
+    derive_root, generate_dek, generate_salt, CryptoError, Passphrase, RecoveryCode, RootKeys,
 };
 use openom_keyring_api::derive_member_id;
 use openom_keyring_dag::{client as dag_client, KeyringRole};
@@ -975,6 +975,33 @@ impl DagVault {
         passphrase: &Passphrase,
         member_kdf: &KeyeoKdfParams,
     ) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
+        validate_kdf(member_kdf)?;
+        let root = derive_root(passphrase.expose(), member_kdf)?;
+        Self::unlock_as_member_with_root(ctx, anchor, root)
+    }
+
+    /// Unlock an ordinary member through the profile's durable account identity.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the account is not the requested member, is absent/removed, or reaches no
+    /// current epoch.
+    pub fn unlock_as_account_member(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        account: &UnlockedAccount,
+    ) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
+        if ctx.member_id.as_str() != account.member_id {
+            return Err(VaultError::NotAuthorized);
+        }
+        Self::unlock_as_member_with_root(ctx, anchor, account.tree_root())
+    }
+
+    fn unlock_as_member_with_root(
+        ctx: &VaultContext,
+        anchor: &[u8],
+        root: RootKeys,
+    ) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
@@ -996,8 +1023,6 @@ impl DagVault {
             ..
         } = fold_resolved(&resolved)?;
 
-        validate_kdf(member_kdf)?;
-        let root = derive_root(passphrase.expose(), member_kdf)?;
         if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
@@ -1403,6 +1428,36 @@ impl DagVault {
         member_kdf: &KeyeoKdfParams,
         floor: &[u8],
     ) -> Result<Backfilled, VaultError> {
+        validate_kdf(member_kdf)?;
+        let root = derive_root(passphrase.expose(), member_kdf)?;
+        Self::backfill_rrk_with_root(ctx, anchor, &root, floor)
+    }
+
+    /// Heal missing member wraps with the already-unlocked durable account identity.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the account is not the context member, cannot be authorized by the anchor,
+    /// or the anchor is malformed.
+    pub fn backfill_rrk_as_account(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        account: &UnlockedAccount,
+        floor: &[u8],
+    ) -> Result<Backfilled, VaultError> {
+        if ctx.member_id.as_str() != account.member_id {
+            return Err(VaultError::NotAuthorized);
+        }
+        let root = account.tree_root();
+        Self::backfill_rrk_with_root(ctx, anchor, &root, floor)
+    }
+
+    fn backfill_rrk_with_root(
+        ctx: &VaultContext,
+        anchor: &[u8],
+        root: &RootKeys,
+        floor: &[u8],
+    ) -> Result<Backfilled, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
 
@@ -1441,10 +1496,8 @@ impl DagVault {
             return unchanged();
         }
 
-        // The member authorizes via their passphrase + account kdf-derived identity (anti-substitution vs
-        // their resolved key), and that same derivation yields the HPKE secret they open epochs with.
-        validate_kdf(member_kdf)?;
-        let root = derive_root(passphrase.expose(), member_kdf)?;
+        // The member authorizes via their account identity (anti-substitution vs their resolved key), and
+        // that same durable account yields the HPKE secret they open epochs with.
         if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }

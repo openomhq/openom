@@ -50,7 +50,7 @@ function isNotYetAdmitted(e) {
 const storageOf = (deps) => deps.storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
 const JOIN_KEY = (inviteId) => `openom:join-ctx:${inviteId}`;
 const u8ify = (o, keys) => { const w = { ...o }; for (const k of keys) if (w[k]) w[k] = Array.from(w[k]); return w; };
-const BYTE_FIELDS = ['s', 'memberKdfParams', 'pin'];
+const BYTE_FIELDS = ['s', 'pin'];
 
 function saveJoinContext(storage, ctx) {
   if (!storage) return;
@@ -127,7 +127,7 @@ export async function submitJoinClaim(deps, { link, passphrase, memberId }) {
   const treeId = uuidToTreeId(verified.uuid);
   const prov = await worker.provisionMember(passphrase);
   seedTreeIdentity(memberId, { bytes: treeId, uuid: verified.uuid }, storage ? { storage } : undefined);
-  // SELF-CERT identity (OPE-543): the on-tree member id is `prov.memberId` — derived from the freshly-minted
+  // SELF-CERT identity (OPE-543): the on-tree member id is `prov.memberId` — derived from the durable account's
   // author key, NOT the caller's account label. The claim carries it (the owner admits under it) and the join
   // context persists it (`selfMemberId`) for `joinAsMember`; `memberId` stays the LOCAL label (resume matching
   // + the seeded tree identity).
@@ -138,9 +138,9 @@ export async function submitJoinClaim(deps, { link, passphrase, memberId }) {
 
   const ctx = {
     inviteId, s, docId: verified.uuid, treeId, uuid: verified.uuid, role: verified.role, engine: verified.engine,
-    pin: verified.pin, memberId, selfMemberId: prov.memberId, memberKdfParams: prov.kdfParams,
+    pin: verified.pin, memberId, selfMemberId: prov.memberId,
   };
-  // Persist BEFORE the claim: a crash right after the claim must resume with the SAME kdfParams, never re-provision.
+  // Persist BEFORE the claim: a crash right after the claim must resume with the SAME account identity, never re-provision.
   saveJoinContext(storage, ctx);
   try {
     await remote.claimInvite(claimMsg);
@@ -168,7 +168,7 @@ export async function completeJoin(deps, ctx) {
   try {
     const res = await worker.joinAsMember({
       treeId: ctx.treeId, treeUuid: ctx.uuid, docId: ctx.docId, passphrase: ctx.passphrase,
-      memberId: ctx.selfMemberId, memberKdfParams: ctx.memberKdfParams, engine: ctx.engine, pin: ctx.pin,
+      memberId: ctx.selfMemberId, engine: ctx.engine, pin: ctx.pin,
     });
     clearJoinContext(storage, ctx.inviteId); // joined — the resumable context is done
     return { docId: ctx.docId, treeId: ctx.treeId, didKey: res.didKey };

@@ -371,9 +371,8 @@ class App {
     }
   }
 
-  // Opened from Settings. The running session keeps working (same DEK); this only re-wraps the
-  // passphrase and issues a fresh recovery code, so there's no session to enter — gateContinue
-  // returns to the app.
+  // Opened from Settings. The web account cutover re-wraps the profile account and retains its recovery code;
+  // the not-yet-cut-over native host still returns a newly-rotated per-tree code until Phase 0 chunk 3c.
   startChangePassphrase() {
     this.showGate('change');
   }
@@ -390,8 +389,12 @@ class App {
       const { recoveryCode } = await this.worker.changePassphraseCore({
         current, next, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
       });
-      this.gateRecoveryCode = recoveryCode; // a fresh code — the old one no longer works
-      this.showGate('recovery');
+      if (recoveryCode) {
+        this.gateRecoveryCode = recoveryCode;
+        this.showGate('recovery');
+      } else {
+        this.cancelGate();
+      }
     } catch (e) {
       this.gateBusy = false;
       this.gateError = this.gateErr(e, 'gate-err-change');

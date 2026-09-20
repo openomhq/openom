@@ -7,7 +7,7 @@
 (the module-level `§`-refs — SERVER-DATA-FORMAT, the launch-gate design — live inline in the
 `core/` files they govern, not in one apps/app-level doc)
 
-**Last updated:** 2026-08-25
+**Last updated:** 2026-09-21
 
 ## Run / verify
 
@@ -58,6 +58,11 @@ domain logic in Rust and re-implements none of it in JS; `src/core/` is the JS o
 claim-model engine (an openom-data-crdt set-union fold + an openom-data-projection read model); it replaced
 the former treelog engine at the claim-model cutover.
 
+The production web path hosts one unlocked durable account inside `appCore.worker.js`. Its opaque wrapped
+keystore and generation are persisted once per browser profile, while tree keyrings, watermarks, and logs stay
+per document. Owned and joined trees both borrow that account handle; joined-tree reopen selects the founder or
+member path from the already-trusted keyring head rather than from a second persisted member credential.
+
 It is **not** a general-purpose SPA: there is no client-side router beyond the app's own
 `data-view` state, no CSS framework, and no dependency-injection container — `src/ui/dom.js`'s `h()`
 plus `tree.revision`-driven re-render is the entire rendering model.
@@ -71,6 +76,8 @@ src/main.js            wires the store stack, the sealer/vault, the lock policy,
                        router into one running app.
 
 src/core/              orchestration — no UI, no rendering.
+  appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
+  membership.js, sharing.js   resumable invite/claim orchestration and verified chain/DAG join bootstrap.
   store.js               DocStore contract: opaque-bytes persistence (memory / IndexedDB / Tauri).
   indexedDbStore.js       the browser DocStore implementation.
   storeStack.js           composition root: assembles the store layers by mode, fail-closed

@@ -1,7 +1,7 @@
 // core/sharing.js joinAsMember — the member-join JS WIRING (the wasm trust decisions are stubbed; they are
 // proven in Rust: openom_vault::sharing::chain_genesis_walk_join_end_to_end + the app-core share→verify e2es).
 // Adversarially covers: walk-derived retention (never the server's label), fail-closed ordering (a walk / pin
-// / passphrase failure persists NOTHING), handle-free on a post-unlock store failure, the already-present
+// / account unlock failure persists NOTHING), handle-free on a post-unlock store failure, the already-present
 // guard, and the fingerprint cross-check.
 import { describe, it, expect } from 'vitest';
 import { joinAsMember, publishKeyring, syncKeyring, frameHops, unframe, JoinError, KeyringForkError } from '../app/src/core/sharing.js';
@@ -31,7 +31,7 @@ function fakeWasm({ walkThrows = false, unlockThrows = false, revision = 2 } = {
       };
     },
     unlockAsMember() {
-      if (unlockThrows) throw new Error('wrong passphrase');
+      if (unlockThrows) throw new Error('account unlock failed');
       calls.unlocked += 1;
       return {
         takeHandle: () => ({ free: () => { calls.freed += 1; } }),
@@ -49,9 +49,6 @@ const baseOpts = {
   treeId,
   treeUuid: 'uuid-1',
   docId: 'k1',
-  passphrase: 'pw',
-  memberId: 'acct-bob',
-  memberKdfParams: new Uint8Array(8),
   pinnedRevision: 1,
   pinnedHash: new Uint8Array(32).fill(0xcd),
 };
@@ -101,7 +98,7 @@ describe('joinAsMember wiring', () => {
     expect(await keyringStore.load('k1')).toBeNull();
   });
 
-  it('fails closed on a wrong passphrase (unlock throws) — nothing persisted', async () => {
+  it('fails closed on an account unlock failure — nothing persisted', async () => {
     const keyringStore = memoryKeyringStore();
     await expect(
       joinAsMember({ wasm: fakeWasm({ unlockThrows: true }), transport: transport(revs), keyringStore }, baseOpts),

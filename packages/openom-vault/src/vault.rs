@@ -22,7 +22,7 @@
 use did::DidKey;
 use openom_crypto::{
     default_kdf_params, derive_root, generate_dek, generate_hpke_keypair, generate_salt,
-    CryptoError, Dek, HpkeKeypair, HpkePrivate, Passphrase, RecoveryCode, RrkSecret,
+    CryptoError, Dek, HpkeKeypair, HpkePrivate, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
 use openom_keyring_api::derive_member_id;
 use openom_keyring_chain::{
@@ -708,11 +708,56 @@ pub fn unlock_as_member(
     replica_id: &ReplicaId,
     min_revision: u32,
 ) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
-    let member_passphrase = member.passphrase.expose();
-    let member_kdf = member.kdf;
-    let trusted_signers = member.trusted_signers;
+    validate_kdf(member.kdf)?;
+    let root = derive_root(member.passphrase.expose(), member.kdf)?;
+    unlock_as_member_with_root(
+        keyring_bytes,
+        root,
+        member.member_id.as_str(),
+        member.trusted_signers,
+        tree_id,
+        replica_id,
+        min_revision,
+    )
+}
+
+/// Unlock a shared tree as a non-owner member using the profile's durable account identity.
+///
+/// The account remains resident and reusable; this call derives an independently-owned signing/HPKE bundle
+/// for the tree session and retains only the session's HPKE capability for later epoch adoption.
+///
+/// # Errors
+/// Returns [`VaultError`] if the member is absent/removed, the keyring fails its pinned trust check, or no
+/// epoch is reachable by the account's HPKE key.
+pub fn unlock_as_account_member(
+    keyring_bytes: &[u8],
+    account: &UnlockedAccount,
+    trusted_signers: &[VerifyingKey],
+    tree_id: &TreeId,
+    replica_id: &ReplicaId,
+    min_revision: u32,
+) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
+    unlock_as_member_with_root(
+        keyring_bytes,
+        account.tree_root(),
+        &account.member_id,
+        trusted_signers,
+        tree_id,
+        replica_id,
+        min_revision,
+    )
+}
+
+fn unlock_as_member_with_root(
+    keyring_bytes: &[u8],
+    root: RootKeys,
+    member_id: &str,
+    trusted_signers: &[VerifyingKey],
+    tree_id: &TreeId,
+    replica_id: &ReplicaId,
+    min_revision: u32,
+) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
     let tree_id = tree_id.as_bytes();
-    let member_id = member.member_id.as_str();
     let replica_id = replica_id.as_bytes();
     let keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
@@ -728,9 +773,6 @@ pub fn unlock_as_member(
     // path's whole security — the member cannot derive the owner's key, so it must be
     // supplied, never taken from the (untrusted) document.
     verify_keyring_any(&keyring, trusted_signers).map_err(|_| CryptoError::Signature)?;
-    validate_kdf(member_kdf)?;
-    let root = derive_root(member_passphrase, member_kdf)?;
-
     // A set over every epoch the member's HPKE wraps reach (full history); no wrap anywhere
     // means a removed member.
     let deks = member_epoch_deks(
