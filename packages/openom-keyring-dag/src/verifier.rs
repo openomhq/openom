@@ -318,6 +318,34 @@ mod tests {
     }
 
     #[test]
+    fn a_causally_removed_author_is_refused_at_admission() {
+        // The admission-time counterpart to the resolver test in lib.rs (which only checks the RESOLVED view).
+        // bob is removed, then authors an op as a CHILD of his own removal — so he is inactive at that causal
+        // position, unlike the concurrent case above where the add races the removal and is kept as a no-op.
+        // The `is_active` guard in `is_authorized` REFUSES this at admission (anti-spam), rather than admitting
+        // a permanently-void op. A mutant that deletes or inverts that guard would admit it, so this pins the
+        // admission-path consequence of the guard directly.
+        let v = DagVerifier;
+        let gm = vec![
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+        ];
+        let genesis_op = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
+        let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
+
+        let remove_bob = sign_op([2; 32], vec![[1; 32]], mid(1), MembershipAction::Remove { member: mid(2) }, &sk(1));
+        let s1 = v.admit(Some(&boot.state), &op_update(&remove_bob)).unwrap();
+
+        // bob's add is a child of his OWN removal ([2;32]) — causally after it, so bob is inactive here.
+        let bob_adds_carol = sign_op([3; 32], vec![[2; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2));
+        assert_eq!(
+            v.admit(Some(&s1.state), &op_update(&bob_adds_carol)).unwrap_err(),
+            VerifyError::Unauthorized,
+            "a causally-removed author's later op is refused at admission, not kept as a no-op"
+        );
+    }
+
+    #[test]
     fn a_genesis_with_a_bad_signature_is_refused() {
         // The genesis Create authenticates against its own initial_members' key (founder = vk(1)), but this
         // op is signed by an unrelated key — the engine must reject it, and `classify` must map that to an
