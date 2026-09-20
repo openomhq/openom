@@ -146,6 +146,10 @@ test('app-core: an owner shares a tree and a member joins + verifies through the
   expect(r.sync.state).toBe('ok');
   // Verify-on-ingest ACCEPTED the owner's signed write on the shared tree — the member sees it.
   expect(r.memberPeople).toContain('pShared');
+  // MEMBER REOPEN (#2): a FRESH worker reopened the joined tree via unlockCore's member path — same identity,
+  // same data. Pre-fix, a member reopen fell through to the owner-unlock path (no member branch) and failed.
+  expect(r.reopenedDid).toBe(r.joinedDid);
+  expect(r.reopenedPeople).toContain('pShared');
   // OPE-293: addMember asserted the resolved membership to the advisory /access — owner + the new member,
   // each with a role, plus a CAS generation and a non-empty basis frontier.
   expect(r.access, 'membership summary was pushed to /access').not.toBeNull();

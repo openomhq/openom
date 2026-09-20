@@ -1127,6 +1127,18 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
     openom_vault::sharing::keyring_summary(parse_engine(engine)?, keyring).map_err(to_js)
 }
 
+/// The chain head's CURRENT authorized signer author keys, concatenated (32 bytes each) — the `trusted_signers`
+/// a chain member unlock validates against. The join gets these from the genesis-walk; a member REOPEN has no
+/// walk, so it derives them from the trusted, persisted head (staying current across a co-owner promote/demote
+/// rather than freezing at join). Chain-only — the dag member unlock uses an empty signer set.
+///
+/// # Errors
+/// Returns a [`JsError`] if the keyring is malformed.
+#[wasm_bindgen(js_name = chainHeadSigners)]
+pub fn chain_head_signers(head_keyring: &[u8]) -> Result<Vec<u8>, JsError> {
+    openom_vault::sharing::chain_head_signers_flat(head_keyring).map_err(to_js)
+}
+
 /// The moderator `did:key`s (Maintainer+ members) resolved from a keyring — the worker feeds these to the
 /// core's `setModerators` on unlock and after every keyring change, so the claim fold honors the current
 /// moderator authority.

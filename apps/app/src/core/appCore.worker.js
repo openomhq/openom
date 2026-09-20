@@ -39,6 +39,7 @@ import init, {
   resolvedOwnerKey as wasmResolvedOwnerKey,
   recoveryConfirmed as wasmRecoveryConfirmed,
   keyringSummary as wasmKeyringSummary,
+  chainHeadSigners as wasmChainHeadSigners,
   keyringCovers as wasmKeyringCovers,
   keyringHasBeenShared as wasmKeyringHasBeenShared,
 } from '../vendor/app-core/openom_app_core.js';
@@ -106,6 +107,26 @@ async function saveKeystore(docId, ks) {
 async function loadKeystore(docId) {
   const s = await store().readSnapshot(KS_KEY(docId));
   return s ? s.bytes : new Uint8Array(0);
+}
+
+// MEMBER custody: for a JOINED tree (this device is a member, not the owner), the durable state a reopen needs
+// to re-derive the member's DEK access via `unlockAsMember` — the member's own account KDF params + the
+// SELF-CERTIFYING member id + the engine. Persisted per doc on join and read on reopen (the owner reopens via
+// the account keystore instead; native keeps the equivalent host-side and dispatches on `core_has_member_context`).
+// Its PRESENCE is the owner-vs-member reopen discriminator. Trusted signers are NOT stored here — they are
+// re-derived from the current persisted keyring head at reopen so they stay current across a co-owner change.
+const MC_KEY = (docId) => `${docId}::member-ctx`;
+async function saveMemberContext(docId, { memberKdfParams, memberId, engine }) {
+  const kdf = btoa(String.fromCharCode(...memberKdfParams));
+  const blob = new TextEncoder().encode(JSON.stringify({ memberId, engine, kdf }));
+  const prev = await store().readSnapshot(MC_KEY(docId));
+  await store().putSnapshot(MC_KEY(docId), blob, prev?.version ?? null);
+}
+async function loadMemberContext(docId) {
+  const s = await store().readSnapshot(MC_KEY(docId));
+  if (!s) return null;
+  const { memberId, engine, kdf } = JSON.parse(new TextDecoder().decode(s.bytes));
+  return { memberId, engine, memberKdfParams: Uint8Array.from(atob(kdf), (c) => c.charCodeAt(0)) };
 }
 
 // OPE-407 (explicit create-tree): a DURABLE per-doc marker that this device provisioned a NEW tree whose
@@ -517,7 +538,37 @@ const api = {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const eng = head.engine || engine;
-    const keystore = await loadKeystore(docId); // the durable-account blob persisted at provision
+    // Owner vs MEMBER reopen — the presence of a persisted member custody blob decides (mirrors the native
+    // seam's core_has_member_context dispatch). A JOINED tree reopens the member's DEK access via unlockAsMember
+    // (they own no account keystore for it); the trusted signers are re-derived from the CURRENT head (chain, so
+    // they stay right across a co-owner change) or empty (dag, anchor-verified). The caller's `memberId` is
+    // advisory — the real on-tree id is the persisted self-cert one.
+    const member = await loadMemberContext(docId);
+    if (member) {
+      const signers = eng === 'chain' ? wasmChainHeadSigners(head.bytes) : new Uint8Array(0);
+      const minRevision = eng === 'chain' ? chainRevision(await loadWatermark(docId)) : 0;
+      let mres;
+      try {
+        mres = wasmUnlockAsMember(
+          eng, head.bytes, passphrase, member.memberKdfParams, treeId, member.memberId,
+          signers, freshReplica(), minRevision, docId,
+        );
+      } catch (e) {
+        throw vaultError(e);
+      }
+      try {
+        await saveWatermark(docId, mres.watermark);
+        const core = new Core(mres.takeHandle(), docId, true, treeId, eng);
+        await installMembership(core, docId, eng, head.bytes);
+        await hydrate(core);
+        cores.set(docId, core);
+        return { didKey: mres.didKey, needsReseal: mres.needsReseal, needsBackfill: mres.needsBackfill, needsRrkBackfill: mres.needsRrkBackfill, writeEpochUnreachable: mres.writeEpochUnreachable };
+      } finally {
+        mres.free();
+      }
+    }
+
+    const keystore = await loadKeystore(docId); // the durable-account blob persisted at provision (owner path)
     let res;
     try {
       res = wasmUnlock(eng, passphrase, treeId, memberId, freshReplica(), head.bytes, keystore, docId);
@@ -1029,6 +1080,10 @@ const api = {
     }
     try {
       await saveWatermark(docId, res.watermark);
+      // Persist the member custody so a later reopen takes the member path (see `unlockCore`) — the join
+      // context in the JS seam is cleared on completion, so without this a returning member would fall through
+      // to the owner-unlock path and fail.
+      await saveMemberContext(docId, { memberKdfParams: opts.memberKdfParams, memberId: opts.memberId, engine });
       const c = new Core(res.takeHandle(), docId, true, opts.treeId, engine);
       // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
       await installMembership(c, docId, engine, (await keyringStore().loadHead(docId)).bytes);

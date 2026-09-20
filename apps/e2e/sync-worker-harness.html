@@ -427,8 +427,19 @@
         const sync = await member.syncNow(memberDoc);
         const memberProj = JSON.parse(await member.project(memberDoc));
 
+        // MEMBER REOPEN (OPE-543 #2): a FRESH worker (models a browser reload; IndexedDB is shared per origin)
+        // reopens the JOINED tree via unlockCore. It must take the MEMBER path (persisted member custody), not
+        // the owner path, and recover the same identity + see the shared data.
+        const memberReload = spawnWorker();
+        await memberReload.warm();
+        await memberReload.attachTransport(memberDoc, Comlink.proxy(transport));
+        const reopened = await memberReload.unlockCore({ passphrase: memberPass, treeId, memberId: acct.memberId, docId: memberDoc });
+        const reopenedPeople = JSON.parse(await memberReload.project(memberDoc)).people.map((p) => p.id);
+
         return {
           joinedDid: joined.didKey,
+          reopenedDid: reopened.didKey,
+          reopenedPeople,
           sync,
           memberPeople: memberProj.people.map((p) => p.id),
           serverKeyringHead: (await transport.readKeyring(ownerDoc, 1)).head,
