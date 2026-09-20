@@ -902,7 +902,7 @@ pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
     })
 }
 
-/// The SELF-CERTIFYING member id (OPE-543): `member_id = derive_member_id(author_public_key)`, a UUIDv8 over
+/// The SELF-CERTIFYING member id (OPE-543): `member_id = derive_member_id(author_public_key)`, a `UUIDv8` over
 /// SHA-256(author key). Exposed so the JS seam NEVER re-implements the derivation (max-Rust): the worker calls
 /// it on a freshly-minted member key (the joiner's own id) and on a joiner's CLAIMED key at admission (never
 /// trusting the claim's id) — the byte-for-byte source the engines and `/register` enforce. The native seam

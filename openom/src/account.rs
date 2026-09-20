@@ -31,8 +31,6 @@ use crate::AppState;
 /// The domain tag every `/register` proof-of-possession is prefixed with. A FROZEN constant: the client's
 /// signer must prepend exactly these bytes, so the author key's signature can never be confused with a
 /// keyring/attribution signature under the same key (cross-protocol separation). Never a bare concat.
-const REGISTER_DOMAIN: &[u8] = b"openom:register:v1";
-
 /// The replay window for the signed timestamp: ±5 minutes. Wide enough for clock skew + a slow request,
 /// narrow enough that a captured proof is useless minutes later. There is no nonce (stateless Lambda), and a
 /// replayed *successful* bind is an idempotent no-op anyway — the window only bounds a bind to a NEW
@@ -57,17 +55,7 @@ const REGISTER_TS_WINDOW_SECS: i64 = 300;
 /// to drift on (this is why the layout keeps them raw rather than lowercased).
 #[must_use]
 pub fn register_signing_bytes(iss: &str, sub: &str, member_id: Uuid, ts: i64) -> Vec<u8> {
-    let iss = iss.as_bytes();
-    let sub = sub.as_bytes();
-    let mut m = Vec::with_capacity(REGISTER_DOMAIN.len() + 8 + iss.len() + sub.len() + 16 + 8);
-    m.extend_from_slice(REGISTER_DOMAIN);
-    m.extend_from_slice(&u32::try_from(iss.len()).unwrap_or(u32::MAX).to_be_bytes());
-    m.extend_from_slice(iss);
-    m.extend_from_slice(&u32::try_from(sub.len()).unwrap_or(u32::MAX).to_be_bytes());
-    m.extend_from_slice(sub);
-    m.extend_from_slice(member_id.as_bytes());
-    m.extend_from_slice(&ts.to_be_bytes());
-    m
+    openom_crypto::aad::registration_signing_bytes(iss, sub, *member_id.as_bytes(), ts)
 }
 
 /// Current unix time in seconds (for the replay window). Monotonicity isn't needed — the window is symmetric.

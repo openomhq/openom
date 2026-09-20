@@ -3,7 +3,7 @@
 > The proto-bound sealing layer — binds the protobuf `Header` as AAD, builds envelopes, and wraps DEKs over `keyeo-crypto`'s primitives, byte-identical on client and server.
 
 **Status:** built · foundation, load-bearing (client & server share this crate byte-for-byte) · plan/SERVER-DATA-FORMAT.md §4–§6, §16–§17
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-21
 
 ## What it is — and is not
 
@@ -37,6 +37,10 @@ under a fixed, non-secret key — the bytes are still real ciphertext, never pla
 does not refuse the dev key in production*; that check lives at the call sites (`openom` server:
 `log.rs`, `proposals.rs`, `trees.rs`) and is outside this crate's contract.
 
+The `aad` module also owns the frozen registration proof encoding shared by the app-core signer and server
+verifier. It domain-separates and length-frames the authenticated JWT issuer/subject before binding the raw
+member UUID and timestamp; neither side carries an independent byte-layout implementation.
+
 ## Invariants
 
 | id | guarantee | why it matters | verified by |
@@ -49,6 +53,7 @@ does not refuse the dev key in production*; that check lives at the call sites (
 | **CRYPTO-8** | A DEK wrap (`wrap_dek`/`unwrap_dek`) binds the full `(tree_id, key_id, member_id, wrap_method, epoch)` context; unwrapping under a wrong KEK or any one changed context field fails, and the wrapped bytes are never the plaintext DEK. | A wrap can't be transplanted between members, epochs, or trees. | `wrap::tests::round_trip`, `wrap::tests::wrong_kek_fails`, `wrap::tests::transplant_across_context_fails`, `wrap::tests::wrapped_dek_is_not_plaintext` |
 | **CRYPTO-11** | The recovery code — independent of the passphrase — opens the same DEK through its own wrap (a recovery wrap is an ordinary `wrap_dek` under a recovery-KEK). | A lost passphrase isn't total loss. | `recovery::tests::recovery_wrap_opens_the_dek` |
 | **CRYPTO-12** | Decoding arbitrary bytes as an `Envelope`, or opening a valid envelope with random bytes spliced into its wire encoding, never panics — only ever `Ok` or `Err`. | This is the fuzz surface a keyless server (and every reader) is directly exposed to; a crash on untrusted input is a denial-of-service bug regardless of what the cryptography does. | `prop::decoding_arbitrary_bytes_never_panics`, `prop::corrupting_a_valid_envelope_never_panics` |
+| **CRYPTO-13** | Registration proof bytes use the frozen `openom:register:v1` domain and length-frame issuer and subject, so changing claim boundaries or values changes the signed message. | A proof cannot be replayed across crypto protocols or ambiguously reinterpreted as another issuer/subject pair. | `aad::tests::registration_signing_bytes_match_the_frozen_layout`, `aad::tests::registration_claims_are_length_framed_and_domain_separated` |
 
 The primitive-level guarantees — KDF determinism, DEK/salt randomness, HPKE wrap binding,
 `derive_root` sibling-key independence, and the recovery-code checksum — now live one layer down; see
@@ -93,6 +98,7 @@ role newtypes — `Dek`, `Kek`, `RrkSecret`, `HpkePrivate` — each opaque (no `
 role's key where another's is expected and a key can't leak via `{:?}`. Sharing: `wrap_dek` /
 `unwrap_dek` (passphrase- or recovery-code-derived KEK), `hpke_wrap_dek` / `hpke_unwrap_dek` (member
 public-key wrap). Recovery: `generate_recovery_code` / `parse_recovery_code`.
+Canonical signing encodings: `aad::author_signing_bytes` and `aad::registration_signing_bytes`.
 
 ## Position
 

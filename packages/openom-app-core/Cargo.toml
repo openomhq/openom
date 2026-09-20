@@ -79,4 +79,5 @@ optional = true
 
 [dev-dependencies]
 openom-data-model = { path = "../openom-data-model" }
+edsign.workspace = true
 # (openom-crypto + openom-keyring-api are now non-optional deps above — the tests use them from there.)

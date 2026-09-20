@@ -137,6 +137,27 @@ pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]
     out
 }
 
+/// The exact bytes signed to bind an authenticated issuer/subject pair to a durable account identity.
+/// Variable-length JWT claims are framed; the member UUID and timestamp are fixed-width. The domain tag
+/// prevents a registration proof from being replayed as an envelope or keyring signature.
+#[must_use]
+pub fn registration_signing_bytes(
+    issuer: &str,
+    subject: &str,
+    member_id: [u8; 16],
+    timestamp: i64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        b"openom:register:v1".len() + 8 + issuer.len() + subject.len() + member_id.len() + 8,
+    );
+    out.extend_from_slice(b"openom:register:v1");
+    put_bytes(&mut out, issuer.as_bytes());
+    put_bytes(&mut out, subject.as_bytes());
+    out.extend_from_slice(&member_id);
+    out.extend_from_slice(&timestamp.to_be_bytes());
+    out
+}
+
 // The DEK/RRK wrap AADs moved to `keyeo_crypto::{wrap_aad, rrk_wrap_aad}` (retagged `keyeo:wrap:v1` /
 // `keyeo:rrk:v1`) when the key-material layer was lifted into keyeo (OPE-377); this module keeps only the
 // header / author / signing AADs the envelope layer owns.
@@ -358,6 +379,31 @@ mod tests {
         assert_eq!(&asb[4..20], b"openom:author:v1");
         // header_aad starts with a bare version int (0,0,0,1), not a framed tag → disjoint at byte 0..4.
         assert_ne!(asb[..4], header_aad(1, &h)[..4]);
+    }
+
+    #[test]
+    fn registration_signing_bytes_match_the_frozen_layout() {
+        let member_id = [0x33; 16];
+        let timestamp = 1_700_000_000i64;
+        let mut expected = b"openom:register:v1".to_vec();
+        expected.extend_from_slice(&3u32.to_be_bytes());
+        expected.extend_from_slice(b"iss");
+        expected.extend_from_slice(&3u32.to_be_bytes());
+        expected.extend_from_slice(b"sub");
+        expected.extend_from_slice(&member_id);
+        expected.extend_from_slice(&timestamp.to_be_bytes());
+        assert_eq!(registration_signing_bytes("iss", "sub", member_id, timestamp), expected);
+    }
+
+    #[test]
+    fn registration_claims_are_length_framed_and_domain_separated() {
+        let member_id = [0x44; 16];
+        assert_ne!(
+            registration_signing_bytes("a", "bc", member_id, 7),
+            registration_signing_bytes("ab", "c", member_id, 7),
+        );
+        assert!(registration_signing_bytes("", "sub", member_id, 7)
+            .starts_with(b"openom:register:v1"));
     }
 
 }

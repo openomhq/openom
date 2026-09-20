@@ -3,10 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use openom_crypto::aad::registration_signing_bytes;
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_data_tree::{OpView, Tree, TreeError};
 use openom_docsync::{EveryNUpdates, SnapshotPolicy, SyncClient, Verdict};
-use openom_keyring_api::EngineKind;
+use openom_keyring_api::{derive_member_id_bytes, EngineKind};
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
@@ -120,6 +121,244 @@ fn _assert_app_core_send_sync<S: BlobStore + Send + Sync + 'static>() {
 // runtimes can't drift (OPE-429). `store` is the caller's local device BlobStore — MemoryBlob for the wasm
 // worker, FsBlob/SQLite for the native host. Membership + the other lifecycle ops follow this shape.
 
+/// One profile's unlocked durable identity. The wrapped keystore and its corresponding live secrets move
+/// together so account credential operations cannot accidentally update persistence while leaving a stale
+/// account root resident in memory.
+pub struct AccountHandle {
+    keystore: AccountKeystore,
+    account: openom_vault::UnlockedAccount,
+}
+
+impl AccountHandle {
+    /// The stable self-certifying identity shared by every owned and joined tree.
+    #[must_use]
+    pub fn member_id(&self) -> &str {
+        &self.keystore.member_id
+    }
+
+    /// The account's Ed25519 verification key.
+    #[must_use]
+    pub fn author_public_key(&self) -> &[u8] {
+        &self.keystore.author_public
+    }
+
+    /// The account's X25519 public key used when another owner admits it to a tree.
+    #[must_use]
+    pub fn hpke_public_key(&self) -> &[u8] {
+        &self.keystore.hpke_public
+    }
+
+    /// The authenticated anti-rollback generation carried by the current keystore.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.keystore.generation
+    }
+}
+
+/// A newly-created account plus the bytes the platform persists and the one-time code it displays.
+pub struct AccountCreated {
+    pub handle: AccountHandle,
+    pub keystore: Vec<u8>,
+    pub recovery_code: String,
+    pub generation: u64,
+}
+
+/// A recovered account. Recovery rotates the wrapping root, revokes the submitted code, and returns a new
+/// one-time code and generation for immediate durable persistence.
+pub struct AccountRecovered {
+    pub handle: AccountHandle,
+    pub keystore: Vec<u8>,
+    pub recovery_code: String,
+    pub generation: u64,
+}
+
+/// Persisted output of an account passphrase change.
+pub struct AccountChanged {
+    pub keystore: Vec<u8>,
+    pub generation: u64,
+}
+
+/// Persisted output of an account-root rotation.
+pub struct AccountRotated {
+    pub keystore: Vec<u8>,
+    pub recovery_code: String,
+    pub generation: u64,
+}
+
+/// Create one profile-level durable account, already unlocked for subsequent tree operations.
+///
+/// # Errors
+/// Returns [`VaultError`] if key generation, wrapping, or serialization fails.
+pub fn account_create(passphrase: &Passphrase) -> Result<AccountCreated, VaultError> {
+    let (keystore, recovery_code, account) = AccountKeystore::create(passphrase.expose())?;
+    let generation = keystore.generation;
+    let bytes = keystore.to_bytes()?;
+    Ok(AccountCreated {
+        handle: AccountHandle { keystore, account },
+        keystore: bytes,
+        recovery_code: recovery_code.into_string(),
+        generation,
+    })
+}
+
+/// Unlock a persisted account after enforcing the caller's highest-seen generation floor.
+///
+/// # Errors
+/// Returns [`VaultError`] for malformed or rolled-back keystore bytes, a wrong passphrase, or tampering.
+pub fn account_unlock(
+    passphrase: &Passphrase,
+    keystore: &[u8],
+    generation_floor: u64,
+) -> Result<AccountHandle, VaultError> {
+    let keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor)?;
+    let account = keystore.unlock(passphrase.expose())?;
+    Ok(AccountHandle { keystore, account })
+}
+
+/// Re-wrap the account root under a new passphrase. Tree anchors and sessions remain untouched.
+///
+/// # Errors
+/// Returns [`VaultError`] if wrapping or serialization fails.
+pub fn account_change_passphrase(
+    handle: &mut AccountHandle,
+    new_passphrase: &Passphrase,
+) -> Result<AccountChanged, VaultError> {
+    let keystore = handle
+        .keystore
+        .change_passphrase(&handle.account, new_passphrase.expose())?;
+    let bytes = keystore.to_bytes()?;
+    let generation = keystore.generation;
+    handle.keystore = keystore;
+    Ok(AccountChanged { keystore: bytes, generation })
+}
+
+/// Recover an account and immediately rotate its wrapping root. The submitted recovery code and every
+/// credential capable of opening the prior generation are thereby revoked once the returned floor is saved.
+///
+/// # Errors
+/// Returns [`VaultError`] for a malformed/rolled-back keystore, invalid recovery code, or wrapping failure.
+pub fn account_recover(
+    recovery_code: &RecoveryCode,
+    new_passphrase: &Passphrase,
+    keystore: &[u8],
+    generation_floor: u64,
+) -> Result<AccountRecovered, VaultError> {
+    let old_keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor)?;
+    let recovered = old_keystore.unlock_with_recovery(recovery_code)?;
+    let (keystore, next_recovery_code) =
+        old_keystore.rotate_account_root(&recovered, new_passphrase.expose())?;
+    let account = keystore.unlock(new_passphrase.expose())?;
+    let generation = keystore.generation;
+    let bytes = keystore.to_bytes()?;
+    Ok(AccountRecovered {
+        handle: AccountHandle { keystore, account },
+        keystore: bytes,
+        recovery_code: next_recovery_code.into_string(),
+        generation,
+    })
+}
+
+/// Rotate the account wrapping root and refresh the live handle to the new root material.
+///
+/// # Errors
+/// Returns [`VaultError`] if rotation, serialization, or the defensive post-rotation unlock fails.
+pub fn account_rotate_root(
+    handle: &mut AccountHandle,
+    passphrase: &Passphrase,
+) -> Result<AccountRotated, VaultError> {
+    let (keystore, recovery_code) = handle
+        .keystore
+        .rotate_account_root(&handle.account, passphrase.expose())?;
+    let account = keystore.unlock(passphrase.expose())?;
+    let bytes = keystore.to_bytes()?;
+    let generation = keystore.generation;
+    handle.keystore = keystore;
+    handle.account = account;
+    Ok(AccountRotated {
+        keystore: bytes,
+        recovery_code: recovery_code.into_string(),
+        generation,
+    })
+}
+
+/// Sign the server's frozen proof-of-possession bytes without exposing the account signing key.
+#[must_use]
+pub fn account_register_proof(
+    handle: &AccountHandle,
+    issuer: &str,
+    subject: &str,
+    timestamp: i64,
+) -> Vec<u8> {
+    let member_id = derive_member_id_bytes(handle.author_public_key());
+    let message = registration_signing_bytes(issuer, subject, member_id, timestamp);
+    handle.account.root.identity.sign(&message).to_bytes().to_vec()
+}
+
+/// The tree-specific output of [`provision_tree`]. Account persistence belongs to [`account_create`] and is
+/// deliberately absent here.
+pub struct TreeProvisioned<S: BlobStore> {
+    pub core: AppCore<S>,
+    pub keyring: Vec<u8>,
+    pub did_key: String,
+    pub watermark: Vec<u8>,
+}
+
+/// Provision a fresh tree under an existing profile account.
+///
+/// # Errors
+/// Returns [`VaultError`] if the selected keyring engine cannot provision the tree.
+pub fn provision_tree<S: BlobStore>(
+    store: S,
+    engine: EngineKind,
+    account: &AccountHandle,
+    tree_id: &[u8],
+    replica_id: &[u8],
+    doc: impl Into<String>,
+) -> Result<TreeProvisioned<S>, VaultError> {
+    let tree = TreeId::new(tree_id);
+    let member = MemberId::new(account.member_id());
+    let replica = ReplicaId::new(replica_id);
+    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let provisioned = AppVault::from_kind(engine).provision(&ctx, &account.account)?;
+    let did_key = provisioned.did_key.into_string();
+    Ok(TreeProvisioned {
+        core: AppCore::new(did_key.clone(), provisioned.sealer, Arc::new(store), doc, replica_id),
+        keyring: provisioned.anchor,
+        did_key,
+        watermark: provisioned.watermark,
+    })
+}
+
+/// Re-open a tree under an existing profile account.
+///
+/// # Errors
+/// Returns [`VaultError`] if the anchor is stale, malformed, belongs to another tree, or excludes the account.
+pub fn unlock_tree<S: BlobStore>(
+    store: S,
+    engine: EngineKind,
+    account: &AccountHandle,
+    tree_id: &[u8],
+    replica_id: &[u8],
+    anchor: &[u8],
+    doc: impl Into<String>,
+) -> Result<Unlocked<S>, VaultError> {
+    let tree = TreeId::new(tree_id);
+    let member = MemberId::new(account.member_id());
+    let replica = ReplicaId::new(replica_id);
+    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let unlocked = AppVault::from_kind(engine).unlock(&ctx, anchor, &account.account)?;
+    let did_key = unlocked.did_key.into_string();
+    Ok(Unlocked {
+        core: AppCore::new(did_key.clone(), unlocked.sealer, Arc::new(store), doc, replica_id),
+        did_key,
+        watermark: unlocked.watermark,
+        needs_reseal: unlocked.needs_reseal,
+        needs_backfill: unlocked.needs_backfill,
+        needs_rrk_backfill: unlocked.needs_rrk_backfill,
+        write_epoch_unreachable: unlocked.write_epoch_unreachable,
+    })
+}
+
 /// The result of [`provision`]: a ready [`AppCore`] + the durable outputs the host persists (keyring anchor +
 /// anti-rollback watermark) and shows the user (recovery code + the author `did:key`).
 pub struct Provisioned<S: BlobStore> {
@@ -192,24 +431,16 @@ pub fn provision<S: BlobStore>(
     replica_id: &[u8],
     doc: impl Into<String>,
 ) -> Result<Provisioned<S>, VaultError> {
-    let (tree, member, replica) =
-        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
-    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
-    // OPE-542/543 durable identity: BOTH engines' owner IS a durable account keystore the app owns (the chain
-    // reached symmetry in 2c). Create it here, provision from its `UnlockedAccount`, and hand back the persisted
-    // keystore blob + the account recovery code for the platform layer to store + show. The per-tree recovery
-    // code is empty on both engines now.
-    let (ks, account_code, unlocked) = AccountKeystore::create(passphrase.expose())?;
-    let keystore = ks.to_bytes()?;
-    let p = AppVault::from_kind(engine).provision(&ctx, &unlocked)?;
-    let did = p.did_key.into_string();
+    let _ = member_id;
+    let created = account_create(passphrase)?;
+    let tree = provision_tree(store, engine, &created.handle, tree_id, replica_id, doc)?;
     Ok(Provisioned {
-        core: AppCore::new(did.clone(), p.sealer, Arc::new(store), doc, replica_id),
-        keyring: p.anchor,
-        recovery_code: account_code.into_string(),
-        keystore,
-        did_key: did,
-        watermark: p.watermark,
+        core: tree.core,
+        keyring: tree.keyring,
+        recovery_code: created.recovery_code,
+        keystore: created.keystore,
+        did_key: tree.did_key,
+        watermark: tree.watermark,
     })
 }
 
@@ -232,24 +463,9 @@ pub fn unlock<S: BlobStore>(
     keystore: &[u8],
     doc: impl Into<String>,
 ) -> Result<Unlocked<S>, VaultError> {
-    let (tree, member, replica) =
-        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
-    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
-    // OPE-542/543 durable identity: BOTH engines re-derive the owner's durable ACCOUNT identity from the
-    // persisted keystore blob + passphrase (the blob comes back from the platform layer that stored it at
-    // provision); the vault checks that identity IS the resolved owner.
-    let account = AccountKeystore::from_bytes(keystore)?.unlock(passphrase.expose())?;
-    let u = AppVault::from_kind(engine).unlock(&ctx, anchor, &account)?;
-    let did = u.did_key.into_string();
-    Ok(Unlocked {
-        core: AppCore::new(did.clone(), u.sealer, Arc::new(store), doc, replica_id),
-        did_key: did,
-        watermark: u.watermark,
-        needs_reseal: u.needs_reseal,
-        needs_backfill: u.needs_backfill,
-        needs_rrk_backfill: u.needs_rrk_backfill,
-        write_epoch_unreachable: u.write_epoch_unreachable,
-    })
+    let _ = member_id;
+    let account = account_unlock(passphrase, keystore, 0)?;
+    unlock_tree(store, engine, &account, tree_id, replica_id, anchor, doc)
 }
 
 /// The result of [`recover`]: a ready [`AppCore`] under a freshly-minted owner identity, plus the NEW keyring
@@ -409,8 +625,8 @@ pub fn unlock_as_member<S: BlobStore>(
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use openom_crypto::Passphrase;
-    use openom_keyring_api::EngineKind;
+    use openom_crypto::{Passphrase, RecoveryCode};
+    use openom_keyring_api::{derive_member_id_bytes, EngineKind};
     use std::sync::atomic::{AtomicU64, Ordering};
     use store_blob::FsBlob;
 
@@ -476,6 +692,132 @@ mod lifecycle_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_account_handle_owns_and_reopens_multiple_trees_on_both_engines() {
+        let passphrase = Passphrase::new(b"profile passphrase".to_vec());
+        let mut created = super::account_create(&passphrase).unwrap();
+        let member_id = created.handle.member_id().to_string();
+        let mut trees = Vec::new();
+
+        for (engine_index, engine) in [EngineKind::Chain, EngineKind::Dag].into_iter().enumerate() {
+            for tree_index in 0..2u8 {
+                let tree_id = [10 + (engine_index as u8 * 2) + tree_index; 16];
+                let replica_id = [20 + tree_index; 16];
+                let provisioned = super::provision_tree(
+                    store_blob::MemoryBlob::new(),
+                    engine,
+                    &created.handle,
+                    &tree_id,
+                    &replica_id,
+                    format!("doc-{engine_index}-{tree_index}"),
+                )
+                .unwrap();
+                trees.push((engine, tree_id, replica_id, provisioned.keyring, provisioned.did_key));
+            }
+        }
+
+        assert!(trees.iter().all(|tree| tree.4 == trees[0].4));
+        let changed = super::account_change_passphrase(
+            &mut created.handle,
+            &Passphrase::new(b"new profile passphrase".to_vec()),
+        )
+        .unwrap();
+        assert!(super::account_unlock(&passphrase, &changed.keystore, changed.generation).is_err());
+        let reopened_account = super::account_unlock(
+            &Passphrase::new(b"new profile passphrase".to_vec()),
+            &changed.keystore,
+            changed.generation,
+        )
+        .unwrap();
+        assert_eq!(reopened_account.member_id(), member_id);
+
+        for (engine, tree_id, replica_id, anchor, did_key) in trees {
+            let reopened = super::unlock_tree(
+                store_blob::MemoryBlob::new(),
+                engine,
+                &reopened_account,
+                &tree_id,
+                &replica_id,
+                &anchor,
+                "doc",
+            )
+            .unwrap();
+            assert_eq!(reopened.did_key, did_key);
+        }
+    }
+
+    #[test]
+    fn recovery_and_root_rotation_refresh_the_handle_and_revoke_old_material() {
+        let passphrase = Passphrase::new(b"profile passphrase".to_vec());
+        let created = super::account_create(&passphrase).unwrap();
+        let member_id = created.handle.member_id().to_string();
+        let old_recovery = RecoveryCode::new(created.recovery_code);
+        let new_passphrase = Passphrase::new(b"recovered passphrase".to_vec());
+        let mut recovered = super::account_recover(
+            &old_recovery,
+            &new_passphrase,
+            &created.keystore,
+            created.generation,
+        )
+        .unwrap();
+
+        assert_eq!(recovered.generation, created.generation + 1);
+        assert_eq!(recovered.handle.member_id(), member_id);
+        assert!(super::account_unlock(&passphrase, &created.keystore, recovered.generation).is_err());
+        let recovered_keystore = openom_vault::AccountKeystore::from_bytes(&recovered.keystore).unwrap();
+        assert!(recovered_keystore.unlock_with_recovery(&old_recovery).is_err());
+
+        let recovery_after_recover = recovered.recovery_code.clone();
+        let rotated = super::account_rotate_root(&mut recovered.handle, &new_passphrase).unwrap();
+        assert_eq!(rotated.generation, recovered.generation + 1);
+        assert_eq!(recovered.handle.generation(), rotated.generation);
+        assert_eq!(recovered.handle.member_id(), member_id);
+        let rotated_keystore = openom_vault::AccountKeystore::from_bytes(&rotated.keystore).unwrap();
+        assert!(rotated_keystore
+            .unlock_with_recovery(&RecoveryCode::new(recovery_after_recover))
+            .is_err());
+
+        super::provision_tree(
+            store_blob::MemoryBlob::new(),
+            EngineKind::Dag,
+            &recovered.handle,
+            &[41; 16],
+            &[42; 16],
+            "after-rotation",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn registration_proof_matches_the_server_verification_bytes() {
+        let created = super::account_create(&Passphrase::new(b"profile passphrase".to_vec())).unwrap();
+        let timestamp = 1_700_000_000i64;
+        let signature = super::account_register_proof(&created.handle, "https://issuer", "auth-sub", timestamp);
+        let signature: [u8; 64] = signature.try_into().unwrap();
+        let public_key: [u8; 32] = created.handle.author_public_key().try_into().unwrap();
+        let member_id = derive_member_id_bytes(&public_key);
+        let message = openom_crypto::aad::registration_signing_bytes(
+            "https://issuer",
+            "auth-sub",
+            member_id,
+            timestamp,
+        );
+        let verifier = edsign::VerifyingKey::from_bytes(&public_key).unwrap();
+        let signature = edsign::Signature::from_bytes(&signature);
+        verifier.verify(&message, &signature).unwrap();
+        assert!(verifier
+            .verify(
+                &openom_crypto::aad::registration_signing_bytes(
+                    "https://issuer",
+                    "different-sub",
+                    member_id,
+                    timestamp,
+                ),
+                &signature,
+            )
+            .is_err());
     }
 
     #[test]

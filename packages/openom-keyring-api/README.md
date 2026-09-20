@@ -4,7 +4,7 @@
 > `MembershipView`, the keyless `KeyringVerifier` seam, and the `EngineKind` tag.
 
 **Status:** built · seam / shared value types · design keyring-dag/design.swap-seam-decision.md (OPE-276)
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-21
 
 ## What it is — and is not
 
@@ -31,6 +31,7 @@ on `openom-roles` — but openom-domain-specific: the `EngineKind` roster and th
 | **KAPI-2** | Role classification is single-axis, lower-is-stronger: a signer is `ROLE_CO_OWNER`-or-stronger, the owner is the unique `ROLE_OWNER`. | Both engines and the server derive write-authority the same way. | `tests::signer_and_owner_classification_matches_the_role_axis` |
 | **KAPI-3** | `EngineKind` round-trips through its tag and an unknown tag is a typed `UnknownEngine`, never a silent fallback. | The one string both host boundaries parse; a typo must fail loud, not pick a default engine. | `tests::engine_tag_round_trips_and_rejects_the_unknown` |
 | **KAPI-4** | `MembershipView` round-trips through serde unchanged. | The app and server exchange the resolved view as data across process boundaries. | `tests::membership_view_round_trips_through_serde` |
+| **KAPI-5** | The binary and canonical string forms of the self-certifying member UUID are derived from the same bytes. | Registration proofs sign raw UUID bytes and must identify the same account as the string used by tree membership. | `tests::member_id_string_is_the_canonical_form_of_its_uuid_bytes` |
 
 The `ROLE_*` constants (`ROLE_OWNER=1 … ROLE_VIEWER=5`) are pinned to openom's proto `MemberRole` values
 by `openom-roles`'s drift-guard test (`tests::keyeo_api_role_convention_matches_openom_roles`) — that
@@ -55,7 +56,8 @@ assert_eq!("dag".parse::<EngineKind>().unwrap().as_tag(), "dag");
 ```
 
 Entry points: `MembershipView` (`new` / `signers` / `owner`), `MemberView` (`is_signer` / `is_owner`),
-the `KeyringVerifier` trait (`admit` → `Admitted` | `VerifyError`), `EngineKind`, and the `ROLE_*`
+the `KeyringVerifier` trait (`admit` → `Admitted` | `VerifyError`), `EngineKind`,
+`derive_member_id` / `derive_member_id_bytes`, and the `ROLE_*`
 constants.
 
 ## Position

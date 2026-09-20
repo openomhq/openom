@@ -10,12 +10,19 @@ use sha2::{Digest, Sha256};
 /// engines enforce `member_id == derive_member_id(author_public_key)` at admission, and the server verifies it
 /// at `/register`.
 #[must_use]
-pub fn derive_member_id(author_pubkey: &[u8]) -> String {
+pub fn derive_member_id_bytes(author_pubkey: &[u8]) -> [u8; 16] {
     let digest = Sha256::digest(author_pubkey);
     let mut b = [0u8; 16];
     b.copy_from_slice(&digest[..16]);
     b[6] = (b[6] & 0x0f) | 0x80; // UUID version 8
     b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant (10xx)
+    b
+}
+
+/// The canonical lowercase string representation of [`derive_member_id_bytes`].
+#[must_use]
+pub fn derive_member_id(author_pubkey: &[u8]) -> String {
+    let b = derive_member_id_bytes(author_pubkey);
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
@@ -385,5 +392,19 @@ mod tests {
         let v = MembershipView::new(vec![m("owner", 1), m("bob", 2)], true);
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(serde_json::from_str::<MembershipView>(&json).unwrap(), v);
+    }
+
+    #[test]
+    fn member_id_string_is_the_canonical_form_of_its_uuid_bytes() {
+        let public_key = [7u8; 32];
+        let bytes = derive_member_id_bytes(&public_key);
+        let expected = format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        );
+        assert_eq!(derive_member_id(&public_key), expected);
+        assert_eq!(bytes[6] >> 4, 8, "UUID version is 8");
+        assert_eq!(bytes[8] >> 6, 2, "UUID variant is RFC 4122");
     }
 }

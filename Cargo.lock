@@ -3632,6 +3632,7 @@ name = "openom-app-core"
 version = "0.1.0"
 dependencies = [
  "docsync",
+ "edsign",
  "js-sys",
  "keyeo-crypto",
  "openom-crypto",
