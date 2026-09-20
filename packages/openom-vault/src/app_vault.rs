@@ -20,6 +20,7 @@
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 
+use crate::account_keystore::UnlockedAccount;
 use crate::lifecycle::ChainVault;
 use crate::lifecycle::{KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext};
 use crate::{DagVault, VaultError};
@@ -68,10 +69,11 @@ impl KeyringLifecycle for AppVault {
         &self,
         ctx: &VaultContext,
         passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Provisioned, VaultError> {
         match self {
-            Self::Chain(v) => v.provision(ctx, passphrase),
-            Self::Dag(v) => v.provision(ctx, passphrase),
+            Self::Chain(v) => v.provision(ctx, passphrase, account),
+            Self::Dag(v) => v.provision(ctx, passphrase, account),
         }
     }
 
@@ -80,10 +82,11 @@ impl KeyringLifecycle for AppVault {
         ctx: &VaultContext,
         anchor: &[u8],
         passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Unlocked, VaultError> {
         match self {
-            Self::Chain(v) => v.unlock(ctx, anchor, passphrase),
-            Self::Dag(v) => v.unlock(ctx, anchor, passphrase),
+            Self::Chain(v) => v.unlock(ctx, anchor, passphrase, account),
+            Self::Dag(v) => v.unlock(ctx, anchor, passphrase, account),
         }
     }
 
@@ -91,13 +94,14 @@ impl KeyringLifecycle for AppVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Recovered, VaultError> {
         match self {
-            Self::Chain(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
-            Self::Dag(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
+            Self::Chain(v) => v.recover(ctx, anchor, keystore, recovery_code, new_passphrase, floor),
+            Self::Dag(v) => v.recover(ctx, anchor, keystore, recovery_code, new_passphrase, floor),
         }
     }
 
@@ -105,16 +109,17 @@ impl KeyringLifecycle for AppVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Rekeyed, VaultError> {
         match self {
             Self::Chain(v) => {
-                v.change_passphrase(ctx, anchor, old_passphrase, new_passphrase, floor)
+                v.change_passphrase(ctx, anchor, keystore, old_passphrase, new_passphrase, floor)
             }
             Self::Dag(v) => {
-                v.change_passphrase(ctx, anchor, old_passphrase, new_passphrase, floor)
+                v.change_passphrase(ctx, anchor, keystore, old_passphrase, new_passphrase, floor)
             }
         }
     }

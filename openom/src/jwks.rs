@@ -9,7 +9,12 @@
 //! The signing algorithm is bound to the RESOLVED KEY (from the JWK), not taken from the token header
 //! — so a token can't downgrade/confuse the algorithm (an RSA kid is only ever verified as RS*). The
 //! issuer is a deployment choice (config), never baked in; `exp` is always required, and `aud` is
-//! required whenever an audience is pinned. Both arms extract the same `sub` (a UUID) as the member id.
+//! required whenever an audience is pinned.
+//!
+//! Since OPE-545 the issuer is a PURE JWT issuer: the verifier extracts the raw `sub` (an opaque
+//! string — NOT parsed as a UUID, so a non-UUID subject like Clerk's `user_…` is fine) and the `iss`
+//! claim, and the server maps `sub → member_id` via the `identities` table. The `sub` is no longer the
+//! member id.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,12 +23,16 @@ use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
-use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 struct Claims {
-    /// Subject — the account id (a UUID).
+    /// Subject — the issuer's opaque account id (a Supabase UUID, a Clerk `user_…`, etc.). NOT parsed as a
+    /// UUID: since OPE-545 the server maps `sub → member_id`, so the raw string is all that matters.
     sub: String,
+    /// Issuer (`iss`) — bound into the `/register` proof-of-possession so it can't be replayed across
+    /// issuers. Optional (a dev/CI self-mint may omit it).
+    #[serde(default)]
+    iss: Option<String>,
     /// The caller's email, if the provider includes it. Only trusted when `email_verified` is true.
     #[serde(default)]
     email: Option<String>,
@@ -33,11 +42,13 @@ struct Claims {
     email_verified: Option<bool>,
 }
 
-/// What the verifier extracts from a valid token: the member id (`sub`) and, only when the provider asserts a
-/// VERIFIED email, that email (trimmed + lowercased for a stable compare). `verified_email` is `None` unless
+/// What the verifier extracts from a valid token: the raw `sub` (the issuer's subject — the server maps it to
+/// a `member_id`), the `iss` (bound into the `/register` proof), and, only when the provider asserts a VERIFIED
+/// email, that email (trimmed + lowercased for a stable compare). `verified_email` is `None` unless
 /// `email_verified` is true.
 pub struct VerifiedClaims {
-    pub member_id: Uuid,
+    pub sub: String,
+    pub iss: Option<String>,
     pub verified_email: Option<String>,
 }
 
@@ -117,13 +128,12 @@ fn decode_claims(
     validation: &Validation,
 ) -> Result<VerifiedClaims, &'static str> {
     let data = decode::<Claims>(token, key, validation).map_err(|_| "invalid token")?;
-    let member_id = Uuid::parse_str(&data.claims.sub).map_err(|_| "sub is not a uuid")?;
     // Trust the email ONLY when the provider verified it; normalize for a stable compare against the pin.
     let verified_email = match (data.claims.email, data.claims.email_verified) {
         (Some(e), Some(true)) => Some(e.trim().to_lowercase()),
         _ => None,
     };
-    Ok(VerifiedClaims { member_id, verified_email })
+    Ok(VerifiedClaims { sub: data.claims.sub, iss: data.claims.iss, verified_email })
 }
 
 /// A JWKS key cache: `kid → (DecodingKey, Algorithm)`, populated by fetching the JWKS URL.
@@ -250,7 +260,7 @@ mod tests {
     async fn hs256_accepts_a_matching_audience() {
         let v = JwtVerifier::hs256("test-secret", Some("authenticated"), None);
         let c = v.verify(&hs_token(HS_SECRET, MEMBER, "authenticated")).await.expect("valid aud accepted");
-        assert_eq!(c.member_id, Uuid::parse_str(MEMBER).unwrap());
+        assert_eq!(c.sub, MEMBER, "the raw sub is extracted verbatim (no member-id mapping here)");
         assert_eq!(c.verified_email, None, "no email claim → no verified email");
     }
 
@@ -324,7 +334,8 @@ mod tests {
     async fn jwks_rs256_accepts_a_token_signed_by_a_cached_key() {
         let v = jwks_verifier(Some("authenticated"), Some("https://issuer.example"));
         let id = v.verify(RS_JWT).await.expect("valid RS256 token accepted");
-        assert_eq!(id.member_id, Uuid::parse_str(RS_SUB).unwrap());
+        assert_eq!(id.sub, RS_SUB);
+        assert_eq!(id.iss.as_deref(), Some("https://issuer.example"), "iss is extracted for the register PoP");
     }
 
     #[tokio::test]

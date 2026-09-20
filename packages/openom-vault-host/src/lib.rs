@@ -38,4 +38,20 @@ pub trait VaultStore: Send + Sync {
         anchor: &[u8],
         watermark: &[u8],
     ) -> std::result::Result<(), String>;
+
+    /// The persisted durable-account keystore blob (OPE-542/543) for this tree (`None` if none). OPAQUE bytes —
+    /// the account's wrapped identity/root; no crypto lives here, the store just durably holds the blob the dag
+    /// (owner-as-member) engine hands back at provision and needs again on unlock / recover / passphrase change.
+    /// Empty / `None` for the chain engine, which has no account keystore.
+    ///
+    /// # Errors
+    /// Returns an error string if the host store read fails.
+    fn load_keystore(&self, tree_key: &str) -> std::result::Result<Option<Vec<u8>>, String>;
+
+    /// Persist the account keystore blob for this tree (write-through opaque bytes; last write wins). Called
+    /// at provision and after any flow that re-wraps the account (recover / change-passphrase).
+    ///
+    /// # Errors
+    /// Returns an error string if the host store write fails.
+    fn commit_keystore(&self, tree_key: &str, keystore: &[u8]) -> std::result::Result<(), String>;
 }

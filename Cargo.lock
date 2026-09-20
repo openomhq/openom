@@ -3596,6 +3596,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "edsign",
  "jsonwebtoken",
  "keyeo-crypto",
  "lambda_http",
@@ -3761,6 +3762,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@
 //! binary ([`main`](../main.rs)) is a thin shell: tracing + serve/Lambda selection.
 
 pub mod access;
+pub mod account;
 pub mod auth;
 pub mod authz;
 pub mod blobs;
@@ -29,6 +30,7 @@ pub mod trees;
 // The request-tracing layer wiring, shared between `app()` and the tracing integration tests.
 pub use http_trace::with_trace_layers;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
@@ -56,6 +58,10 @@ pub struct AppState {
     /// The cost-attribution + enforcement seam (OPE-412): `dyn` so `AppState` stays flat + handler
     /// signatures unchanged; `PgMeter` in prod, a test double swaps in without a live DB.
     meter: Arc<dyn meter::Meter>,
+    /// Positive cache of the IMMUTABLE `auth_sub → member_id` mapping (OPE-545). Populated on a resolved
+    /// lookup and on a successful `/register`; a miss is never cached (an unregistered `sub` that later
+    /// registers must resolve on its next request). `Arc` so cloning `AppState` shares one cache.
+    identity_cache: Arc<tokio::sync::RwLock<HashMap<String, Uuid>>>,
 }
 
 /// Liveness: the process is up.
@@ -105,6 +111,15 @@ async fn whoami(id: auth::Identity) -> Json<serde_json::Value> {
 pub fn app(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/whoami", get(whoami))
+        // Account binding (OPE-545): `/register` maps the verified token `sub` → the client's self-certifying
+        // `member_id` (the SOLE binder, RawJwt-guarded); `/me` returns the resolved id + the E2E keystore
+        // backup; `/account/keystore` stores/fetches that backup with a monotonic generation floor (OPE-549).
+        .route("/register", post(account::register))
+        .route("/me", get(account::me))
+        .route(
+            "/account/keystore",
+            put(account::put_keystore).get(account::get_keystore),
+        )
         // POST creates the tree row (OPE-407, decision 3-B) — the explicit, entitlement-gated mint. The V1
         // scalar-snapshot GET/PUT and the §B1 delta-log route are retired (OPE-448): the data channel is the
         // blob store below, and change history is served by GET /history.
@@ -287,6 +302,7 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
         jwt_verifier,
         storage,
         meter: Arc::new(meter::PgMeter),
+        identity_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     })
 }
 

@@ -15,6 +15,11 @@ pub mod verifier;
 // byte-identical duplicate of the same edsign verify that was deduplicated into keyeo-core (OPE-306).
 pub use keyeo_dag::Ed25519;
 
+/// OPE-543: the self-certifying member-id derivation (`uuid8(SHA-256(author_pubkey))`), re-exported from
+/// [`openom_keyring_api`] so callers (and the crate's own integration tests) can compute the binding the
+/// admission gate enforces without depending on the api crate directly.
+pub use openom_keyring_api::derive_member_id;
+
 /// A keyring role, power-descending (**lower is stronger**).
 ///
 /// `ROLE_OWNER = 1` … `ROLE_VIEWER = 5`,
@@ -60,6 +65,15 @@ pub type KeyringAction = MembershipAction<String, KeyringRole, Ed25519>;
 pub type KeyringOp = keyeo_dag::Op<[u8; 32], String, KeyringRole, Ed25519>;
 pub type KeyringState = GroupState<String, KeyringRole, Ed25519>;
 pub type KeyringMemberInit = keyeo_dag::MemberInit<String, KeyringRole, Ed25519>;
+
+/// OPE-543 self-cert admission gate: a `member_id` MUST be the `uuid8` of its own author key
+/// (`openom_keyring_api::derive_member_id`). Enforced inside [`AccessControl::is_authorized`], which runs at
+/// every op's causal position on every replica — so a forged `(member_id, author_key)` binding is unauthorized
+/// (hence ineffective) everywhere, not just rejected by the minting client. Checks the ACTION's carried key
+/// (the binding being installed), not the admitting op's signer key.
+pub(crate) fn member_id_binds_key(member_id: &str, author_public_key: &[u8]) -> bool {
+    member_id == openom_keyring_api::derive_member_id(author_public_key)
+}
 pub type KeyringEngine = keyeo_dag::Keyeo<KeyringOp, KeyringAccess, keyeo_dag::StrongRemove>;
 /// The v2 keyring engine — same authority + strong-remove, plus a [`KeyringQuorum`] multi-signer policy
 /// for privileged changes.
@@ -129,6 +143,11 @@ impl KeyringAccess {
 }
 
 impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
+    // The `ReFound` / `RotateRecoveryAuthority` / `Retarget` arms deliberately share the `false` body with
+    // the (handled-above) `Create` arm, but are kept SEPARATE from each other and from `Create` because each
+    // carries its own security rationale (OPE-543: why on-tree re-founding/rotation/rekey is unauthorized).
+    // Collapsing them would erase that per-op documentation, so the identical-body lint is allowed here.
+    #[allow(clippy::match_same_arms)]
     fn is_authorized(
         &self,
         state: &KeyringState,
@@ -149,7 +168,11 @@ impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
             let owners = initial_members.iter().filter(|m| m.role.is_owner()).count();
             return state.members.is_empty()
                 && owners == 1
-                && initial_members.iter().any(|m| &m.id == author);
+                && initial_members.iter().any(|m| &m.id == author)
+                // OPE-543: every seeded member's id must be self-certifying against its carried key.
+                && initial_members
+                    .iter()
+                    .all(|m| member_id_binds_key(&m.id, m.author_public_key.as_ref()));
         }
         // Every other change requires an active member author.
         let author_role = match state.members.get(author) {
@@ -158,9 +181,13 @@ impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
         };
         match action {
             MembershipAction::Create { .. } => false, // handled above
-            MembershipAction::Add { role, .. } => {
-                // No second Owner, ever; otherwise the author must out-rank what the target role needs.
-                !role.is_owner() && author_role.grants_at_least(&Self::required_for(*role))
+            MembershipAction::Add { member, role, author_public_key, .. } => {
+                // No second Owner, ever; the author must out-rank what the target role needs; AND (OPE-543)
+                // the member id must be self-certifying against the carried key. Covers reactivation too (a
+                // re-add of a removed member flows through this same arm).
+                !role.is_owner()
+                    && author_role.grants_at_least(&Self::required_for(*role))
+                    && member_id_binds_key(member, author_public_key.as_ref())
             }
             MembershipAction::ChangeRole { member, new_role } => {
                 let current = Self::role_of(state, member);
@@ -188,21 +215,18 @@ impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
             MembershipAction::Propose { .. }
             | MembershipAction::Approve { .. }
             | MembershipAction::Commit { .. } => author_role.is_signer(),
-            // Recovery re-founding: this is the DOMAIN half of the ReFound gate — a ReFound may retarget
-            // ONLY the Owner (founder), the unique + immutable keyring root, and no one else. The other
-            // half — that the op is signed by the group's pinned recovery authority (RVK) — is enforced by
-            // the engine (`key_matches_registration` → `reset_authority`); the two AND together, so a
-            // ReFound needs BOTH the RVK signature AND an Owner target to take effect. `author_role` above
-            // is unused here (the signer is the RVK, not the member), which is fine.
-            MembershipAction::ReFound { member, .. } => Self::role_of(state, member).is_owner(),
-            // Rotating the recovery authority: the RVK-signature (current authority signs) is enforced by
-            // the engine; here we bind the domain shape — only the Owner may author a rotation. Revoking a
-            // prior recovery-key holder is the Owner's prerogative.
-            MembershipAction::RotateRecoveryAuthority { .. } => author_role.is_owner(),
-            // Voluntary self-rekey (change-passphrase): a member retargets their OWN keys. The engine's D3
-            // check ensures the author's CURRENT registered key signs it; the only domain rule is self-only
-            // — you can't rekey another member. Any active member may rekey themselves.
-            MembershipAction::Retarget { member, .. } => member == author,
+            // OPE-543: durable identity has NO on-tree re-founding — recovery restores the SAME account
+            // identity via a keystore re-wrap, so there is nothing to re-found on-tree. `ReFound` is
+            // UNAUTHORIZED here (not merely uncalled): if it stayed authorizable, a Rotate→re-pin→ReFound
+            // ladder could re-arm `reset_authority` (which `apply_action` sets unconditionally) and retarget
+            // the owner's key. Killing it in the domain gate makes the whole recovery-rotation subsystem
+            // provably dormant on an openom tree (the generic machinery stays in keyeo-dag for other uses).
+            MembershipAction::ReFound { .. } => false,
+            // OPE-543: killed alongside ReFound (see above) — it is the op that would re-arm `reset_authority`.
+            MembershipAction::RotateRecoveryAuthority { .. } => false,
+            // OPE-543: voluntary self-rekey removed — under durable identity a member's key never changes
+            // on-tree (a compromised key is an account-level succession, not a per-tree retarget).
+            MembershipAction::Retarget { .. } => false,
             // A forward-secrecy reseal (OPE-282): any active member may author one — minting a fresh DEK
             // needs only public keys, so a member locked out of the current write epoch can still repair it.
             // The engine's D3 check binds it to the author's current key; the sealer's coverage check binds
@@ -386,7 +410,6 @@ impl QuorumPolicy<String, KeyringRole, Ed25519> for KeyringQuorum {
 mod tests {
     use super::*;
     use keyeo_dag::{ApplyOutcome, Keyeo, StrongRemove};
-    use proptest::prelude::*;
 
     fn sk(seed: u8) -> edsign::SigningKey {
         edsign::SigningKey::from_seed(&[seed; 32])
@@ -394,9 +417,15 @@ mod tests {
     fn vk(seed: u8) -> [u8; 32] {
         sk(seed).verifying_key().to_bytes()
     }
-    fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
+    /// OPE-543: a member id is now the self-certifying `uuid8` of its own author key, so every fixture id is
+    /// derived from the member's seed (not a free label) — the admission gate (`Add`/`Create`) refuses any
+    /// binding where `member_id != derive_member_id(author_key)`.
+    fn mid(seed: u8) -> String {
+        openom_keyring_api::derive_member_id(&vk(seed))
+    }
+    fn minit(role: KeyringRole, seed: u8) -> KeyringMemberInit {
         KeyringMemberInit {
-            id: id.to_string(),
+            id: mid(seed),
             role,
             author_public_key: vk(seed),
             hpke_public_key: [seed; 32],
@@ -405,24 +434,9 @@ mod tests {
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
         Keyeo::new(KeyringState::create(keyeo_dag::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
     }
-    fn engine_with_rvk(members: &[KeyringMemberInit], rvk_pub: [u8; 32]) -> KeyringEngine {
-        Keyeo::new(
-            KeyringState::create(keyeo_dag::GroupId::unscoped(), members).with_reset_authority(Some(rvk_pub)),
-            KeyringAccess,
-            StrongRemove,
-        )
-    }
-    fn refound(member: &str, new_seed: u8, era: u64) -> KeyringAction {
-        MembershipAction::ReFound {
-            member: member.to_string(),
-            new_author_public_key: vk(new_seed),
-            new_hpke_public_key: [new_seed; 32],
-            era,
-        }
-    }
-    fn add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
+    fn add(role: KeyringRole, seed: u8) -> KeyringAction {
         MembershipAction::Add {
-            member: member.to_string(),
+            member: mid(seed),
             role,
             author_public_key: vk(seed),
             hpke_public_key: [seed; 32],
@@ -434,37 +448,44 @@ mod tests {
         m.sort();
         m
     }
+    /// Build a sorted expected roster from `(seed, role)` pairs — since ids are now derived uuid8 strings,
+    /// their sort order is by hash, not by label, so exact-roster assertions sort the expected set too.
+    fn roster(pairs: &[(u8, KeyringRole)]) -> Vec<(String, KeyringRole)> {
+        let mut v: Vec<(String, KeyringRole)> = pairs.iter().map(|(s, r)| (mid(*s), *r)).collect();
+        v.sort();
+        v
+    }
 
     #[test]
     fn founder_signed_governance_resolves_through_keyeo() {
         // founder (Owner) creates the group and adds bob as a CoOwner (a signer); bob (a signer) then
         // adds an ordinary Editor. The openom seams (Ed25519, KeyringRole, KeyringAccess) resolve end
         // to end.
-        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1)]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "founder",
+            mid(1),
             MembershipAction::Create {
-                initial_members: vec![minit("founder", KeyringRole::OWNER, 1)],
+                initial_members: vec![minit(KeyringRole::OWNER, 1)],
             },
             &sk(1),
         ))
         .unwrap();
         // founder adds bob into the signer set (touching a signer → needs Owner ✓)
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1)))
+        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1)))
             .unwrap();
         // bob (a signer) adds carol as an ordinary Editor (touching an ordinary member → needs a signer ✓)
-        k.apply(sign_op([3; 32], vec![[2; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2)))
+        k.apply(sign_op([3; 32], vec![[2; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2)))
             .unwrap();
 
         assert_eq!(
             members(&k),
-            vec![
-                ("bob".to_string(), KeyringRole::CO_OWNER),
-                ("carol".to_string(), KeyringRole::EDITOR),
-                ("founder".to_string(), KeyringRole::OWNER),
-            ]
+            roster(&[
+                (2, KeyringRole::CO_OWNER),
+                (3, KeyringRole::EDITOR),
+                (1, KeyringRole::OWNER),
+            ])
         );
     }
 
@@ -473,15 +494,15 @@ mod tests {
         // A Maintainer is NOT a signer, so it has NO keyring-write authority — not even to add an
         // ordinary member. Admit-then-resolve: the op is admitted (valid signature) but has no effect.
         let mut k = engine(&[
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("dave", KeyringRole::MAINTAINER, 4),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::MAINTAINER, 4),
         ]);
         let r = k
-            .apply(sign_op([1; 32], vec![], "dave", add("mallory", KeyringRole::EDITOR, 9), &sk(4)))
+            .apply(sign_op([1; 32], vec![], mid(4), add(KeyringRole::EDITOR, 9), &sk(4)))
             .unwrap();
         assert!(matches!(r, ApplyOutcome::Applied { events } if events.is_empty()));
         assert!(
-            !members(&k).iter().any(|(m, _)| m == "mallory"),
+            !members(&k).iter().any(|(m, _)| m == &mid(9)),
             "a Maintainer is not a signer and cannot add a member"
         );
     }
@@ -491,37 +512,37 @@ mod tests {
         // A CoOwner is a signer, but still cannot promote someone INTO the signer set nor remove another
         // signer — that requires the Owner (founder-signed governance; unanimity/quorum is v2).
         let mut k = engine(&[
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::EDITOR, 3),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::EDITOR, 3),
         ]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "bob",
+            mid(2),
             MembershipAction::ChangeRole {
-                member: "carol".to_string(),
+                member: mid(3),
                 new_role: KeyringRole::CO_OWNER,
             },
             &sk(2),
         ))
         .unwrap();
         assert!(
-            members(&k).contains(&("carol".to_string(), KeyringRole::EDITOR)),
+            members(&k).contains(&(mid(3), KeyringRole::EDITOR)),
             "a CoOwner can't create another signer"
         );
         k.apply(sign_op(
             [2; 32],
             vec![[1; 32]],
-            "bob",
+            mid(2),
             MembershipAction::Remove {
-                member: "founder".to_string(),
+                member: mid(1),
             },
             &sk(2),
         ))
         .unwrap();
         assert!(
-            members(&k).iter().any(|(m, _)| m == "founder"),
+            members(&k).iter().any(|(m, _)| m == &mid(1)),
             "a CoOwner can't remove the Owner"
         );
     }
@@ -530,28 +551,28 @@ mod tests {
     fn the_owner_is_unique_and_immutable() {
         // No second Owner may be created, and the Owner may not be removed or demoted — not even by
         // themselves ("the founder can't leave"). Each op is admitted but has no effect.
-        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1)]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "founder",
+            mid(1),
             MembershipAction::Create {
-                initial_members: vec![minit("founder", KeyringRole::OWNER, 1)],
+                initial_members: vec![minit(KeyringRole::OWNER, 1)],
             },
             &sk(1),
         ))
         .unwrap();
         // a second Owner is forbidden
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("regent", KeyringRole::OWNER, 5), &sk(1)))
+        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::OWNER, 5), &sk(1)))
             .unwrap();
-        assert!(!members(&k).iter().any(|(m, _)| m == "regent"), "no second Owner");
+        assert!(!members(&k).iter().any(|(m, _)| m == &mid(5)), "no second Owner");
         // the Owner cannot self-remove
         k.apply(sign_op(
             [3; 32],
             vec![[1; 32]],
-            "founder",
+            mid(1),
             MembershipAction::Remove {
-                member: "founder".to_string(),
+                member: mid(1),
             },
             &sk(1),
         ))
@@ -560,9 +581,9 @@ mod tests {
         k.apply(sign_op(
             [4; 32],
             vec![[3; 32]],
-            "founder",
+            mid(1),
             MembershipAction::ChangeRole {
-                member: "founder".to_string(),
+                member: mid(1),
                 new_role: KeyringRole::CO_OWNER,
             },
             &sk(1),
@@ -570,7 +591,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             members(&k),
-            vec![("founder".to_string(), KeyringRole::OWNER)],
+            roster(&[(1, KeyringRole::OWNER)]),
             "the Owner remains, alone and unchanged"
         );
     }
@@ -582,18 +603,18 @@ mod tests {
         // shapes below are admitted with a valid signature. Without the empty-state gate on Create, either
         // would wipe the resolved roster and install mallory as sole Owner. The gate makes any Create at a
         // populated causal position a no-op, so the real roster survives untouched.
-        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1)]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "founder",
+            mid(1),
             MembershipAction::Create {
-                initial_members: vec![minit("founder", KeyringRole::OWNER, 1)],
+                initial_members: vec![minit(KeyringRole::OWNER, 1)],
             },
             &sk(1),
         ))
         .unwrap();
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1)))
+        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1)))
             .unwrap();
 
         // Attack A — a second genesis childed on the real chain (sorts AFTER it in topo order: the classic
@@ -602,9 +623,9 @@ mod tests {
             sign_op(
                 [id; 32],
                 parents,
-                "mallory",
+                mid(9),
                 MembershipAction::Create {
-                    initial_members: vec![minit("mallory", KeyringRole::OWNER, 9)],
+                    initial_members: vec![minit(KeyringRole::OWNER, 9)],
                 },
                 &sk(9),
             )
@@ -616,14 +637,14 @@ mod tests {
 
         assert_eq!(
             members(&k),
-            vec![
-                ("bob".to_string(), KeyringRole::CO_OWNER),
-                ("founder".to_string(), KeyringRole::OWNER),
-            ],
+            roster(&[
+                (2, KeyringRole::CO_OWNER),
+                (1, KeyringRole::OWNER),
+            ]),
             "neither a later nor an OpId-grinding concurrent Create may re-found the group"
         );
         assert!(
-            !k.state().members.contains_key("mallory"),
+            !k.state().members.contains_key(&mid(9)),
             "the attacker's self-signed re-genesis has no effect"
         );
     }
@@ -636,17 +657,17 @@ mod tests {
         // author's REGISTERED key — so the forgery has no effect. (This is also what will let a late op
         // signed under a since-retargeted key resolve identically on every replica once recovery lands.)
         let mut k = engine(&[
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
         ]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "founder",
+            mid(1),
             MembershipAction::Create {
                 initial_members: vec![
-                    minit("founder", KeyringRole::OWNER, 1),
-                    minit("bob", KeyringRole::CO_OWNER, 2),
+                    minit(KeyringRole::OWNER, 1),
+                    minit(KeyringRole::CO_OWNER, 2),
                 ],
             },
             &sk(1),
@@ -655,422 +676,24 @@ mod tests {
 
         // Mallory forges an op AS "bob" (a co-owner who could add an editor) but signs it with HER key
         // (seed 9), so the op carries vk(9), not bob's registered vk(2).
-        let forged = sign_op([2; 32], vec![[1; 32]], "bob", add("mallory", KeyringRole::EDITOR, 9), &sk(9));
+        let forged = sign_op([2; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 9), &sk(9));
         let outcome = k.apply(forged).unwrap(); // admitted — the signature matches its own carried key ...
         assert!(
             matches!(outcome, ApplyOutcome::Applied { events } if events.is_empty()),
             "the forged op is admitted but resolves to no membership change"
         );
         assert!(
-            !members(&k).iter().any(|(m, _)| m == "mallory"),
+            !members(&k).iter().any(|(m, _)| m == &mid(9)),
             "an op signed under a key that isn't the author's registered key carries no authority"
         );
 
         // Control: the REAL bob, signing with his registered key (seed 2), adds an editor as expected.
-        k.apply(sign_op([3; 32], vec![[1; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2)))
+        k.apply(sign_op([3; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2)))
             .unwrap();
         assert!(
-            members(&k).iter().any(|(m, _)| m == "carol"),
+            members(&k).iter().any(|(m, _)| m == &mid(3)),
             "the same action by the author's registered key is authorized — the key identity is the gate"
         );
-    }
-
-    #[test]
-    fn a_refound_signed_by_the_recovery_authority_retargets_the_owner() {
-        // OPE-269 recovery: a ReFound signed by the group's pinned recovery authority (the RVK) re-founds
-        // the Owner — swapping in a fresh signing + HPKE key — WITHOUT touching anyone else or the Owner's
-        // role. A minimal forward delta: the owner who lost their device regains control, and their new
-        // key is now the registered one for future ops.
-        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
-        let rvk_pub = rvk.verifying_key().to_bytes();
-        let mut k = engine_with_rvk(
-            &[
-                minit("founder", KeyringRole::OWNER, 1),
-                minit("bob", KeyringRole::CO_OWNER, 2),
-            ],
-            rvk_pub,
-        );
-        // A root op so later ops have a parent (the in-DAG Create is inert per OPE-271; membership + the
-        // recovery authority both come from the seeded base).
-        k.apply(sign_op(
-            [1; 32],
-            vec![],
-            "founder",
-            MembershipAction::Create {
-                initial_members: vec![
-                    minit("founder", KeyringRole::OWNER, 1),
-                    minit("bob", KeyringRole::CO_OWNER, 2),
-                ],
-            },
-            &sk(1),
-        ))
-        .unwrap();
-        assert_eq!(k.state().members.get("founder").unwrap().author_public_key, vk(1));
-
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk))
-            .unwrap();
-        let owner = k.state().members.get("founder").unwrap();
-        assert_eq!(owner.author_public_key, vk(7), "recovery retargets the Owner signing key");
-        assert_eq!(owner.hpke_public_key, [7u8; 32], "and the Owner HPKE key");
-        assert_eq!(owner.role, KeyringRole::OWNER, "owner-hood is preserved — a delta, not a re-genesis");
-        assert_eq!(
-            k.state().members.get("bob").unwrap().author_public_key,
-            vk(2),
-            "no other member is touched by a recovery"
-        );
-    }
-
-    #[test]
-    fn a_refound_is_rejected_without_the_recovery_authority_or_against_a_non_owner() {
-        // Both halves of the ReFound gate. (a) A ReFound signed by a NON-authority key (mallory's own) is
-        // admitted — self-certifying — but carries no authority, so the Owner key is untouched. (b) Even
-        // with the real RVK, a ReFound may retarget ONLY the Owner: aimed at a co-owner it has no effect.
-        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
-        let rvk_pub = rvk.verifying_key().to_bytes();
-        let mut k = engine_with_rvk(
-            &[
-                minit("founder", KeyringRole::OWNER, 1),
-                minit("bob", KeyringRole::CO_OWNER, 2),
-            ],
-            rvk_pub,
-        );
-        k.apply(sign_op(
-            [1; 32],
-            vec![],
-            "founder",
-            MembershipAction::Create {
-                initial_members: vec![
-                    minit("founder", KeyringRole::OWNER, 1),
-                    minit("bob", KeyringRole::CO_OWNER, 2),
-                ],
-            },
-            &sk(1),
-        ))
-        .unwrap();
-
-        // (a) forged by mallory's key (seed 9), not the pinned RVK.
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &sk(9)))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("founder").unwrap().author_public_key,
-            vk(1),
-            "a ReFound not signed by the pinned recovery authority has no effect"
-        );
-        // (b) the real RVK, but targeting a co-owner instead of the Owner.
-        k.apply(sign_op([3; 32], vec![[1; 32]], "bob", refound("bob", 7, 1), &rvk))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("bob").unwrap().author_public_key,
-            vk(2),
-            "a ReFound may re-found only the Owner, never another member"
-        );
-    }
-
-    // ---- RRK rotation: revoke a prior recovery-key holder (OPE-272) ----
-
-    #[test]
-    fn rotating_the_recovery_authority_revokes_the_old_rvk() {
-        // The only genuine revoke-prior-holder path. The rotation from rvk1 to rvk2 is authorized by the
-        // OWNER'S CURRENT IDENTITY KEY (sk(1)), NOT the recovery key (OPE-381 — gating a rotation on the
-        // recovery secret would let any leaked-RVK holder mint a competing rotation). After it, the old rvk1
-        // can no longer authorize a recovery, but the new rvk2 can.
-        let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
-        let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
-        let mut k = engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
-        k.apply(sign_op(
-            [1; 32],
-            vec![],
-            "founder",
-            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
-            &sk(1),
-        ))
-        .unwrap();
-        k.apply(sign_op(
-            [2; 32],
-            vec![[1; 32]],
-            "founder",
-            MembershipAction::RotateRecoveryAuthority {
-                new_reset_authority: rvk2.verifying_key().to_bytes(),
-            },
-            &sk(1), // the owner's identity key authorizes the rotation (OPE-381), not the old RVK
-        ))
-        .unwrap();
-        // the rotated-out authority can't recover any more...
-        k.apply(sign_op([3; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk1))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("founder").unwrap().author_public_key,
-            vk(1),
-            "a ReFound signed by the rotated-out old authority is rejected"
-        );
-        // ...but the new authority can.
-        k.apply(sign_op([4; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk2))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("founder").unwrap().author_public_key,
-            vk(7),
-            "a ReFound signed by the new authority re-founds the owner"
-        );
-    }
-
-    #[test]
-    fn the_recovery_key_can_no_longer_authorize_a_rotation() {
-        // OPE-381: a rotation is gated on the OWNER'S IDENTITY key, NOT the recovery key — so a holder of a
-        // leaked recovery secret (rvk1) can no longer mint a rotation to install their own authority. A
-        // rotation signed by rvk1 (which was valid pre-OPE-381) is now unauthorized and has NO EFFECT; the
-        // pinned authority is unchanged, so rvk1 still governs recovery. (The identity-gated owner path is
-        // exercised by `rotating_the_recovery_authority_revokes_the_old_rvk`.)
-        let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
-        let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
-        let mut k = engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
-        k.apply(sign_op(
-            [1; 32],
-            vec![],
-            "founder",
-            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
-            &sk(1),
-        ))
-        .unwrap();
-        k.apply(sign_op(
-            [2; 32],
-            vec![[1; 32]],
-            "founder",
-            MembershipAction::RotateRecoveryAuthority {
-                new_reset_authority: rvk2.verifying_key().to_bytes(),
-            },
-            &rvk1, // the RECOVERY key — no longer authorizes a rotation (OPE-381)
-        ))
-        .unwrap();
-        k.apply(sign_op([3; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk2))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("founder").unwrap().author_public_key,
-            vk(1),
-            "the rvk-signed rotation had no effect — rvk2 is still not the authority"
-        );
-        k.apply(sign_op([4; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk1))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("founder").unwrap().author_public_key,
-            vk(7),
-            "rvk1 still governs recovery — the attempted rotation was rejected"
-        );
-    }
-
-    /// OPE-381 takeover defense — the full round-2 attack, defeated. An attacker holding ONLY the leaked
-    /// recovery key `rvk1` cannot take over even by laundering their key through a recovery: (F) a concurrent
-    /// `ReFound` retargeting the founder to the attacker's key, then (`R_att`) a child rotation signed by that
-    /// just-registered key. The owner's identity-gated rotation `R` (rule (a)) survives and voids the
-    /// concurrent `ReFound` `F` (rule (b)); the key-provenance taint then voids `R_att` (its key-registrar is the
-    /// voided F). Net: the owner's authority stands, the founder key is unchanged, the attacker gets nothing.
-    #[test]
-    fn a_concurrent_refound_ladder_cannot_hijack_a_rotation() {
-        let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]); // the leaked recovery key the attacker holds
-        let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]); // the owner's fresh authority
-        let rvk_att = crate::recovery::derive_rvk(&[44u8; 32]); // the authority the attacker tries to install
-        let mut k =
-            engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
-        k.apply(sign_op(
-            [1; 32],
-            vec![],
-            "founder",
-            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
-            &sk(1),
-        ))
-        .unwrap();
-        // R — the owner's identity-gated rotation to rvk2 (signed by the owner's member key sk(1)).
-        k.apply(sign_op(
-            [2; 32],
-            vec![[1; 32]],
-            "founder",
-            MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk2.verifying_key().to_bytes() },
-            &sk(1),
-        ))
-        .unwrap();
-        // F — the attacker's ReFound, CONCURRENT with R (also childed on [1]), retargeting the founder to the
-        // attacker's key vk(9), signed by the leaked recovery key rvk1 (authorized at F's position).
-        k.apply(sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 9, 1), &rvk1))
-            .unwrap();
-        // R_att — the attacker's child rotation to rvk_att, authored as "founder" and signed by vk(9)=sk(9)
-        // (the key F just registered) — the ladder that defeated the round-2 design.
-        k.apply(sign_op(
-            [4; 32],
-            vec![[3; 32]],
-            "founder",
-            MembershipAction::RotateRecoveryAuthority {
-                new_reset_authority: rvk_att.verifying_key().to_bytes(),
-            },
-            &sk(9),
-        ))
-        .unwrap();
-
-        // The owner wins: founder key unchanged (F voided), authority is rvk2 (R applied, R_att taint-voided).
-        assert_eq!(
-            k.state().members.get("founder").unwrap().author_public_key,
-            vk(1),
-            "the attacker's concurrent ReFound is voided by the owner's rotation — founder key unchanged"
-        );
-        assert_eq!(
-            k.state().reset_authority,
-            Some(rvk2.verifying_key().to_bytes()),
-            "the owner's rotation stands; the attacker's ladder rotation R_att is voided by the key taint"
-        );
-        assert_ne!(
-            k.state().reset_authority,
-            Some(rvk_att.verifying_key().to_bytes()),
-            "the attacker never installs their own recovery authority"
-        );
-    }
-
-    proptest! {
-        /// OPE-381 grinding resistance. The resolver's winner tiebreak is `(depth, op-id)`, and an attacker
-        /// fully controls their ops' content-ids (grinding the opaque `sealing`). Prove that NO assignment of
-        /// op-ids lets the concurrent competing-rotation + ReFound-ladder attack win: for every distinct
-        /// `(R, F, R_att)` id triple, the owner's identity-gated rotation stands and the attacker installs
-        /// neither the founder key nor the recovery authority. (The generic BEC-convergence proptest lives in
-        /// keyeo-dag; this one fuzzes the OPE-381 attack over the openom access semantics.)
-        #[test]
-        fn no_op_id_lets_the_rotation_ladder_win(
-            r_id in any::<[u8; 32]>(),
-            f_id in any::<[u8; 32]>(),
-            ratt_id in any::<[u8; 32]>(),
-        ) {
-            prop_assume!(r_id != f_id && r_id != ratt_id && f_id != ratt_id);
-            prop_assume!(r_id != [1u8; 32] && f_id != [1u8; 32] && ratt_id != [1u8; 32]);
-
-            let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
-            let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
-            let rvk_att = crate::recovery::derive_rvk(&[44u8; 32]);
-            let mut k = engine_with_rvk(
-                &[minit("founder", KeyringRole::OWNER, 1)],
-                rvk1.verifying_key().to_bytes(),
-            );
-            k.apply(sign_op(
-                [1; 32],
-                vec![],
-                "founder",
-                MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
-                &sk(1),
-            ))
-            .unwrap();
-            // R (owner rotation, identity-signed) and F (attacker ReFound → vk(9), signed by leaked rvk1),
-            // concurrent (both childed on the genesis op).
-            k.apply(sign_op(
-                r_id,
-                vec![[1; 32]],
-                "founder",
-                MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk2.verifying_key().to_bytes() },
-                &sk(1),
-            ))
-            .unwrap();
-            k.apply(sign_op(f_id, vec![[1; 32]], "founder", refound("founder", 9, 1), &rvk1))
-                .unwrap();
-            // R_att (attacker ladder rotation, signed by vk(9)=sk(9), the key F registered), child of F.
-            k.apply(sign_op(
-                ratt_id,
-                vec![f_id],
-                "founder",
-                MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk_att.verifying_key().to_bytes() },
-                &sk(9),
-            ))
-            .unwrap();
-
-            prop_assert_eq!(
-                k.state().members.get("founder").unwrap().author_public_key,
-                vk(1),
-                "attacker never captures the founder key, for any op-id assignment"
-            );
-            prop_assert_eq!(
-                k.state().reset_authority,
-                Some(rvk2.verifying_key().to_bytes()),
-                "the owner's rotation stands, for any op-id assignment"
-            );
-            prop_assert_ne!(
-                k.state().reset_authority,
-                Some(rvk_att.verifying_key().to_bytes()),
-                "attacker never installs its authority, for any op-id assignment"
-            );
-        }
-
-        /// OPE-381 determinism (the design's K2 obligation, at the openom layer): the takeover defense is
-        /// order-INDEPENDENT and holds for a DEEPER ladder. The op set is the owner's rotation `R`, the
-        /// attacker's concurrent `ReFound` `F`, and a THREE-level ladder off `F` — `G` (a self-`Retarget`
-        /// signed by the key `F` registered) then `H` (a rotation signed by the key `G` registered). Applied
-        /// in ANY arrival order (out-of-order ops buffer, then `flush`), the resolved state is identical and
-        /// the attacker loses: `F` is voided by rule (b), and the taint fixpoint voids `G` (registrar `F`) and
-        /// `H` (registrar `G`). This exercises the new carve-out + taint under order-shuffling, which the
-        /// generic BEC-convergence proptest (Remove/Add only) does not.
-        #[test]
-        fn the_ladder_defense_is_order_independent(
-            order in Just((0..5usize).collect::<Vec<usize>>()).prop_shuffle(),
-        ) {
-            let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
-            let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
-            let rvk_att = crate::recovery::derive_rvk(&[44u8; 32]);
-            let ops = [
-                sign_op(
-                    [1; 32],
-                    vec![],
-                    "founder",
-                    MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
-                    &sk(1),
-                ),
-                // R — owner rotation to rvk2, identity-signed.
-                sign_op(
-                    [2; 32],
-                    vec![[1; 32]],
-                    "founder",
-                    MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk2.verifying_key().to_bytes() },
-                    &sk(1),
-                ),
-                // F — attacker ReFound (founder → vk(9)), concurrent with R, signed by leaked rvk1.
-                sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 9, 1), &rvk1),
-                // G — attacker self-Retarget (founder → vk(10)), signed by vk(9)=sk(9), child of F.
-                sign_op(
-                    [4; 32],
-                    vec![[3; 32]],
-                    "founder",
-                    MembershipAction::Retarget {
-                        member: "founder".to_string(),
-                        new_author_public_key: vk(10),
-                        new_hpke_public_key: [10; 32],
-                    },
-                    &sk(9),
-                ),
-                // H — attacker rotation to rvk_att, signed by vk(10)=sk(10), child of G.
-                sign_op(
-                    [5; 32],
-                    vec![[4; 32]],
-                    "founder",
-                    MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk_att.verifying_key().to_bytes() },
-                    &sk(10),
-                ),
-            ];
-            let mut k = engine_with_rvk(
-                &[minit("founder", KeyringRole::OWNER, 1)],
-                rvk1.verifying_key().to_bytes(),
-            );
-            for &i in &order {
-                let _ = k.apply(ops[i].clone());
-            }
-            let _ = k.flush();
-
-            prop_assert_eq!(
-                k.state().members.get("founder").unwrap().author_public_key,
-                vk(1),
-                "founder key is owner-controlled under every arrival order"
-            );
-            prop_assert_eq!(
-                k.state().reset_authority,
-                Some(rvk2.verifying_key().to_bytes()),
-                "the owner's rotation stands under every arrival order (3-level ladder voided)"
-            );
-            prop_assert_ne!(
-                k.state().reset_authority,
-                Some(rvk_att.verifying_key().to_bytes()),
-                "the attacker's ladder never installs its authority under any order"
-            );
-        }
     }
 
     // ---- bounded fork-merge horizon (OPE-270) ----
@@ -1081,169 +704,54 @@ mod tests {
         // op that branches from BEFORE it is rejected as a stale fork, not merged — closing the
         // rollback/equivocation vector of re-introducing history past the compaction cut. An op that
         // builds ON the horizon is accepted.
-        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1)]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "founder",
-            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
+            mid(1),
+            MembershipAction::Create { initial_members: vec![minit(KeyringRole::OWNER, 1)] },
             &sk(1),
         ))
         .unwrap();
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1)))
+        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1)))
             .unwrap();
 
         // Pin the horizon at the current tip [2].
         k.set_merge_horizon(vec![[2; 32]]);
 
         // A fork off [1] (before the horizon) is rejected outright.
-        let stale = k.apply(sign_op([4; 32], vec![[1; 32]], "founder", add("mallory", KeyringRole::EDITOR, 9), &sk(1)));
+        let stale = k.apply(sign_op([4; 32], vec![[1; 32]], mid(1), add(KeyringRole::EDITOR, 9), &sk(1)));
         assert!(
             matches!(stale, Err(keyeo_dag::Error::StaleFork)),
             "a fork from before the horizon is rejected, not merged"
         );
-        assert!(!k.state().members.contains_key("mallory"), "and never enters the resolved state");
+        assert!(!k.state().members.contains_key(&mid(9)), "and never enters the resolved state");
 
         // An op building ON the horizon [2] is accepted normally.
-        k.apply(sign_op([3; 32], vec![[2; 32]], "founder", add("carol", KeyringRole::EDITOR, 3), &sk(1)))
+        k.apply(sign_op([3; 32], vec![[2; 32]], mid(1), add(KeyringRole::EDITOR, 3), &sk(1)))
             .unwrap();
-        assert!(k.state().members.contains_key("carol"), "an op that builds on the horizon is accepted");
-    }
-
-    // ---- RESET-MERGE: how a recovery interacts with concurrent ops (OPE-269) ----
-
-    fn recovery_genesis(k: &mut KeyringEngine) {
-        // A shared root op for the reset-merge tests: genesis {founder(Owner), bob(CoOwner)}.
-        k.apply(sign_op(
-            [1; 32],
-            vec![],
-            "founder",
-            MembershipAction::Create {
-                initial_members: vec![
-                    minit("founder", KeyringRole::OWNER, 1),
-                    minit("bob", KeyringRole::CO_OWNER, 2),
-                ],
-            },
-            &sk(1),
-        ))
-        .unwrap();
-    }
-
-    #[test]
-    fn an_ordinary_member_add_concurrent_with_recovery_auto_merges() {
-        // Compass #2 (never lose data): a recovery must not clobber an innocent relative's concurrent
-        // work. bob adds an ordinary editor on one branch while the owner is recovered on another — both
-        // survive, because an ordinary member add is not privileged and so isn't carved out.
-        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
-        let mut k = engine_with_rvk(
-            &[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)],
-            rvk.verifying_key().to_bytes(),
-        );
-        recovery_genesis(&mut k);
-        k.apply(sign_op([2; 32], vec![[1; 32]], "bob", add("erin", KeyringRole::EDITOR, 5), &sk(2)))
-            .unwrap();
-        k.apply(sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("erin").map(|m| m.role),
-            Some(KeyringRole::EDITOR),
-            "an ordinary add concurrent with recovery auto-merges — nothing innocent is lost"
-        );
-        assert_eq!(k.state().members.get("founder").unwrap().author_public_key, vk(7), "owner recovered");
-    }
-
-    #[test]
-    fn a_privileged_op_concurrent_with_recovery_is_voided_but_a_later_owner_op_stands() {
-        // The carve-out. A compromised founder key (the thief) adds an accomplice SIGNER concurrent with
-        // the legitimate recovery — precisely the escalation a recovery defends against — so it is voided.
-        // Then, AFTER the recovery, the recovered owner adds a signer with the NEW key: not concurrent
-        // with the recovery, so it stands. Together: the thief's concurrent grab dies, real governance
-        // resumes on the new key.
-        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
-        let mut k = engine_with_rvk(
-            &[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)],
-            rvk.verifying_key().to_bytes(),
-        );
-        recovery_genesis(&mut k);
-        // thief branch (old founder key) and recovery branch (RVK), concurrent children of genesis.
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("mallory", KeyringRole::CO_OWNER, 9), &sk(1)))
-            .unwrap();
-        k.apply(sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk))
-            .unwrap();
-        assert!(
-            !k.state().members.contains_key("mallory"),
-            "a signer add concurrent with the recovery is voided by the carve-out"
-        );
-        assert_eq!(k.state().members.get("founder").unwrap().author_public_key, vk(7), "owner recovered");
-        assert!(k.state().members.contains_key("bob"), "the innocent co-owner is untouched");
-        // post-recovery: the recovered owner (new key sk(7)) adds a signer — not concurrent with R*.
-        k.apply(sign_op([4; 32], vec![[3; 32]], "founder", add("carol", KeyringRole::CO_OWNER, 3), &sk(7)))
-            .unwrap();
-        assert_eq!(
-            k.state().members.get("carol").map(|m| m.role),
-            Some(KeyringRole::CO_OWNER),
-            "the recovered owner governs normally with the new key after recovery"
-        );
-    }
-
-    #[test]
-    fn reset_merge_converges_regardless_of_arrival_order() {
-        // BEC: the carve-out depends only on the op DAG + causal authorization, never arrival order, so
-        // two replicas that see the thief-add and the recovery in opposite orders converge identically.
-        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
-        let rvk_pub = rvk.verifying_key().to_bytes();
-        let mk = || {
-            let mut k = engine_with_rvk(
-                &[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)],
-                rvk_pub,
-            );
-            recovery_genesis(&mut k);
-            k
-        };
-        let thief =
-            sign_op([2; 32], vec![[1; 32]], "founder", add("mallory", KeyringRole::CO_OWNER, 9), &sk(1));
-        let recovery = sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk);
-
-        let mut k1 = mk();
-        k1.apply(thief.clone()).unwrap();
-        k1.apply(recovery.clone()).unwrap();
-
-        let mut k2 = mk();
-        k2.apply(recovery).unwrap();
-        k2.apply(thief).unwrap();
-
-        assert_eq!(
-            k1.state().active_members(),
-            k2.state().active_members(),
-            "the carve-out resolves identically regardless of op arrival order (BEC)"
-        );
-        assert_eq!(
-            k1.state().members.get("founder").unwrap().author_public_key,
-            k2.state().members.get("founder").unwrap().author_public_key,
-            "the recovered owner key converges"
-        );
-        assert!(!k1.state().members.contains_key("mallory"), "and the carve-out held in both orders");
+        assert!(k.state().members.contains_key(&mid(3)), "an op that builds on the horizon is accepted");
     }
 
     #[test]
     fn any_non_owner_may_remove_themselves() {
         // The widen decision: any non-Owner may self-remove (a BYO/offline convenience), even an Editor.
         let mut k = engine(&[
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("ed", KeyringRole::EDITOR, 6),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::EDITOR, 6),
         ]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "ed",
+            mid(6),
             MembershipAction::Remove {
-                member: "ed".to_string(),
+                member: mid(6),
             },
             &sk(6),
         ))
         .unwrap();
         assert!(
-            !members(&k).iter().any(|(m, _)| m == "ed"),
+            !members(&k).iter().any(|(m, _)| m == &mid(6)),
             "an Editor may remove themselves"
         );
     }
@@ -1252,25 +760,25 @@ mod tests {
     fn a_co_owner_manages_ordinary_members() {
         // A signer (CoOwner) may add and remove ordinary members.
         let mut k = engine(&[
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::EDITOR, 3),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::EDITOR, 3),
         ]);
-        k.apply(sign_op([1; 32], vec![], "bob", add("dave", KeyringRole::EDITOR, 4), &sk(2)))
+        k.apply(sign_op([1; 32], vec![], mid(2), add(KeyringRole::EDITOR, 4), &sk(2)))
             .unwrap();
-        assert!(members(&k).iter().any(|(m, _)| m == "dave"), "a CoOwner may add an ordinary member");
+        assert!(members(&k).iter().any(|(m, _)| m == &mid(4)), "a CoOwner may add an ordinary member");
         k.apply(sign_op(
             [2; 32],
             vec![[1; 32]],
-            "bob",
+            mid(2),
             MembershipAction::Remove {
-                member: "carol".to_string(),
+                member: mid(3),
             },
             &sk(2),
         ))
         .unwrap();
         assert!(
-            !members(&k).iter().any(|(m, _)| m == "carol"),
+            !members(&k).iter().any(|(m, _)| m == &mid(3)),
             "a CoOwner may remove an ordinary member"
         );
     }
@@ -1279,12 +787,12 @@ mod tests {
     fn the_edsign_seam_rejects_a_forged_signature() {
         // A structurally-valid op whose signature is over the wrong bytes must be rejected by the
         // engine's authenticate step, i.e. by Ed25519::verify (edsign verify_strict).
-        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1)]);
         let action = MembershipAction::Remove {
-            member: "founder".to_string(),
+            member: mid(1),
         };
         let bad_sig = sk(1).sign(b"not the canonical op bytes").to_bytes();
-        let op = keyeo_dag::Op::new([1; 32], keyeo_dag::GroupId::unscoped(), vec![], "founder".to_string(), action, bad_sig, vk(1));
+        let op = keyeo_dag::Op::new([1; 32], keyeo_dag::GroupId::unscoped(), vec![], mid(1), action, bad_sig, vk(1));
         assert!(matches!(k.apply(op).unwrap_err(), keyeo_dag::Error::BadSignature));
     }
 
@@ -1300,14 +808,14 @@ mod tests {
         sign_op(
             [1; 32],
             vec![],
-            "founder",
+            mid(1),
             MembershipAction::Create {
                 initial_members: members.to_vec(),
             },
             &sk(1),
         )
     }
-    fn propose(id: u8, parents: Vec<[u8; 32]>, author: &str, seed: u8, target: KeyringAction) -> KeyringOp {
+    fn propose(id: u8, parents: Vec<[u8; 32]>, author: impl Into<String>, seed: u8, target: KeyringAction) -> KeyringOp {
         sign_op(
             [id; 32],
             parents,
@@ -1316,14 +824,14 @@ mod tests {
             &sk(seed),
         )
     }
-    fn approve(id: u8, parents: Vec<[u8; 32]>, author: &str, seed: u8) -> KeyringOp {
+    fn approve(id: u8, parents: Vec<[u8; 32]>, author: impl Into<String>, seed: u8) -> KeyringOp {
         sign_op([id; 32], parents, author, MembershipAction::Approve { proposal_id: [7; 32] }, &sk(seed))
     }
-    fn commit(id: u8, parents: Vec<[u8; 32]>, author: &str, seed: u8) -> KeyringOp {
+    fn commit(id: u8, parents: Vec<[u8; 32]>, author: impl Into<String>, seed: u8) -> KeyringOp {
         sign_op([id; 32], parents, author, MembershipAction::Commit { proposal_id: [7; 32] }, &sk(seed))
     }
-    fn promote(member: &str, new_role: KeyringRole) -> KeyringAction {
-        MembershipAction::ChangeRole { member: member.to_string(), new_role }
+    fn promote(seed: u8, new_role: KeyringRole) -> KeyringAction {
+        MembershipAction::ChangeRole { member: mid(seed), new_role }
     }
     fn q_role_of(k: &KeyringQuorumEngine, member: &str) -> Option<KeyringRole> {
         k.state().members.get(member).filter(|m| m.is_active()).map(|m| m.role)
@@ -1334,17 +842,17 @@ mod tests {
         // Promoting an Editor into the signer set normally needs the Owner. Via quorum, unanimity of the
         // co-owners (bob + carol) authorizes it with no founder approval — the co-owners-collective path.
         let m = [
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::CO_OWNER, 3),
-            minit("ed", KeyringRole::EDITOR, 6),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::CO_OWNER, 3),
+            minit(KeyringRole::EDITOR, 6),
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
-        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
-        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
-        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::CO_OWNER), "unanimity of co-owners promotes");
+        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
+        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::CO_OWNER), "unanimity of co-owners promotes");
     }
 
     #[test]
@@ -1352,31 +860,31 @@ mod tests {
         // Same target, but carol never approves — unanimity is unmet and the founder isn't in the tally,
         // so ed stays an Editor (fail-closed).
         let m = [
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::CO_OWNER, 3),
-            minit("ed", KeyringRole::EDITOR, 6),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::CO_OWNER, 3),
+            minit(KeyringRole::EDITOR, 6),
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
-        k.apply(commit(3, vec![[2; 32]], "bob", 2)).unwrap();
-        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::EDITOR), "bob alone is not unanimity");
+        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(commit(3, vec![[2; 32]], mid(2), 2)).unwrap();
+        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::EDITOR), "bob alone is not unanimity");
     }
 
     #[test]
     fn the_founder_alone_promotes_via_the_sole_path() {
         // The founder needs no co-owner approvals: Sole(founder) is satisfied by the proposer alone.
         let m = [
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("ed", KeyringRole::EDITOR, 6),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::EDITOR, 6),
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], "founder", 1, promote("ed", KeyringRole::CO_OWNER))).unwrap();
-        k.apply(commit(3, vec![[2; 32]], "founder", 1)).unwrap();
-        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::CO_OWNER), "founder alone suffices");
+        k.apply(propose(2, vec![[1; 32]], mid(1), 1, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(commit(3, vec![[2; 32]], mid(1), 1)).unwrap();
+        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::CO_OWNER), "founder alone suffices");
     }
 
     #[test]
@@ -1385,16 +893,16 @@ mod tests {
         // founder, because the founder couldn't do it directly (self-removal is forbidden) and the quorum
         // is founder-EQUIVALENT, never founder-exceeding. The requirement is fail-closed.
         let m = [
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::CO_OWNER, 3),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::CO_OWNER, 3),
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], "bob", 2, MembershipAction::Remove { member: "founder".into() })).unwrap();
-        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
-        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
-        assert_eq!(q_role_of(&k, "founder"), Some(KeyringRole::OWNER), "no quorum can remove the Owner");
+        k.apply(propose(2, vec![[1; 32]], mid(2), 2, MembershipAction::Remove { member: mid(1) })).unwrap();
+        k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
+        assert_eq!(q_role_of(&k, &mid(1)), Some(KeyringRole::OWNER), "no quorum can remove the Owner");
     }
 
     // ---- dynamic quorum: per-keyring QuorumRule ----
@@ -1403,51 +911,51 @@ mod tests {
     fn founder_only_rule_ignores_co_owner_unanimity() {
         // A single-admin family: even unanimity of every co-owner can't act; only the founder (Sole) can.
         let m = [
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::CO_OWNER, 3),
-            minit("ed", KeyringRole::EDITOR, 6),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::CO_OWNER, 3),
+            minit(KeyringRole::EDITOR, 6),
         ];
         // co-owners bob + carol try to promote ed -> refused under FounderOnly.
         let mut k = quorum_engine_with(&m, KeyringQuorum::founder_only());
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
-        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
-        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
-        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::EDITOR), "co-owner unanimity is powerless here");
+        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
+        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::EDITOR), "co-owner unanimity is powerless here");
         // the founder alone still governs.
         let mut k2 = quorum_engine_with(&m, KeyringQuorum::founder_only());
         k2.apply(genesis(&m)).unwrap();
-        k2.apply(propose(2, vec![[1; 32]], "founder", 1, promote("ed", KeyringRole::CO_OWNER))).unwrap();
-        k2.apply(commit(3, vec![[2; 32]], "founder", 1)).unwrap();
-        assert_eq!(q_role_of(&k2, "ed"), Some(KeyringRole::CO_OWNER), "founder alone governs");
+        k2.apply(propose(2, vec![[1; 32]], mid(1), 1, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k2.apply(commit(3, vec![[2; 32]], mid(1), 1)).unwrap();
+        assert_eq!(q_role_of(&k2, &mid(6)), Some(KeyringRole::CO_OWNER), "founder alone governs");
     }
 
     #[test]
     fn threshold_rule_needs_m_of_n_signers() {
         // A "3 of 4" family: founder + 3 co-owners, any 3 signers suffice, no special founder path.
         let m = [
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::CO_OWNER, 3),
-            minit("dave", KeyringRole::CO_OWNER, 4),
-            minit("ed", KeyringRole::EDITOR, 6),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::CO_OWNER, 3),
+            minit(KeyringRole::CO_OWNER, 4),
+            minit(KeyringRole::EDITOR, 6),
         ];
         // Two signers (bob proposer + carol) is short of 3 -> refused.
         let mut short = quorum_engine_with(&m, KeyringQuorum::threshold(3));
         short.apply(genesis(&m)).unwrap();
-        short.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
-        short.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
-        short.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
-        assert_eq!(q_role_of(&short, "ed"), Some(KeyringRole::EDITOR), "2 of 4 is short of the threshold");
+        short.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        short.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
+        short.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
+        assert_eq!(q_role_of(&short, &mid(6)), Some(KeyringRole::EDITOR), "2 of 4 is short of the threshold");
         // Three signers (bob + carol + dave) meet 3-of-4 -> applied, without the founder.
         let mut ok = quorum_engine_with(&m, KeyringQuorum::threshold(3));
         ok.apply(genesis(&m)).unwrap();
-        ok.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
-        ok.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
-        ok.apply(approve(4, vec![[3; 32]], "dave", 4)).unwrap();
-        ok.apply(commit(5, vec![[4; 32]], "bob", 2)).unwrap();
-        assert_eq!(q_role_of(&ok, "ed"), Some(KeyringRole::CO_OWNER), "3 of 4 signers meet the threshold");
+        ok.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        ok.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
+        ok.apply(approve(4, vec![[3; 32]], mid(4), 4)).unwrap();
+        ok.apply(commit(5, vec![[4; 32]], mid(2), 2)).unwrap();
+        assert_eq!(q_role_of(&ok, &mid(6)), Some(KeyringRole::CO_OWNER), "3 of 4 signers meet the threshold");
     }
 
     #[test]
@@ -1455,19 +963,19 @@ mod tests {
         // The OPE-271 Create gate: a Create seeds ONLY an empty group, with EXACTLY one Owner, authored by
         // one of the op's OWN members — the gate that stops a second attacker-signed Create from re-founding
         // an established group.
-        let founder = minit("founder", KeyringRole::OWNER, 1);
+        let founder = minit(KeyringRole::OWNER, 1);
         let mut k = engine(&[]);
         k.apply(sign_op(
             [1; 32],
             vec![],
-            "founder",
+            mid(1),
             MembershipAction::Create { initial_members: vec![founder] },
             &sk(1),
         ))
         .unwrap();
         assert_eq!(
             members(&k),
-            vec![("founder".to_string(), KeyringRole::OWNER)],
+            roster(&[(1, KeyringRole::OWNER)]),
             "a well-formed Create seeds the empty group"
         );
 
@@ -1476,9 +984,9 @@ mod tests {
         k2.apply(sign_op(
             [1; 32],
             vec![],
-            "founder",
+            mid(1),
             MembershipAction::Create {
-                initial_members: vec![minit("founder", KeyringRole::OWNER, 1), minit("mallory", KeyringRole::OWNER, 9)],
+                initial_members: vec![minit(KeyringRole::OWNER, 1), minit(KeyringRole::OWNER, 9)],
             },
             &sk(1),
         ))
@@ -1487,51 +995,23 @@ mod tests {
     }
 
     #[test]
-    fn a_promotion_into_the_signer_set_is_carved_out_by_a_concurrent_recovery() {
-        // A ChangeRole promoting an ordinary member INTO the signer set is PRIVILEGED (its new role is a
-        // signer), so — like a signer Add — it is voided when concurrent with a surviving recovery. If
-        // is_privileged required BOTH the new and the old role to be a signer, this promotion would wrongly
-        // auto-merge past the recovery.
-        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
-        let rvk_pub = rvk.verifying_key().to_bytes();
-        let mut k = engine_with_rvk(
-            &[minit("founder", KeyringRole::OWNER, 1), minit("carol", KeyringRole::EDITOR, 3)],
-            rvk_pub,
-        );
-        recovery_genesis(&mut k);
-        // (A) founder promotes carol EDITOR -> CO_OWNER, concurrent with (B) an RVK recovery re-founding.
-        let promote = sign_op(
-            [2; 32],
-            vec![[1; 32]],
-            "founder",
-            MembershipAction::ChangeRole { member: "carol".to_string(), new_role: KeyringRole::CO_OWNER },
-            &sk(1),
-        );
-        let recovery = sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk);
-        k.apply(promote).unwrap();
-        k.apply(recovery).unwrap();
-        let carol = members(&k).into_iter().find(|(id, _)| id == "carol").map(|(_, r)| r);
-        assert_eq!(carol, Some(KeyringRole::EDITOR), "the concurrent promotion is carved out");
-    }
-
-    #[test]
     fn a_quorum_demotion_excludes_the_target_from_the_denominator() {
         // Demoting a co-owner via founder-or-unanimity must NOT need the target's own approval — the target
         // is excluded from both the eligible set and the unanimity denominator. bob + carol (unanimity
         // minus the target dave) demote dave; if dave were counted, his missing approval would block it.
         let m = [
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::CO_OWNER, 3),
-            minit("dave", KeyringRole::CO_OWNER, 4),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::CO_OWNER, 3),
+            minit(KeyringRole::CO_OWNER, 4),
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("dave", KeyringRole::EDITOR))).unwrap();
-        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
-        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
+        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(4, KeyringRole::EDITOR))).unwrap();
+        k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
         assert_eq!(
-            q_role_of(&k, "dave"),
+            q_role_of(&k, &mid(4)),
             Some(KeyringRole::EDITOR),
             "bob + carol demote dave without dave's own approval"
         );
@@ -1542,16 +1022,74 @@ mod tests {
         // A member removed at an earlier causal position has no authority over a later op it authors: the
         // change must not take effect. (The resolver voids a removed author's op, so this holds independent
         // of the is_authorized `is_active` guard — which is why that guard is a defensive one.)
-        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)]);
-        k.apply(sign_op([2; 32], vec![], "founder", MembershipAction::Remove { member: "bob".into() }, &sk(1)))
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1), minit(KeyringRole::CO_OWNER, 2)]);
+        k.apply(sign_op([2; 32], vec![], mid(1), MembershipAction::Remove { member: mid(2) }, &sk(1)))
             .unwrap();
         // bob's add is a CHILD of his own removal — bob is inactive at this position.
-        k.apply(sign_op([3; 32], vec![[2; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2)))
+        k.apply(sign_op([3; 32], vec![[2; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2)))
             .unwrap();
         assert!(
-            !members(&k).iter().any(|(id, _)| id == "carol"),
+            !members(&k).iter().any(|(id, _)| id == &mid(3)),
             "a removed (inactive) member cannot authorize a change"
         );
     }
 
+    // ---- OPE-543 self-cert admission gate ----
+
+    /// A well-signed Add whose member id is NOT the uuid8 of its own carried author key is UNAUTHORIZED at
+    /// every replica (admitted, but folded to no effect) — the self-cert binding the resolver enforces.
+    #[test]
+    fn an_add_whose_member_id_does_not_bind_its_key_is_unauthorized() {
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1)]);
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            mid(1),
+            MembershipAction::Create { initial_members: vec![minit(KeyringRole::OWNER, 1)] },
+            &sk(1),
+        ))
+        .unwrap();
+        let forged_id = "aaaaaaaa-aaaa-8aaa-8aaa-aaaaaaaaaaaa".to_string();
+        assert_ne!(forged_id, mid(3), "the forged id is deliberately not the key's uuid8");
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            MembershipAction::Add {
+                member: forged_id.clone(),
+                role: KeyringRole::EDITOR,
+                author_public_key: vk(3),
+                hpke_public_key: [3; 32],
+                member_proof: None,
+            },
+            &sk(1),
+        ))
+        .unwrap();
+        assert!(
+            !k.state().members.contains_key(&forged_id),
+            "a non-self-certifying member id is refused admission"
+        );
+    }
+
+    /// The genesis Create gate enforces the same binding: an initial member whose id is not the uuid8 of its
+    /// carried key must not seed the group.
+    #[test]
+    fn a_create_with_a_non_binding_member_does_not_seed() {
+        let mut k = engine(&[]);
+        let forged = KeyringMemberInit {
+            id: "aaaaaaaa-aaaa-8aaa-8aaa-aaaaaaaaaaaa".to_string(),
+            role: KeyringRole::OWNER,
+            author_public_key: vk(1),
+            hpke_public_key: [1; 32],
+        };
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            forged.id.clone(),
+            MembershipAction::Create { initial_members: vec![forged] },
+            &sk(1),
+        ))
+        .unwrap();
+        assert!(members(&k).is_empty(), "a Create with a non-self-certifying member does not seed");
+    }
 }

@@ -25,13 +25,19 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
      CREATE TABLE IF NOT EXISTS watermarks (
        tree_key  TEXT PRIMARY KEY,
        watermark BLOB NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS keystores (
+       tree_key TEXT PRIMARY KEY,
+       bytes    BLOB NOT NULL
      );";
 
 /// The schema version stamped in the DB header (`PRAGMA user_version`). BUMP THIS whenever [`SCHEMA`] changes
 /// (the golden-shape test enforces it). Anti-drift: on a version mismatch, `open` self-heals in DEBUG (renaming
 /// the stale DB to a `.bak` — this store holds the only local wrapped-DEK copy + the anti-rollback watermark, so
 /// it is NEVER destroyed) and FAILS CLOSED in release (errors, touches nothing). See [`store_schema`].
-const SCHEMA_VERSION: i64 = 1;
+///
+/// v2 (OPE-542/543): added the `keystores` table (the durable-account keystore blob).
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct SqliteVaultStore {
     conn: Mutex<Connection>,
@@ -127,6 +133,32 @@ impl VaultStore for SqliteVaultStore {
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
+
+    fn load_keystore(&self, tree_key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.conn()
+            .query_row(
+                "SELECT bytes FROM keystores WHERE tree_key = ?1",
+                params![tree_key],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other.to_string()),
+            })
+    }
+
+    fn commit_keystore(&self, tree_key: &str, keystore: &[u8]) -> Result<(), String> {
+        // Opaque write-through bytes (the account's wrapped identity/root; no crypto here), last write wins.
+        self.conn()
+            .execute(
+                "INSERT INTO keystores (tree_key, bytes) VALUES (?1, ?2)
+                 ON CONFLICT(tree_key) DO UPDATE SET bytes = excluded.bytes",
+                params![tree_key, keystore],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -172,8 +204,9 @@ mod tests {
         assert_eq!(
             (SCHEMA_VERSION, shape.as_str()),
             (
-                1,
+                2,
                 "keyrings(tree_key:TEXT nn=0 pk=1, bytes:BLOB nn=1 pk=0)\n\
+                 keystores(tree_key:TEXT nn=0 pk=1, bytes:BLOB nn=1 pk=0)\n\
                  watermarks(tree_key:TEXT nn=0 pk=1, watermark:BLOB nn=1 pk=0)\n"
             ),
             "SCHEMA changed: update this golden AND bump SCHEMA_VERSION"

@@ -113,6 +113,14 @@ impl KeyringVerifier for DagVerifier {
         match (prior_state, upd) {
             // First sight: seed the pinned config + the (inert, per OPE-271) genesis op as the root.
             (None, UpdateDto::Bootstrap { pinned, genesis_op }) => {
+                // OPE-543 (A2): the server trusts `PinnedConfig.genesis` to seed the base — an admission path
+                // the resolver's Add/Create gate never runs against. Re-enforce the self-cert binding here:
+                // a pinned genesis member whose id does not derive from its carried author key is refused.
+                for m in pinned.genesis.iter().map(dto_to_minit) {
+                    if !crate::member_id_binds_key(&m.id, m.author_public_key.as_ref()) {
+                        return Err(VerifyError::Malformed);
+                    }
+                }
                 let mut engine = Self::build(&pinned);
                 let op = decode_op(&genesis_op).map_err(|_| VerifyError::Malformed)?;
                 let update_ref = op.id().to_vec();
@@ -206,7 +214,7 @@ pub fn op_update(op: &crate::KeyringOp) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{recovery, sign_op, KeyringMemberInit, KeyringRole};
+    use crate::{sign_op, KeyringMemberInit, KeyringRole};
     use keyeo_dag::MemberInit;
 
     fn sk(seed: u8) -> edsign::SigningKey {
@@ -215,17 +223,21 @@ mod tests {
     fn vk(seed: u8) -> [u8; 32] {
         sk(seed).verifying_key().to_bytes()
     }
-    fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
+    /// OPE-543: fixture member ids are the self-certifying `uuid8` of their own author key.
+    fn mid(seed: u8) -> String {
+        openom_keyring_api::derive_member_id(&vk(seed))
+    }
+    fn minit(role: KeyringRole, seed: u8) -> KeyringMemberInit {
         MemberInit {
-            id: id.to_string(),
+            id: mid(seed),
             role,
             author_public_key: vk(seed),
             hpke_public_key: [seed; 32],
         }
     }
-    fn add(member: &str, role: KeyringRole, seed: u8) -> crate::KeyringAction {
+    fn add(role: KeyringRole, seed: u8) -> crate::KeyringAction {
         MembershipAction::Add {
-            member: member.to_string(),
+            member: mid(seed),
             role,
             author_public_key: vk(seed),
             hpke_public_key: [seed; 32],
@@ -239,22 +251,25 @@ mod tests {
     #[test]
     fn dag_verifier_folds_admitted_ops_into_a_membership_view() {
         let v = DagVerifier;
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
-        let genesis_op = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let gm = vec![minit(KeyringRole::OWNER, 1)];
+        let genesis_op = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         // bootstrap
         let boot = v
             .admit(None, &bootstrap_update(&gm, None, &genesis_op))
             .unwrap();
         assert!(boot.changed);
         assert_eq!(boot.view.members.len(), 1);
-        assert_eq!(boot.view.owner().unwrap().member_id, "founder");
+        assert_eq!(boot.view.owner().unwrap().member_id, mid(1));
 
         // founder adds bob as a co-owner
-        let add_bob = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        let add_bob = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
         let step = v.admit(Some(&boot.state), &op_update(&add_bob)).unwrap();
         assert!(step.changed, "adding a member changes the view");
-        let ids: Vec<_> = step.view.members.iter().map(|m| m.member_id.as_str()).collect();
-        assert_eq!(ids, vec!["bob", "founder"]);
+        let mut ids: Vec<String> = step.view.members.iter().map(|m| m.member_id.clone()).collect();
+        ids.sort();
+        let mut expected = vec![mid(1), mid(2)];
+        expected.sort();
+        assert_eq!(ids, expected);
         assert_eq!(step.view.signers().count(), 2, "both are signers");
     }
 
@@ -265,12 +280,12 @@ mod tests {
         // admit-then-resolve would keep it as a no-op that just wastes space.
         let v = DagVerifier;
         let gm = vec![
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("dave", KeyringRole::MAINTAINER, 4),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::MAINTAINER, 4),
         ];
-        let genesis_op = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let genesis_op = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
-        let daves_add = sign_op([2; 32], vec![[1; 32]], "dave", add("mallory", KeyringRole::EDITOR, 9), &sk(4));
+        let daves_add = sign_op([2; 32], vec![[1; 32]], mid(4), add(KeyringRole::EDITOR, 9), &sk(4));
         assert_eq!(
             v.admit(Some(&boot.state), &op_update(&daves_add)).unwrap_err(),
             VerifyError::Unauthorized,
@@ -286,48 +301,20 @@ mod tests {
         // seen the removal needs it to converge.
         let v = DagVerifier;
         let gm = vec![
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
         ];
-        let genesis_op = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let genesis_op = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
 
-        let remove_bob = sign_op([2; 32], vec![[1; 32]], "founder", MembershipAction::Remove { member: "bob".into() }, &sk(1));
+        let remove_bob = sign_op([2; 32], vec![[1; 32]], mid(1), MembershipAction::Remove { member: mid(2) }, &sk(1));
         let s1 = v.admit(Some(&boot.state), &op_update(&remove_bob)).unwrap();
 
         // bob's add is a child of genesis — concurrent with his own removal.
-        let bob_adds_carol = sign_op([3; 32], vec![[1; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2));
+        let bob_adds_carol = sign_op([3; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2));
         let out = v.admit(Some(&s1.state), &op_update(&bob_adds_carol)).unwrap();
         assert!(!out.changed, "bob's concurrently-invalidated add is admitted as a no-op, not refused");
-        assert!(!out.view.members.iter().any(|m| m.member_id == "carol"), "and carol is not added");
-    }
-
-    #[test]
-    fn a_recovery_admission_sets_the_reset_boundary() {
-        let v = DagVerifier;
-        let rvk = recovery::derive_rvk(&[42u8; 32]);
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
-        let genesis_op = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
-        let boot = v
-            .admit(None, &bootstrap_update(&gm, Some(rvk.verifying_key().to_bytes()), &genesis_op))
-            .unwrap();
-
-        let refound = sign_op(
-            [2; 32],
-            vec![[1; 32]],
-            "founder",
-            MembershipAction::ReFound {
-                member: "founder".into(),
-                new_author_public_key: vk(7),
-                new_hpke_public_key: [7; 32],
-                era: 1,
-            },
-            &rvk,
-        );
-        let out = v.admit(Some(&boot.state), &op_update(&refound)).unwrap();
-        assert!(out.view.reset_boundary, "a ReFound admission crosses the reset boundary");
-        assert!(out.changed, "and the owner key changed");
-        assert_eq!(out.view.owner().unwrap().author_public_key, vk(7).to_vec());
+        assert!(!out.view.members.iter().any(|m| m.member_id == mid(3)), "and carol is not added");
     }
 
     #[test]
@@ -336,11 +323,33 @@ mod tests {
         // op is signed by an unrelated key — the engine must reject it, and `classify` must map that to an
         // error rather than admitting it. (A classify that always returned Ok would admit a forged genesis.)
         let v = DagVerifier;
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
-        let bad = sign_op([1; 32], vec![], "founder", create(&gm), &sk(9));
+        let gm = vec![minit(KeyringRole::OWNER, 1)];
+        let bad = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(9));
         assert!(
             v.admit(None, &bootstrap_update(&gm, None, &bad)).is_err(),
             "a bad-signature genesis must not be admitted"
+        );
+    }
+
+    #[test]
+    fn a_bootstrap_with_a_non_self_certifying_pinned_member_is_refused() {
+        // OPE-543 (A2): the server seeds its base from `PinnedConfig.genesis`, an admission path the resolver
+        // never gates. A pinned genesis member whose id is not the uuid8 of its carried author key must be
+        // refused at bootstrap, else a forged binding would enter the trusted base.
+        let v = DagVerifier;
+        // A well-signed genesis, but the pinned member id does not derive from its key.
+        let forged = KeyringMemberInit {
+            id: "aaaaaaaa-aaaa-8aaa-8aaa-aaaaaaaaaaaa".to_string(),
+            role: KeyringRole::OWNER,
+            author_public_key: vk(1),
+            hpke_public_key: [1; 32],
+        };
+        let gm = vec![forged.clone()];
+        let genesis_op = sign_op([1; 32], vec![], forged.id.clone(), create(&gm), &sk(1));
+        assert_eq!(
+            v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap_err(),
+            VerifyError::Malformed,
+            "a pinned genesis member whose id does not bind its key is refused"
         );
     }
 }

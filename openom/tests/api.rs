@@ -3169,3 +3169,293 @@ async fn internal_gc_reaps_admitted_and_expired_invites() {
         assert_eq!(s, StatusCode::NOT_FOUND, "reaped invite is gone");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// OPE-545: account binding (`/register`, `/me`, `/account/keystore`) + the mapping-based `Identity`.
+//
+// These run under AUTH=jwt with an HS256 self-mint secret (the dev/CI issuer per `auth-issuer-per-env`) —
+// AUTH=dev bypasses the `sub -> member_id` mapping entirely, so it can't exercise it. Each test owns random
+// subs + random author keys, so rows never collide across runs (same discipline as the rest of the suite).
+// ---------------------------------------------------------------------------------------------------
+
+const JWT_SECRET: &str = "test-jwt-hs256-secret-ope545";
+const JWT_ISS: &str = "https://test.issuer.example";
+
+/// A router in AUTH=jwt / HS256 mode (storage stays local). The mode `/register` + the mapping require.
+async fn jwt_router() -> Router {
+    let mut config = openom::config::Config::from_env();
+    config.auth = openom::config::AuthMode::Jwt;
+    config.jwt_alg = openom::config::JwtAlg::Hs256;
+    config.jwt_secret = Some(JWT_SECRET.to_string());
+    config.jwt_audience = Some("authenticated".to_string());
+    config.jwt_issuer = None; // extracted into the PoP, not pinned -> the token's iss flows through verbatim
+    let state = openom::build_state(&config).await.expect("build_state");
+    openom::app(state)
+}
+
+// Mint an HS256 token for a sub (aud=authenticated, iss=JWT_ISS, far-future exp).
+fn hs_jwt(sub: &str) -> String {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    let claims = serde_json::json!({
+        "sub": sub, "aud": "authenticated", "iss": JWT_ISS, "exp": 4_102_444_800u64,
+    });
+    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(JWT_SECRET.as_bytes())).unwrap()
+}
+
+fn now_secs() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+    )
+    .unwrap()
+}
+
+// A fresh author identity -> its (signing key, public key, self-certifying member id).
+fn fresh_author(seed: u8) -> (edsign::SigningKey, [u8; 32], Uuid) {
+    let sk = edsign::SigningKey::from_seed(&[seed; 32]);
+    let pk = sk.verifying_key().to_bytes();
+    let member_id = Uuid::parse_str(&openom_keyring_api::derive_member_id(&pk)).unwrap();
+    (sk, pk, member_id)
+}
+
+// A /register body signing the standard framed proof-of-possession over (iss, sub, member id, ts).
+fn register_body(sub: &str, sk: &edsign::SigningKey, member_id: Uuid, ts: i64) -> Value {
+    let pk = sk.verifying_key().to_bytes();
+    let msg = openom::account::register_signing_bytes(JWT_ISS, sub, member_id, ts);
+    let sig = sk.sign(&msg);
+    serde_json::json!({
+        "member_id": member_id.to_string(),
+        "author_pubkey": b64(pk),
+        "signature": b64(sig.to_bytes()),
+        "ts": ts,
+    })
+}
+
+fn post_json_jwt(uri: &str, token: &str, body: &Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+fn get_jwt(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+fn put_json_jwt(uri: &str, token: &str, body: &Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn register_happy_path_binds_and_resolves() {
+    let app = jwt_router().await;
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let (sk, _pk, member_id) = fresh_author(0x11);
+
+    // Valid PoP -> 200 + the bound member_id echoed.
+    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await;
+    assert_eq!(s, StatusCode::OK, "valid PoP registers");
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["member_id"], serde_json::json!(member_id.to_string()));
+
+    // The mapping now resolves: an Identity-guarded route returns the resolved member_id (NOT the sub).
+    let (s, _, body) = send(&app, get_jwt("/v1/me", &token)).await;
+    assert_eq!(s, StatusCode::OK);
+    let me: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(me["member_id"], serde_json::json!(member_id.to_string()), "sub resolved to the durable member_id");
+    assert_eq!(me["keystore"], Value::Null, "no keystore backup yet");
+    assert_eq!(me["generation"], serde_json::json!(0));
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn register_rejects_a_stale_timestamp() {
+    let app = jwt_router().await;
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let (sk, _pk, member_id) = fresh_author(0x22);
+
+    // ts an hour in the past -> outside the +/-5 min window (replay protection with no server state).
+    let stale = register_body(&sub, &sk, member_id, now_secs() - 3600);
+    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &stale)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "stale_timestamp");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn register_rejects_a_member_id_that_is_not_the_key_hash() {
+    let app = jwt_router().await;
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let (sk, _pk, _real) = fresh_author(0x33);
+
+    // Claim a member_id that is NOT derive(pubkey) - even with an otherwise-valid PoP over it, the
+    // self-certifying check refuses (a squatter can't bind an id whose key they don't hold).
+    let forged = Uuid::new_v4();
+    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, forged, now_secs()))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "member_id_mismatch");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn register_rejects_a_bare_concat_pop() {
+    let app = jwt_router().await;
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let (sk, pk, member_id) = fresh_author(0x44);
+    let ts = now_secs();
+
+    // A signature over the BARE concat (domain + iss + sub + member + ts, no length frames) must NOT verify
+    // against the server's framed layout - the framing is load-bearing, not cosmetic.
+    let mut bare = Vec::new();
+    bare.extend_from_slice(b"openom:register:v1");
+    bare.extend_from_slice(JWT_ISS.as_bytes());
+    bare.extend_from_slice(sub.as_bytes());
+    bare.extend_from_slice(member_id.as_bytes());
+    bare.extend_from_slice(&ts.to_be_bytes());
+    let sig = sk.sign(&bare);
+    let body = serde_json::json!({
+        "member_id": member_id.to_string(),
+        "author_pubkey": b64(pk),
+        "signature": b64(sig.to_bytes()),
+        "ts": ts,
+    });
+    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &body)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "bad_signature");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn register_is_idempotent_for_the_same_binding() {
+    let app = jwt_router().await;
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let (sk, _pk, member_id) = fresh_author(0x55);
+
+    let first = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await;
+    assert_eq!(first.0, StatusCode::OK, "first bind");
+    // A re-register of the SAME (sub, member_id, key) - a fresh signed ts - is an idempotent 200, not a 409.
+    let again = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await;
+    assert_eq!(again.0, StatusCode::OK, "idempotent re-register");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn register_conflicts_when_another_sub_claims_the_same_member_id() {
+    let app = jwt_router().await;
+    let (sk, _pk, member_id) = fresh_author(0x66);
+
+    // sub1 binds member_id X.
+    let sub1 = Uuid::new_v4().to_string();
+    let t1 = hs_jwt(&sub1);
+    assert_eq!(
+        send(&app, post_json_jwt("/v1/register", &t1, &register_body(&sub1, &sk, member_id, now_secs()))).await.0,
+        StatusCode::OK,
+    );
+
+    // sub2 presents a VALID PoP for the SAME key/member_id (it holds the key), but X is already bound to sub1
+    // -> the squat gate (member_id UNIQUE) refuses with 409, no orphan account left behind.
+    let sub2 = Uuid::new_v4().to_string();
+    let t2 = hs_jwt(&sub2);
+    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &t2, &register_body(&sub2, &sk, member_id, now_secs()))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "identity_conflict");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn identity_extractor_403s_an_unregistered_sub_distinctly_from_a_bad_token() {
+    let app = jwt_router().await;
+
+    // A valid token whose sub was never registered: the signature is fine (not a 401) but there is no
+    // mapping -> a DISTINCT 403 "unregistered", the fail-closed shape the client branches on.
+    let unregistered = hs_jwt(&Uuid::new_v4().to_string());
+    let (s, _, _) = send(&app, get_jwt("/v1/whoami", &unregistered)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "unregistered sub is fail-closed 403, not 401");
+
+    // A garbage token (bad signature) is a 401 - the two failure modes stay distinct.
+    let (s, _, _) = send(&app, get_jwt("/v1/whoami", "not-a-jwt")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "bad token is 401");
+
+    // After registering, the same sub resolves and a tree create (Identity-guarded) succeeds as the owner.
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let (sk, _pk, member_id) = fresh_author(0x77);
+    assert_eq!(
+        send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await.0,
+        StatusCode::OK,
+    );
+    let tree = Uuid::new_v4();
+    let (s, _, _) = send(&app, post_json_jwt(&format!("/v1/trees/{tree}"), &token, &serde_json::json!({}))).await;
+    assert_eq!(s, StatusCode::CREATED, "a registered caller can create a tree as its resolved member_id");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keystore_put_get_and_generation_rollback_is_refused() {
+    let app = jwt_router().await;
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let (sk, _pk, member_id) = fresh_author(0x88);
+    assert_eq!(
+        send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await.0,
+        StatusCode::OK,
+    );
+
+    // PUT gen 1 (blob A) -> 200; GET reflects it.
+    let blob_a = b64(b"encrypted-keystore-A");
+    assert_eq!(
+        send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await.0,
+        StatusCode::OK,
+    );
+    let (_, _, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["keystore"], serde_json::json!(blob_a));
+    assert_eq!(v["generation"], serde_json::json!(1));
+
+    // PUT gen 2 (blob B) -> 200 (advances the floor).
+    let blob_b = b64(b"encrypted-keystore-B");
+    assert_eq!(
+        send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
+        StatusCode::OK,
+    );
+
+    // A rollback PUT (gen 1, below the stored 2) is refused - the load-bearing anti-rollback (a stale blob
+    // can't re-arm a revoked recovery code).
+    let (s, _, body) = send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "generation_rollback");
+
+    // The stored blob is unchanged (still B @ gen 2); an equal-generation re-PUT is allowed (idempotent).
+    let (_, _, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["keystore"], serde_json::json!(blob_b), "rollback did not overwrite");
+    assert_eq!(v["generation"], serde_json::json!(2));
+    assert_eq!(
+        send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
+        StatusCode::OK,
+        "equal generation is an allowed re-PUT",
+    );
+
+    // GET /me carries the same backup + generation for device restore.
+    let (_, _, body) = send(&app, get_jwt("/v1/me", &token)).await;
+    let me: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(me["keystore"], serde_json::json!(blob_b));
+    assert_eq!(me["generation"], serde_json::json!(2));
+}

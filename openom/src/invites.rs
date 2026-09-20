@@ -242,7 +242,8 @@ pub struct ClaimBody {
 /// `PUT /invites/{invite_id}/claim` — the invitee (signed in) submits its MAC'd public keys.
 ///
 /// The server
-/// enforces `member_id == the JWT sub`, the invite is OPEN + unexpired, and ONE live claim. It does NOT
+/// enforces `body.member_id == the caller's resolved member_id` (OPE-545: the durable id the caller's JWT
+/// `sub` maps to, no longer the `sub` itself), the invite is OPEN + unexpired, and ONE live claim. It does NOT
 /// verify the MAC (only the owner, holding the link secret, can) — this is the honest-server gate; the
 /// real defense is the owner's tag check at admit.
 ///
@@ -257,7 +258,7 @@ pub async fn claim_invite(
     let member_id = Uuid::parse_str(&body.member_id)
         .map_err(|_| ApiError::BadRequest("member_id is not a uuid".into()))?;
     if member_id != identity.member_id {
-        return Err(ApiError::Forbidden); // may only claim as yourself (== the JWT sub)
+        return Err(ApiError::Forbidden); // may only claim as yourself (== your resolved member_id)
     }
     let hpke = unb64(&body.hpke_public)?;
     let author = unb64(&body.author_public)?;

@@ -34,6 +34,7 @@ use did::DidKey;
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
+use crate::account_keystore::UnlockedAccount;
 use crate::vault;
 use crate::VaultError;
 use openom_sealer::SealerSet;
@@ -99,11 +100,21 @@ pub struct Unlocked {
     pub write_epoch_unreachable: bool,
 }
 
-/// Result of [`KeyringLifecycle::recover`]: a new `anchor` + a NEW recovery code (both to publish/show),
-/// the sealer, the new watermark, and the new owner's `did:key` (recovery mints a fresh identity).
+/// Result of [`KeyringLifecycle::recover`]: the `anchor` + recovery code (both to publish/show), the sealer,
+/// the watermark, and the owner's `did:key`, plus the NEW account keystore blob.
+///
+/// **Engine split (OPE-543 2b).** The chain still mints a FRESH owner identity + a new keyring anchor + a
+/// rotated recovery code (op-based), and passes the keystore through unchanged (empty). The dag is
+/// account-keystore-mediated (durable identity): recovery restores the SAME account identity, so `did_key` is
+/// UNCHANGED and the tree `anchor` is UNCHANGED — the only new durable output is `keystore`, the account blob
+/// re-wrapped under the new passphrase (the per-tree `recovery_code` is empty; the account's recovery code did
+/// not change).
 pub struct Recovered {
     pub anchor: Vec<u8>,
     pub recovery_code: RecoveryCode,
+    /// The account keystore blob to persist (OPE-542/543). NON-EMPTY for the dag (durable identity: the account
+    /// re-wrapped under the new passphrase); EMPTY for the chain (per-tree credential model, no account keystore).
+    pub keystore: Vec<u8>,
     pub sealer: SealerSet,
     pub watermark: Vec<u8>,
     pub did_key: DidKey,
@@ -113,18 +124,29 @@ pub struct Recovered {
     pub needs_backfill: bool,
 }
 
-/// Result of [`KeyringLifecycle::change_passphrase`]: the new `anchor` + a rotated recovery code + the new
-/// watermark. The DEKs are unchanged, so any running sealer keeps working — no re-seal.
+/// Result of [`KeyringLifecycle::change_passphrase`]: the `anchor` + recovery code + watermark, plus the NEW
+/// account keystore blob. The DEKs are unchanged, so any running sealer keeps working — no re-seal.
+///
+/// **Engine split (OPE-543 2b).** The chain re-wraps the keyring under a new KEK and rotates the recovery code
+/// (op-based), passing the keystore through unchanged (empty). The dag is account-keystore-mediated: the change
+/// is an `AccountKeystore::change_passphrase` re-wrap of the account blob — the tree `anchor` and `watermark`
+/// are UNCHANGED and the per-tree `recovery_code` is empty (the account's recovery code is not rotated by a
+/// passphrase change); the only new durable output is `keystore`.
 pub struct Rekeyed {
     pub anchor: Vec<u8>,
     pub recovery_code: RecoveryCode,
+    /// The account keystore blob to persist (OPE-542/543). NON-EMPTY for the dag (account re-wrapped under the
+    /// new passphrase); EMPTY for the chain (no account keystore).
+    pub keystore: Vec<u8>,
     pub watermark: Vec<u8>,
 }
 
 /// The client keyring lifecycle — the shared menu (see the module docs). `anchor` and `floor` are
 /// engine-opaque bytes; results carry the new anchor to publish plus the opaque watermark to persist.
 pub trait KeyringLifecycle {
-    /// Create a brand-new encrypted tree.
+    /// Create a brand-new encrypted tree. `account` is the caller's durable ACCOUNT identity (OPE-542/543): the
+    /// dag (owner-as-member) engine REQUIRES it and derives the owner identity from it; the chain engine ignores
+    /// it and provisions from the `passphrase` credential, so the caller passes `None`.
     ///
     /// # Errors
     /// Returns [`VaultError`] if provisioning fails.
@@ -132,22 +154,30 @@ pub trait KeyringLifecycle {
         &self,
         ctx: &VaultContext,
         passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Provisioned, VaultError>;
 
-    /// Re-open an existing tree from its trusted `anchor` + passphrase (returning / a new device).
+    /// Re-open an existing tree from its trusted `anchor` (returning / a new device). `account` is the caller's
+    /// durable ACCOUNT identity: the dag engine REQUIRES it (the owner reads via their account member wrap and
+    /// its identity is checked against the resolved owner); the chain engine ignores it and unlocks from
+    /// `passphrase`, so the caller passes `None`.
     ///
     /// # Errors
-    /// Returns [`VaultError`] if unlock fails (wrong passphrase, or a malformed/stale keyring).
+    /// Returns [`VaultError`] if unlock fails (wrong passphrase / account, or a malformed/stale keyring).
     fn unlock(
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
         passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Unlocked, VaultError>;
 
     /// Recover with the recovery code, re-establishing owner access under `new_passphrase`, preserving
-    /// members + epochs. `floor` is the caller's opaque anti-rollback watermark (the served anchor is
-    /// untrusted on recovery — see [`crate::vault::recover`]).
+    /// members + epochs. `keystore` is the caller's persisted ACCOUNT keystore blob (OPE-542/543): the dag
+    /// (durable-identity) engine REQUIRES it and recovers the account from it (restoring the SAME identity,
+    /// re-wrapping under `new_passphrase`); the chain ignores it (op-based recovery mints a fresh identity),
+    /// so the caller may pass an empty slice. `floor` is the caller's opaque anti-rollback watermark (the
+    /// served anchor is untrusted on recovery — see [`crate::vault::recover`]).
     ///
     /// # Errors
     /// Returns [`VaultError`] if recovery fails (wrong code, or a malformed/stale keyring).
@@ -155,13 +185,17 @@ pub trait KeyringLifecycle {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Recovered, VaultError>;
 
-    /// Change the passphrase: re-wrap under a new KEK. The DEKs (and any running sealer) are unchanged, so
-    /// the tree is not re-sealed. `floor` is the opaque anti-rollback watermark.
+    /// Change the passphrase. The DEKs (and any running sealer) are unchanged, so the tree is not re-sealed.
+    /// `keystore` is the caller's persisted ACCOUNT keystore blob (OPE-542/543): the dag engine re-wraps THAT
+    /// blob under the new passphrase (no on-tree op — the durable identity is unchanged) and returns the new
+    /// blob; the chain ignores it (op-based re-key of the keyring anchor), so the caller may pass an empty
+    /// slice. `floor` is the opaque anti-rollback watermark.
     ///
     /// # Errors
     /// Returns [`VaultError`] if the change fails (wrong current passphrase, or a malformed keyring).
@@ -169,6 +203,7 @@ pub trait KeyringLifecycle {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
@@ -231,9 +266,15 @@ impl KeyringLifecycle for ChainVault {
     fn provision(
         &self,
         ctx: &VaultContext,
-        passphrase: &Passphrase,
+        _passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Provisioned, VaultError> {
-        let p = vault::provision(passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
+        // OPE-543 durable identity: the chain owner IS the durable account (symmetric with the dag). The
+        // `_passphrase` credential no longer derives the owner; the account is REQUIRED.
+        let account = account.ok_or_else(|| {
+            VaultError::BadKeyring("chain provision requires the account identity".into())
+        })?;
+        let p = vault::provision(&account, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
         Ok(Provisioned {
             anchor: p.keyring,
             recovery_code: p.recovery_code,
@@ -247,15 +288,15 @@ impl KeyringLifecycle for ChainVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        passphrase: &Passphrase,
+        _passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Unlocked, VaultError> {
-        let u = vault::unlock(
-            anchor,
-            passphrase,
-            ctx.tree_id,
-            ctx.member_id,
-            ctx.replica_id,
-        )?;
+        // The owner reads via their durable ACCOUNT identity (the app unlocked the keystore and passes it in);
+        // `_passphrase` is no longer used to derive the owner. The account is REQUIRED.
+        let account = account.ok_or_else(|| {
+            VaultError::BadKeyring("chain unlock requires the account identity".into())
+        })?;
+        let u = vault::unlock(anchor, account, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
         Ok(Unlocked {
             sealer: u.sealer,
             watermark: Self::watermark(u.revision, &u.write_key_id, &u.write_dek_hash),
@@ -271,13 +312,19 @@ impl KeyringLifecycle for ChainVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Recovered, VaultError> {
-        let (min_rev, expected_key_id, expected_dek_hash) = Self::floor(floor)?;
+        // OPE-543 durable identity: chain recovery is ACCOUNT-keystore-mediated (symmetric with the dag) —
+        // it restores the SAME account identity (no on-tree op, no new revision), so `did_key` is unchanged
+        // and the anchor is returned verbatim. Only the epoch pin is needed from the floor; the served head
+        // is signature-verified by the restored identity inside `vault::recover`.
+        let (min_rev, _key_id, _dek_hash) = Self::floor(floor)?;
         let r = vault::recover(
             anchor,
+            keystore,
             recovery_code,
             new_passphrase,
             ctx.tree_id,
@@ -285,14 +332,16 @@ impl KeyringLifecycle for ChainVault {
             ctx.replica_id,
             &vault::RecoverWatermark {
                 min_revision: min_rev,
-                write_key_id: &expected_key_id,
-                dek_hash: &expected_dek_hash,
+                write_key_id: &[],
+                dek_hash: &[],
             },
         )?;
         Ok(Recovered {
             anchor: r.keyring,
             recovery_code: r.recovery_code,
+            keystore: r.keystore,
             sealer: r.sealer,
+            // The anchor is unchanged; re-pin the (unchanged) write epoch from the freshly-opened sealer.
             watermark: Self::watermark(r.revision, &r.write_key_id, &r.write_dek_hash),
             did_key: r.did_key,
             needs_reseal: false,
@@ -304,13 +353,18 @@ impl KeyringLifecycle for ChainVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Rekeyed, VaultError> {
+        // OPE-543 durable identity: chain passphrase-change is ACCOUNT-keystore-mediated — no on-tree op, so
+        // the anchor and its anti-rollback watermark are UNCHANGED. The floor is carried forward verbatim as
+        // the new watermark (a credential change does not advance the tree cursor).
         let (min_rev, _, _) = Self::floor(floor)?;
         let re = vault::change_passphrase(
             anchor,
+            keystore,
             old_passphrase,
             new_passphrase,
             ctx.tree_id,
@@ -320,7 +374,8 @@ impl KeyringLifecycle for ChainVault {
         Ok(Rekeyed {
             anchor: re.keyring,
             recovery_code: re.recovery_code,
-            watermark: Self::watermark(re.revision, &re.write_key_id, &re.write_dek_hash),
+            keystore: re.keystore,
+            watermark: floor.to_vec(),
         })
     }
 }
@@ -330,7 +385,6 @@ mod tests {
     use super::*;
 
     const TREE: &[u8] = b"tree-uuid-16byte";
-    const MEMBER: &str = "acct-1";
 
     fn ctx<'a>(tree: &'a TreeId, member: &'a MemberId, replica: &'a ReplicaId) -> VaultContext<'a> {
         VaultContext {
@@ -338,85 +392,6 @@ mod tests {
             member_id: member,
             replica_id: replica,
         }
-    }
-
-    /// Drive the whole four-flow spine through the trait object (not the free functions) on the chain
-    /// engine: provision → unlock → `change_passphrase` → unlock-under-new → recover. Proves the shared menu
-    /// fits the shipping keyring with the anti-rollback floor threaded as OPAQUE bytes (never a scalar) —
-    /// the shape the two hosts will dispatch over.
-    #[test]
-    fn chain_vault_drives_the_lifecycle_through_the_trait() {
-        let engine: &dyn KeyringLifecycle = &ChainVault;
-        let tree = TreeId::new(TREE);
-        let member = MemberId::new(MEMBER);
-        let replica = ReplicaId::new(b"replica-A");
-        let pass = Passphrase::new(b"correct horse");
-
-        // provision → the genesis anchor + a ready sealer.
-        let p = engine
-            .provision(&ctx(&tree, &member, &replica), &pass)
-            .unwrap();
-        assert!(!p.anchor.is_empty());
-
-        // unlock the genesis anchor → an opaque watermark, not a bare revision.
-        let u = engine
-            .unlock(&ctx(&tree, &member, &replica), &p.anchor, &pass)
-            .unwrap();
-        assert_eq!(
-            ChainVault::floor(&u.watermark).unwrap().0,
-            1,
-            "chain watermark carries revision 1 (plus the write-epoch pin)",
-        );
-        assert_eq!(
-            u.did_key, p.did_key,
-            "same identity across provision + unlock"
-        );
-
-        // change_passphrase → a new anchor; the OLD passphrase must no longer unlock it. The floor is
-        // passed as the opaque watermark from the unlock above.
-        let new_pass = Passphrase::new(b"stronger horse battery");
-        let re = engine
-            .change_passphrase(
-                &ctx(&tree, &member, &replica),
-                &p.anchor,
-                &pass,
-                &new_pass,
-                &u.watermark,
-            )
-            .unwrap();
-        assert_ne!(
-            re.watermark, u.watermark,
-            "a keyring change advances the watermark"
-        );
-        assert!(
-            engine
-                .unlock(&ctx(&tree, &member, &replica), &re.anchor, &pass)
-                .is_err(),
-            "the old passphrase can't open the re-keyed anchor"
-        );
-        assert!(
-            engine
-                .unlock(&ctx(&tree, &member, &replica), &re.anchor, &new_pass)
-                .is_ok(),
-            "the new passphrase opens it"
-        );
-
-        // recover the re-keyed anchor with the CURRENT recovery code (change_passphrase rotated it — the
-        // old code's wrap was replaced) — re-establishes access under yet another passphrase. Floor = the
-        // watermark we're at.
-        let recovered = engine
-            .recover(
-                &ctx(&tree, &member, &replica),
-                &re.anchor,
-                &re.recovery_code,
-                &Passphrase::new(b"third passphrase"),
-                &re.watermark,
-            )
-            .unwrap();
-        assert_ne!(
-            recovered.watermark, re.watermark,
-            "recovery advances past the floor"
-        );
     }
 
     /// A non-empty floor that isn't a 4-byte revision is refused, not silently treated as "no floor" —
@@ -435,17 +410,32 @@ mod tests {
         ));
     }
 
-    /// The whole `KeyringLifecycle` contract, engine-agnostic: provision on one replica + seal; unlock on
-    /// another (from the opaque anchor alone) opens it; `change_passphrase` then unlock-under-the-new-pass
-    /// opens it; recover (with the provision recovery code) opens it. All over opaque anchors + watermarks
-    /// + floors, so the body is identical for both engines.
+    /// The whole `KeyringLifecycle` contract, engine-agnostic (OPE-543 durable identity — BOTH engines are
+    /// account-keystore-mediated): provision from the durable account then seal; unlock (from the opaque
+    /// anchor plus the account) opens it; a credential change is a NO-OP on the tree (the watermark does NOT
+    /// advance) that re-wraps the account keystore; unlock-under-the-new-passphrase (via the re-wrapped
+    /// keystore) opens it; recover (with the ACCOUNT recovery code) restores the SAME identity and opens it.
+    /// All over opaque anchors, watermarks and floors, so the body is identical for both engines.
+    #[allow(clippy::too_many_lines)] // the full four-flow contract, exercised end-to-end in one body
     fn lifecycle_contract<E: KeyringLifecycle>(engine: &E) {
+        use crate::AccountKeystore;
         let tree = TreeId::new(TREE);
-        let member = MemberId::new(MEMBER);
         let pass = Passphrase::new(b"correct horse");
+        // The durable ACCOUNT is the owner on BOTH engines (OPE-542/543). One keystore is the tree's single
+        // owner across every lifecycle call; each call that signs consumes a fresh `UnlockedAccount`.
+        let (ks, code, _u) = AccountKeystore::create(pass.expose()).unwrap();
+        let ks_bytes = ks.to_bytes().unwrap();
+        // OPE-543: the owner's on-tree id is SELF-CERTIFYING — the durable account's `member_id`
+        // (`derive_member_id(account key)`), NOT the caller's label. Both engines record and resolve the owner
+        // by this id, so the owner-path DEK lookups (chain) must be keyed by it.
+        let member = MemberId::new(ks.unlock(pass.expose()).unwrap().member_id);
 
         let p = engine
-            .provision(&ctx(&tree, &member, &ReplicaId::new(b"rA")), &pass)
+            .provision(
+                &ctx(&tree, &member, &ReplicaId::new(b"rA")),
+                &pass,
+                Some(ks.unlock(pass.expose()).unwrap()),
+            )
             .unwrap();
         assert!(
             !p.watermark.is_empty(),
@@ -460,12 +450,13 @@ mod tests {
             .unwrap()
             .envelope;
 
-        // unlock from the anchor alone opens the data, same owner identity.
+        // unlock from the anchor + the durable account opens the data, same owner identity.
         let u = engine
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"rB")),
                 &p.anchor,
                 &pass,
+                Some(ks.unlock(pass.expose()).unwrap()),
             )
             .unwrap();
         assert_eq!(u.did_key, p.did_key);
@@ -480,27 +471,36 @@ mod tests {
             b"parity data"
         );
 
-        // change_passphrase — gated on the unlock floor — then unlock under the new passphrase opens the
-        // same data, and the watermark has advanced past the floor.
+        // change_passphrase — account-keystore-mediated — is a NO-OP on the tree: the watermark does NOT
+        // advance, and the re-wrapped account keystore blob is returned.
         let new_pass = Passphrase::new(b"changed passphrase");
         let re = engine
             .change_passphrase(
                 &ctx(&tree, &member, &ReplicaId::new(b"rA")),
                 &p.anchor,
+                &ks_bytes,
                 &pass,
                 &new_pass,
                 &u.watermark,
             )
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             re.watermark, u.watermark,
-            "a keyring change advances the watermark"
+            "a credential change is a no-op that does NOT advance the tree watermark"
         );
+        assert!(
+            !re.keystore.is_empty(),
+            "the re-wrapped account keystore is returned"
+        );
+
+        // unlock under the new passphrase, via the re-wrapped keystore, opens the same data.
+        let re_ks = AccountKeystore::from_bytes(&re.keystore).unwrap();
         let u2 = engine
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"rC")),
                 &re.anchor,
                 &new_pass,
+                Some(re_ks.unlock(new_pass.expose()).unwrap()),
             )
             .unwrap();
         assert_eq!(
@@ -510,20 +510,30 @@ mod tests {
             b"parity data"
         );
 
-        // recover (with the provision recovery code, a fresh passphrase) opens the same data. The served
-        // anchor is the original, so its own frontier (`u.watermark`) is a satisfiable floor.
+        // recover (with the ACCOUNT recovery code, a fresh passphrase) restores the SAME identity and opens
+        // the same data. The served anchor is the original, so its own frontier (`u.watermark`) is a
+        // satisfiable floor; recovery does not advance it (no on-tree op).
         let r = engine
             .recover(
                 &ctx(&tree, &member, &ReplicaId::new(b"rD")),
                 &p.anchor,
-                &p.recovery_code,
+                &ks_bytes,
+                &code,
                 &Passphrase::new(b"recovered passphrase"),
                 &u.watermark,
             )
             .unwrap();
         assert!(
             !r.watermark.is_empty(),
-            "recovery reports an advanced watermark"
+            "recovery reports a watermark"
+        );
+        assert_eq!(
+            r.did_key, p.did_key,
+            "recovery restores the SAME durable identity"
+        );
+        assert!(
+            !r.keystore.is_empty(),
+            "recovery returns the re-wrapped account keystore"
         );
         assert_eq!(
             r.sealer
@@ -534,7 +544,7 @@ mod tests {
     }
 
     /// Parity: the chain and dag engines satisfy the SAME lifecycle contract behaviorally — OPE-267's
-    /// parity matrix carried through the real vaults, behind the trait.
+    /// parity matrix carried through the real vaults, behind the trait, now BOTH under durable identity.
     #[test]
     fn chain_and_dag_satisfy_the_same_lifecycle_contract() {
         lifecycle_contract(&ChainVault);

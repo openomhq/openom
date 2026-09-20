@@ -23,35 +23,45 @@
 
 use did::DidKey;
 use openom_crypto::{
-    derive_kek, derive_root, derive_rvk, generate_dek, generate_hpke_keypair, generate_salt,
-    parse_recovery_code, CryptoError, HpkeKeypair, Passphrase, RecoveryCode, RrkSecret,
+    derive_root, generate_dek, generate_salt, CryptoError, Passphrase, RecoveryCode,
 };
+use openom_keyring_api::derive_member_id;
 use openom_keyring_dag::{client as dag_client, KeyringRole};
 use serde::{Deserialize, Serialize};
 
+use crate::account_keystore::{AccountKeystore, UnlockedAccount};
 use crate::lifecycle::{KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext};
+// OPE-543 2b: the escrow/RRK helpers (`build_recovery_escrow`/`open_rrk_secret`/`escrow_kek_wrap`/
+// `rrk_wrap_keyeo`/`owner_secrets_reusing_pass_kdf`/`derive_rvk`/…) are no longer used by any dag flow — the
+// dag credential flows are account-keystore-mediated. Those helpers stay in `vault_core` for the CHAIN vault
+// (rewired in 2c). `RecoveryEscrow` is still referenced by the residual `SealingPayload`/`FoldState` escrow
+// plumbing (checkpoint fidelity + fold fixtures only).
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
-    new_owner_secrets, open_epoch_dek, open_rrk_secret, owner_secrets_reusing_pass_kdf,
-    rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf, validated_kdf, write_epoch_by_ordinal,
-    RecoveryEscrow,
+    member_epoch_deks, member_wrap_keyeo, sealer_set_from_deks, validate_kdf,
+    write_epoch_by_ordinal, RecoveryEscrow,
 };
 // The dag persists keyeo's native key-material: an epoch's DEK wraps ARE keyeo `Epoch`/`Wrap`, and coverage
 // is keyeo's `covers_exact` / `missing` over `RecipientDescriptor`s (the shared key-material layer the
 // sealing core is lifted onto, not the dag engine's op types behind the `dag_client` facade).
 use crate::VaultError;
 use keyeo_crypto::{
-    covers_exact, missing, KdfParams as KeyeoKdfParams, KekKind, KeyId as KeyeoKeyId,
-    RecipientDescriptor, WrapMethod as KeyeoWrapMethod, X25519PublicKey,
+    KdfParams as KeyeoKdfParams, KeyId as KeyeoKeyId, RecipientDescriptor,
+    WrapMethod as KeyeoWrapMethod, X25519PublicKey,
 };
 use openom_keyring_api::MembershipView;
 
 /// The opaque **delta** an op carries in its `sealing` field. The vault folds these (in effective-op
 /// order) into the current sealing state: `new_epochs` are inserted (genesis's epoch-0; a member removal's
-/// forward-secret epoch), `added_wraps` are appended to existing epochs (an add-member's per-epoch wraps
-/// for the joiner), and `escrow` sets the recovery escrow (`None` = unchanged). Deltas — not snapshots —
-/// so it stays CRDT-clean (concurrent additions both survive) and compact. (JSON today, matching the dag
-/// op codec; a compact/binary form is a later perf task.)
+/// forward-secret epoch) and `added_wraps` are appended to existing epochs (an add-member's per-epoch wraps
+/// for the joiner). Deltas — not snapshots — so it stays CRDT-clean (concurrent additions both survive) and
+/// compact. (JSON today, matching the dag op codec; a compact/binary form is a later perf task.)
+///
+/// OPE-543 (owner-as-member): the owner is an ordinary member whose epoch access rides a `MemberHpke` wrap to
+/// their account HPKE key — there is no per-tree recovery root (RRK) escrow. The owner's identity is the durable
+/// ACCOUNT identity (OPE-542 keystore), passed IN to `provision`/`unlock` and the owner-authored ops, so the
+/// sealing no longer carries an owner passphrase KDF (the transitional `owner_kdf` field is gone). `escrow` is
+/// retained ONLY so the not-yet-rewired credential-change flows (`recover`/`change_passphrase`/`rotate_recovery`)
+/// still compile; the owner-as-member flows always set it `None` (finalize no longer requires it).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SealingPayload {
     new_epochs: Vec<keyeo_crypto::Epoch<String>>,
@@ -68,8 +78,8 @@ pub(crate) struct AddedWrap {
 }
 
 impl SealingPayload {
-    /// A payload that only sets/re-sets the escrow (provision's is built inline; recover / `change_passphrase`
-    /// re-escrow with no epoch change).
+    /// A payload that only sets/re-sets the escrow (used by the not-yet-rewired `recover` /
+    /// `change_passphrase` re-escrow with no epoch change; retained for compilation).
     const fn escrow_only(escrow: RecoveryEscrow) -> Self {
         Self {
             new_epochs: vec![],
@@ -100,13 +110,16 @@ struct FoldState {
     minting_ops: u64,
 }
 
-/// The most `RrkHpke` wraps ANY single author may add to ONE epoch via `added_wraps` (OPE-381 / F3). An
-/// honest author adds one per rotation/backfill of that epoch; the excess is a junk flood, dropped here so a
-/// hostile member can't inflate the owner's per-unlock HPKE work by piling wraps onto an orphaned epoch. The
-/// epoch's own minted RRK wrap (in `new_epochs`, not an added wrap) is never counted, so this can't strip an
-/// epoch's baseline recovery access. The cap is generous — many rotations before it bites — while still
-/// bounding total junk to cap × (#authors).
-const MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH: usize = 8;
+/// The most HPKE `added_wraps` ANY single author may pile onto ONE epoch for ONE recipient (OPE-381 / F3,
+/// re-scoped for OPE-543 owner-as-member). An honest author adds exactly one wrap per (epoch, recipient) on a
+/// backfill/add/rotation; the excess is a junk flood, dropped here so a hostile member can't inflate a
+/// recipient's per-unlock HPKE work by piling wraps addressed to them (the `dek_commitment` check rejects a
+/// junk DEK, but the recipient still does the HPKE trial-decrypt on each). Scoped PER RECIPIENT so a legit
+/// multi-member backfill (one wrap each to many distinct members) is never capped, while a flood targeting a
+/// single victim (e.g. the owner's own member wrap, the A3 lockout vector) is bounded to cap per epoch. The
+/// epoch's OWN minted wraps (in `new_epochs`, not `added_wraps`) are never counted, so baseline access is
+/// untouched.
+const MAX_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH_PER_RECIPIENT: usize = 8;
 
 /// Fold a run of sealing entries into `state`. `count_minting` = whether these entries increment the minting-op
 /// count: `true` for real ops; `false` for a checkpoint segment whose mints are already reflected in the seeded
@@ -118,10 +131,10 @@ fn fold_into(
 ) -> Result<(), VaultError> {
     use dag_client::SealingOrigin;
     use std::collections::HashMap;
-    // Per-(epoch, author) tally of RrkHpke wraps added THIS fold, for the F3 flood bound. Fold-local: a
-    // checkpoint's below-cut wraps are already merged (and were capped below the cut), so an author gets a
+    // Per-(epoch, author, recipient) tally of HPKE wraps added THIS fold, for the F3 flood bound. Fold-local:
+    // a checkpoint's below-cut wraps are already merged (and were capped below the cut), so an author gets a
     // fresh budget above each compaction — still bounded, and compaction is owner-gated.
-    let mut rrk_added_by: HashMap<(Vec<u8>, String), usize> = HashMap::new();
+    let mut added_by: HashMap<(Vec<u8>, String, String), usize> = HashMap::new();
     for entry in sealing {
         let payload: SealingPayload = serde_json::from_slice(&entry.bytes)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
@@ -142,20 +155,24 @@ fn fold_into(
         }
         // added_wraps attach a member's wrap to an EXISTING epoch (an add-member's joiner wraps ride an
         // Other-origin Add op — legitimate, unlike minting) — applied during the fold so coverage sees them.
-        // RrkHpke added wraps are capped per (epoch, author) to bound a junk-flood DoS (F3); Member/Kek wraps
-        // are uncapped (a member wrap is per-member idempotent and keyeo's coverage dedups them).
+        // HPKE added wraps (member OR recovery-root) are capped per (epoch, author, recipient) to bound a
+        // junk-flood DoS (F3); Kek wraps aren't epoch wraps and never appear here.
         for aw in payload.added_wraps {
             if let Some((ep, _, _, _)) = state
                 .tagged
                 .iter_mut()
                 .find(|(e, _, _, _)| e.key_id.as_bytes() == aw.key_id.as_slice())
             {
-                if matches!(aw.wrap.method, keyeo_crypto::WrapMethod::RrkHpke { .. }) {
-                    let n = rrk_added_by
-                        .entry((aw.key_id.clone(), entry.author.clone()))
+                if matches!(
+                    aw.wrap.method,
+                    keyeo_crypto::WrapMethod::RrkHpke { .. }
+                        | keyeo_crypto::WrapMethod::MemberHpke { .. }
+                ) {
+                    let n = added_by
+                        .entry((aw.key_id.clone(), entry.author.clone(), aw.wrap.recipient.clone()))
                         .or_insert(0);
-                    if *n >= MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH {
-                        continue; // this author's flood bound for this epoch is reached — drop the excess
+                    if *n >= MAX_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH_PER_RECIPIENT {
+                        continue; // this author's flood bound for this (epoch, recipient) is reached
                     }
                     *n += 1;
                 }
@@ -175,13 +192,14 @@ fn finalize_sealing(
     members: &MembershipView,
 ) -> Result<FoldedSealing, VaultError> {
     use dag_client::SealingOrigin;
+    // `escrow` is dropped here (`..`): OPE-543 2b credential flows are account-keystore-mediated and no longer
+    // read a folded escrow. `FoldState.escrow` still exists for the checkpoint author's escrow-preservation and
+    // the fold-logic fixtures, but the finalized `FoldedSealing` no longer carries it.
     let FoldState {
         mut tagged,
-        escrow,
         minting_ops,
+        ..
     } = state;
-    let escrow = escrow
-        .ok_or_else(|| VaultError::BadKeyring("dag keyring has no recovery escrow".into()))?;
 
     // Sanitize epoch ordinals (OPE-289). A legitimately-minted ordinal is `max(existing)+1`, so after M
     // epoch-minting ops the greatest possible ordinal is M-1; drop any epoch whose ordinal is >= M. A
@@ -191,10 +209,13 @@ fn finalize_sealing(
     // one at M-1, so `checked_add` can only overflow after ~4e9 real ops.
     tagged.retain(|(e, _, _, _)| e.ordinal < minting_ops);
 
-    // The resolved membership as keyeo coverage descriptors (each ordinary member key-bound to their current
-    // key; the RRK key-bound to the CURRENT escrow public key), built once for the winner's coverage + the
-    // backfill check.
-    let (required, rrk) = coverage_descriptors(members, &escrow.public_key);
+    // OPE-543 owner-as-member: every resolved member — INCLUDING the owner — is a `MemberHpke` recipient,
+    // key-bound to their CURRENT HPKE key. There is no separate recovery-root (RRK) coverage descriptor: the
+    // owner reads via their own per-epoch member wrap like anyone else. Built once for the winner's coverage
+    // + the backfill checks, via a LOCAL owner-inclusive predicate (keyeo's `covers_exact`/`missing` still
+    // require an `rrk` descriptor, so they are not reused here).
+    let required = member_descriptors(members);
+    let owner_id = members.owner().map(|o| o.member_id.clone());
 
     // The write epoch is the deterministic winner among ELIGIBLE epochs — genesis/remove are always
     // eligible (the legitimate baseline), a reseal only if it COVERS the resolved membership, so a
@@ -202,7 +223,7 @@ fn finalize_sealing(
     // greatest (ordinal, op-id). `needs_reseal` = the winner's wrap set is stale vs the resolved membership.
     let mut winner: Option<(u64, [u8; 32], Vec<u8>, bool)> = None;
     for (ep, origin, op_id, _author) in &tagged {
-        let covers = covers_exact(ep, &required, &rrk);
+        let covers = owner_inclusive_covers_exact(ep, &required);
         let eligible = match origin {
             SealingOrigin::Genesis | SealingOrigin::Remove => true,
             SealingOrigin::Reseal => covers,
@@ -220,21 +241,24 @@ fn finalize_sealing(
 
     let epochs: Vec<keyeo_crypto::Epoch<String>> =
         tagged.into_iter().map(|(e, _, _, _)| e).collect();
-    // needs_backfill: some retained epoch lacks a current-key wrap for a resolved MEMBER. The owner/RRK is
-    // reached via the RRK wrap (no per-epoch member wrap), so filter the rrk id out of keyeo's `missing`,
-    // which otherwise reports it whenever an epoch's RRK wrap is absent.
-    let needs_backfill = epochs
-        .iter()
-        .any(|ep| missing(ep, &required, &rrk).iter().any(|id| *id != rrk.id));
-    // The complement: an epoch whose RRK wrap doesn't reach the CURRENT escrow key — a rotation orphan the
-    // owner can't open. `missing` reports the rrk id exactly then (rrk_covers is key-bound to the current
-    // escrow), so this is the same predicate the member-side `backfill_rrk` heals.
-    let needs_rrk_backfill = epochs
-        .iter()
-        .any(|ep| missing(ep, &required, &rrk).contains(&rrk.id));
+    // needs_backfill: some retained epoch lacks a current-key wrap for a resolved NON-OWNER member — the
+    // historical-read gap the OWNER heals (they can open every epoch they reach and add the missing wrap).
+    let needs_backfill = epochs.iter().any(|ep| {
+        owner_inclusive_missing(ep, &required)
+            .iter()
+            .any(|id| Some(id) != owner_id.as_ref())
+    });
+    // needs_rrk_backfill: some retained epoch lacks the OWNER's own wrap — the owner is LOCKED OUT of it and
+    // cannot self-heal (they can't open what they can't reach), so only another active member can add the
+    // owner's missing wrap (the A3 member-authored heal). Keeps the field name the shared `Unlocked` struct
+    // exposes; under owner-as-member its meaning is "the owner's read gap a member heals" (was: RRK orphan).
+    let needs_rrk_backfill = owner_id.as_ref().is_some_and(|oid| {
+        epochs
+            .iter()
+            .any(|ep| owner_inclusive_missing(ep, &required).iter().any(|id| id == oid))
+    });
     Ok(FoldedSealing {
         epochs,
-        escrow,
         write_key_id,
         needs_reseal: !winner_covers,
         needs_backfill,
@@ -264,11 +288,8 @@ fn author_checkpoint_sealing(
 ) -> Result<(Vec<dag_client::SealingEntry>, u32), VaultError> {
     let mut state = FoldState::default();
     fold_into(&mut state, pre_cut_sealing, true)?;
-    let escrow = state.escrow.ok_or_else(|| {
-        VaultError::BadKeyring("cannot checkpoint sealing with no recovery escrow".into())
-    })?;
 
-    let mut segment = Vec::with_capacity(state.tagged.len() + 1);
+    let mut segment = Vec::with_capacity(state.tagged.len() + 2);
     for (epoch, origin, op_id, author) in state.tagged {
         let payload = SealingPayload {
             new_epochs: vec![epoch],
@@ -285,15 +306,17 @@ fn author_checkpoint_sealing(
             bytes: payload.to_bytes(),
         });
     }
-    // The escrow rides one Other-origin entry (mint-INELIGIBLE + not counted): last-wins folds it in, and a
-    // retained recover/change_passphrase escrow op still overrides it. Authored by the escrow's owner.
-    let escrow_author = escrow.member_id.clone();
-    segment.push(dag_client::SealingEntry {
-        op_id: [0u8; 32],
-        origin: dag_client::SealingOrigin::Other,
-        author: escrow_author,
-        bytes: SealingPayload::escrow_only(escrow).to_bytes(),
-    });
+    // A pre-543 escrow (only the not-yet-rewired credential flows, and the fold-logic fixtures) likewise rides
+    // an Other-origin entry so it survives the prune. Authored by the escrow's owner.
+    if let Some(escrow) = state.escrow {
+        let escrow_author = escrow.member_id.clone();
+        segment.push(dag_client::SealingEntry {
+            op_id: [0u8; 32],
+            origin: dag_client::SealingOrigin::Other,
+            author: escrow_author,
+            bytes: SealingPayload::escrow_only(escrow).to_bytes(),
+        });
+    }
     // A count past u32::MAX is unreachable; saturate rather than truncate.
     Ok((
         segment,
@@ -369,15 +392,13 @@ pub(crate) fn verify_inputs(anchor: &[u8]) -> Result<VerifyInputs, VaultError> {
     })
 }
 
-/// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
-/// (owner) + every resolved ordinary member. Minting needs only PUBLIC keys — the RRK public in the escrow
-/// and each member's HPKE key — so both the owner (passphrase) and any active member (`member_kdf`) can produce
-/// it; the caller appends it under their OWN identity (OPE-290). The RRK wrap's AAD is keyed to `owner_id`
-/// (the RRK belongs to the owner) whoever authors the op.
+/// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to EVERY
+/// resolved member — INCLUDING the owner (OPE-543 owner-as-member: the owner has no recovery-root wrap, they
+/// hold a per-epoch member wrap like anyone else). Minting needs only PUBLIC keys (each member's HPKE key,
+/// the owner's included), so both the owner (passphrase) and any active member (`member_kdf`) can produce it;
+/// the caller appends it under their OWN identity (OPE-290).
 fn covering_reseal_sealing(
     tree_id: &[u8],
-    owner_id: &str,
-    escrow: &RecoveryEscrow,
     members: &MembershipView,
     epochs: &[keyeo_crypto::Epoch<String>],
 ) -> Result<Vec<u8>, VaultError> {
@@ -386,17 +407,11 @@ fn covering_reseal_sealing(
     let new_ordinal = epochs.iter().map(|e| e.ordinal).max().map_or(Ok(0), |m| {
         m.checked_add(1).ok_or(VaultError::RevisionOverflow)
     })?;
-    let mut wraps = vec![rrk_wrap_keyeo(
-        &escrow.public_key,
-        &new_dek,
-        tree_id,
-        owner_id,
-        &new_key_id,
-    )?];
+    let mut wraps = Vec::with_capacity(members.members.len());
     for m in &members.members {
-        // The owner reaches the DEK via the RRK wrap; a member with an empty/malformed key can't be wrapped
-        // (excluded from coverage too, so this doesn't leave a permanent needs_reseal — OPE-290).
-        if m.is_owner() || m.hpke_public_key.is_empty() {
+        // A member (owner included) with an empty/malformed key can't be wrapped — excluded from coverage
+        // too, so this doesn't leave a permanent needs_reseal (OPE-290).
+        if m.hpke_public_key.is_empty() {
             continue;
         }
         wraps.push(member_wrap_keyeo(
@@ -420,63 +435,84 @@ fn covering_reseal_sealing(
     .to_bytes())
 }
 
-/// Whether some RETAINED epoch lacks an HPKE wrap for a resolved non-owner member (OPE-288) — that member
-/// can't READ history sealed under that epoch, the symptom of a concurrent add on a branch that never saw a
-/// sibling branch's epochs. Unlike `needs_reseal` (the WRITE epoch must wrap EXACTLY the resolved set — both
-/// leaks and lockouts), this is a MISSING-only, ALL-epochs check: an extra (now-removed) member still wrapped
-/// in an old epoch is fine — historical read was already granted and removal is forward-only. The owner
-/// reaches every DEK via the RRK, so it needs no per-epoch owner wrap.
-/// The resolved membership as keyeo coverage descriptors. `required` = every ordinary member (the owner is
-/// excluded — reached via the RRK — and empty-hpke-key members are excluded), each KEY-BOUND to their
-/// CURRENT hpke key (`expected_key = Some`), which is the OPE-290 stale-key guard: a wrap on a member's old
-/// key doesn't count toward coverage. `rrk` = the owner id, KEY-BOUND to the CURRENT escrow public key
-/// (`rrk_public_key`): an RRK wrap addressing a STALE recovery key — e.g. a Reseal that raced an RRK rotation
-/// and re-wrapped the old escrow — no longer counts as coverage, so it is flagged `needs_reseal` rather than
-/// silently leaving the recovery root reachable only via a revoked key (OPE-298). Fed to keyeo `covers_exact`
-/// (winner coverage / `needs_reseal`) and `missing` (backfill). Replaces the hand-rolled `epoch_covers` /
-/// `any_epoch_missing_a_member`.
-fn coverage_descriptors(
-    members: &MembershipView,
-    rrk_public_key: &[u8],
-) -> (
-    Vec<RecipientDescriptor<String>>,
-    RecipientDescriptor<String>,
-) {
-    let required = members
+/// The resolved membership as keyeo coverage descriptors: EVERY member (the owner INCLUDED — OPE-543
+/// owner-as-member — and empty-hpke-key members excluded), each KEY-BOUND to their CURRENT hpke key
+/// (`expected_key = Some`), which is the OPE-290 stale-key guard: a wrap on a member's old key doesn't count
+/// toward coverage. Fed to the local owner-inclusive coverage predicates below.
+fn member_descriptors(members: &MembershipView) -> Vec<RecipientDescriptor<String>> {
+    members
         .members
         .iter()
-        .filter(|m| !m.is_owner() && !m.hpke_public_key.is_empty())
+        .filter(|m| !m.hpke_public_key.is_empty())
         .map(|m| RecipientDescriptor {
             id: m.member_id.clone(),
             expected_key: X25519PublicKey::try_from(m.hpke_public_key.as_slice()).ok(),
         })
-        .collect();
-    let rrk = RecipientDescriptor {
-        id: members
-            .owner()
-            .map(|o| o.member_id.clone())
-            .unwrap_or_default(),
-        expected_key: X25519PublicKey::try_from(rrk_public_key).ok(),
-    };
-    (required, rrk)
+        .collect()
 }
 
-/// The result of folding the sealing deltas: the retained epochs (for reads), the recovery escrow, the
-/// deterministic write-epoch `key_id` (the winner), and whether the winner is stale vs the resolved
-/// membership (`needs_reseal`).
+/// Does this `MemberHpke` wrap cover `d` (right recipient id AND, if bound, right key)? A local reimpl of
+/// keyeo's private `member_covers` — needed because under owner-as-member there is no `rrk` descriptor to
+/// feed keyeo's `covers_exact`/`missing`, so coverage is computed over member wraps alone (per the task:
+/// add a local predicate rather than change `keyeo-crypto`).
+fn member_covers_local(w: &keyeo_crypto::Wrap<String>, d: &RecipientDescriptor<String>) -> bool {
+    match &w.method {
+        KeyeoWrapMethod::MemberHpke { recipient_key, .. } => {
+            w.recipient == d.id
+                && d.expected_key
+                    .as_ref()
+                    .is_none_or(|k| recipient_key == k)
+        }
+        _ => false,
+    }
+}
+
+/// The resolved members (owner included) an epoch does NOT cover with a current-key `MemberHpke` wrap
+/// (OPE-288 read gap). Owner-inclusive analog of keyeo's `missing`, minus the recovery-root descriptor.
+fn owner_inclusive_missing(
+    epoch: &keyeo_crypto::Epoch<String>,
+    required: &[RecipientDescriptor<String>],
+) -> Vec<String> {
+    required
+        .iter()
+        .filter(|d| !epoch.wraps.iter().any(|w| member_covers_local(w, d)))
+        .map(|d| d.id.clone())
+        .collect()
+}
+
+/// Does this epoch cover EXACTLY the resolved membership (owner included) — no lockout and no leak? A
+/// lockout = some required member is `missing`; a leak = a `MemberHpke` wrap to an id outside `required` (a
+/// since-removed member who can still open it). Owner-inclusive analog of keyeo's `covers_exact`.
+fn owner_inclusive_covers_exact(
+    epoch: &keyeo_crypto::Epoch<String>,
+    required: &[RecipientDescriptor<String>],
+) -> bool {
+    if !owner_inclusive_missing(epoch, required).is_empty() {
+        return false; // a lockout
+    }
+    let required_ids: std::collections::HashSet<&String> = required.iter().map(|d| &d.id).collect();
+    !epoch.wraps.iter().any(|w| {
+        matches!(w.method, KeyeoWrapMethod::MemberHpke { .. })
+            && !required_ids.contains(&w.recipient)
+    })
+}
+
+/// The result of folding the sealing deltas: the retained epochs (for reads), the deterministic write-epoch
+/// `key_id` (the winner), and whether the winner is stale vs the resolved membership (`needs_reseal`).
+///
+/// OPE-543 2b: there is no folded `escrow` field. Recovery/passphrase-change are account-keystore-mediated and
+/// never read an on-tree escrow; the residual escrow plumbing in `SealingPayload`/`FoldState` survives only for
+/// the checkpoint author's fidelity and the fold-logic fixtures (always `None` on a real owner-as-member tree).
 struct FoldedSealing {
     epochs: Vec<keyeo_crypto::Epoch<String>>,
-    escrow: RecoveryEscrow,
     write_key_id: Vec<u8>,
     needs_reseal: bool,
-    /// Some retained epoch lacks a wrap for a resolved member — they can't read that slice of history until
-    /// the owner backfills it (OPE-288). Orthogonal to `needs_reseal` (a write-epoch/forward-secrecy issue).
+    /// Some retained epoch lacks a wrap for a resolved NON-OWNER member — they can't read that slice of
+    /// history until the OWNER backfills it (OPE-288). Orthogonal to `needs_reseal` (a write-epoch issue).
     needs_backfill: bool,
-    /// Some retained epoch's RRK wrap does not bind the CURRENT escrow key — an epoch minted concurrently
-    /// with a recovery rotation, which the rotation (that re-wrapped every epoch it saw to the new RRK)
-    /// never reached (OPE-381 / F3). The owner can't open it post-rotation (no old secret), but any member
-    /// holding a wrap can re-wrap its DEK to the current RRK via `backfill_rrk`. The inverse of
-    /// `needs_backfill`: an OWNER-read gap a MEMBER heals, not a member gap the owner heals.
+    /// Some retained epoch lacks the OWNER's own member wrap — the owner is locked out of it and cannot
+    /// self-heal (they can't open what they can't reach), so another active member adds the owner's wrap via
+    /// `backfill_rrk` (OPE-543 A3). The owner-read counterpart of `needs_backfill`.
     needs_rrk_backfill: bool,
 }
 
@@ -531,6 +567,73 @@ fn map_floor_err(e: dag_client::ClientError) -> VaultError {
 /// material through the shared core.
 pub struct DagVault;
 
+/// Open a dag tree with an already-unlocked durable ACCOUNT identity (OPE-543 owner-as-member): resolve the
+/// membership, fold the sealing, check the account IS the resolved Owner (anti-substitution + self-cert), and
+/// open every epoch's DEK via the owner's own per-epoch `MemberHpke` wrap. Shared by the trait [`DagVault::unlock`]
+/// (which unwraps the caller's account `Option`) and [`DagVault::recover`] (which supplies the account it just
+/// restored from the keystore) — so recovery unlocks the tree by EXACTLY the normal owner path, not a special one.
+fn unlock_with_account(
+    ctx: &VaultContext,
+    anchor: &[u8],
+    account: UnlockedAccount,
+) -> Result<Unlocked, VaultError> {
+    let tree_id = ctx.tree_id.as_bytes();
+    let replica_id = ctx.replica_id.as_bytes();
+
+    let resolved = dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+    let founder = resolved
+        .members
+        .owner()
+        .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+    // The ON-TREE owner id is the self-certifying derived id, not `ctx.member_id`.
+    let owner_id = founder.member_id.clone();
+
+    let FoldedSealing {
+        epochs,
+        write_key_id,
+        needs_reseal,
+        needs_backfill,
+        needs_rrk_backfill,
+        ..
+    } = fold_resolved(&resolved)?;
+
+    let root = account.root;
+    // Anti-substitution: the account identity must be the RESOLVED Owner's key, so a swapped owner — or an
+    // account that isn't this tree's owner — fails here. And self-cert: the key must bind the resolved owner id.
+    let derived = root.identity.verifying_key().to_bytes();
+    if derived.as_slice() != founder.author_public_key.as_slice()
+        || derive_member_id(&derived) != owner_id
+    {
+        return Err(CryptoError::Signature.into());
+    }
+
+    let deks = member_epoch_deks(&epochs, tree_id, &owner_id, &root.hpke_secret);
+    // Local reachability (OPE-299): did our own DEK bag actually reach the winning write epoch? Derived here,
+    // not from the author-declared coverage hint, so a malicious wrap-to-garbage can't hide the lockout.
+    let write_epoch_unreachable = !deks.iter().any(|(k, _, _)| *k == write_key_id);
+    let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
+
+    let owner_key: [u8; 32] = founder
+        .author_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| VaultError::BadKeyring("owner key is not 32 bytes".into()))?;
+    let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
+    // Sign entries once the tree HAS BEEN SHARED; a never-shared solo dag stays unattributed (Phase C, OPE-351).
+    if resolved.has_been_shared {
+        sealer = sealer.with_author(root.identity, owner_id.clone(), watermark.clone());
+    }
+    Ok(Unlocked {
+        sealer,
+        watermark,
+        did_key: DidKey::from_public_key(&owner_key),
+        needs_reseal,
+        needs_backfill,
+        needs_rrk_backfill,
+        write_epoch_unreachable,
+    })
+}
+
 impl KeyringLifecycle for DagVault {
     /// Create a brand-new dag-backed tree: mint a fresh DEK (epoch 0), a recovery root key escrowing it,
     /// and a content-addressed genesis op naming the founder as Owner + carrying epoch-0 and the escrow in
@@ -538,305 +641,161 @@ impl KeyringLifecycle for DagVault {
     fn provision(
         &self,
         ctx: &VaultContext,
-        passphrase: &Passphrase,
+        _passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Provisioned, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
-        let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
+
+        // OPE-543 owner-as-member + OPE-542 durable identity: the owner is an ORDINARY member whose identity is
+        // the durable ACCOUNT (the app unlocked its keystore and passes the `UnlockedAccount` in). The owner's
+        // account Ed25519 key signs the genesis and their account HPKE key receives epoch-0's DEK via a
+        // `MemberHpke` wrap — NOT a recovery-root (RRK) wrap. Their `member_id` self-certifies that identity key
+        // (the engine enforces `member_id == derive_member_id(author_key)` at admission). There is no per-tree
+        // recovery escrow and no pinned recovery authority (`reset_authority = None`) — recovery lives in the
+        // account keystore, not the tree — and no owner passphrase KDF rides the sealing (the `_passphrase` here
+        // is the chain's credential; the dag path ignores it). `ctx.member_id` is the app's notion; the ON-TREE
+        // identity is the derived one, which must match or resolve() would reject the genesis.
+        let account = account.ok_or_else(|| {
+            VaultError::BadKeyring("dag provision requires the account identity".into())
+        })?;
+        let root = &account.root;
 
         let dek = generate_dek()?;
         let key_id = generate_salt()?.to_vec();
-        let HpkeKeypair {
-            secret,
-            public: rrk_public,
-        } = generate_hpke_keypair()?;
-        let rrk_secret = RrkSecret::from(secret);
-        let secrets = new_owner_secrets(passphrase.expose())?;
+        let author_public = root.identity.verifying_key().to_bytes();
+        let member_id = derive_member_id(&author_public);
 
-        // Epoch 0: the founder reaches the DEK via the RRK wrap (as on the chain).
-        let rrk_wrap = rrk_wrap_keyeo(&rrk_public, &dek, tree_id, member_id, &key_id)?;
+        let owner_wrap = member_wrap_keyeo(&root.hpke_public, &dek, tree_id, &member_id, &key_id)?;
         let epoch0 = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(key_id.clone()),
             ordinal: 0,
             dek_commitment: keyeo_crypto::dek_commitment(&dek),
-            wraps: vec![rrk_wrap],
+            wraps: vec![owner_wrap],
         };
-        let escrow = build_recovery_escrow(&rrk_secret, &rrk_public, tree_id, member_id, &secrets)?;
 
-        let author_public = secrets.root.identity.verifying_key().to_bytes();
         let did_key = DidKey::from_public_key(&author_public);
-        let rvk_public = derive_rvk(rrk_secret.expose()).verifying_key().to_bytes();
 
         let sealing = SealingPayload {
             new_epochs: vec![epoch0],
             added_wraps: vec![],
-            escrow: Some(escrow),
+            escrow: None,
         }
         .to_bytes();
         let anchor = dag_client::provision_anchor(
             tree_id,
-            member_id,
-            secrets.root.identity.verifying_key(),
-            X25519PublicKey::from_bytes(secrets.root.hpke_public),
-            rvk_public,
+            &member_id,
+            root.identity.verifying_key(),
+            X25519PublicKey::from_bytes(root.hpke_public),
+            None,
             sealing,
-            &secrets.root.identity,
+            &root.identity,
         );
 
         let sealer =
             sealer_set_from_deks(tree_id, replica_id, vec![(key_id.clone(), 0, dek)], key_id);
         let watermark = dag_client::watermark(&anchor).map_err(map_floor_err)?;
+        // The per-tree recovery code is gone under owner-as-member — recovery is the account keystore's, minted
+        // by the app when it created the account. Provision reports an EMPTY code; the app shows the keystore's.
         Ok(Provisioned {
             anchor,
-            recovery_code: secrets.recovery_code,
+            recovery_code: RecoveryCode::new(String::new()),
             sealer,
             did_key,
             watermark,
         })
     }
 
-    /// Re-open a dag-backed tree from its anchor + passphrase: resolve the membership, fold the sealing
-    /// state, derive the KEK from the passphrase, unwrap the RRK, and open every epoch's DEK into a sealer.
+    /// Re-open a dag-backed tree from its anchor + the durable account identity: resolve the membership, fold
+    /// the sealing state, check the account identity IS the resolved Owner, and open every epoch's DEK via the
+    /// owner's own per-epoch `MemberHpke` wrap (their account HPKE secret) into a sealer.
     fn unlock(
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        passphrase: &Passphrase,
+        _passphrase: &Passphrase,
+        account: Option<UnlockedAccount>,
     ) -> Result<Unlocked, VaultError> {
-        let tree_id = ctx.tree_id.as_bytes();
-        let member_id = ctx.member_id.as_str();
-        let replica_id = ctx.replica_id.as_bytes();
-
-        let resolved =
-            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        let founder = resolved
-            .members
-            .owner()
-            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-
-        let FoldedSealing {
-            epochs,
-            escrow,
-            write_key_id,
-            needs_reseal,
-            needs_backfill,
-            needs_rrk_backfill,
-            ..
-        } = fold_resolved(&resolved)?;
-
-        // The RRK is wrapped under the passphrase KEK: derive it via that wrap's KDF.
-        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let root = derive_root(passphrase.expose(), &validated_kdf(kdf)?)?;
-
-        // Anti-substitution: the passphrase-derived identity must be the RESOLVED Owner's key (not the
-        // pinned genesis — a Retarget/ReFound legitimately retargets it), so a wrong passphrase — or a
-        // swapped owner — fails here, before any unwrap.
-        if root.identity.verifying_key().to_bytes().as_slice()
-            != founder.author_public_key.as_slice()
-        {
-            return Err(CryptoError::Signature.into());
-        }
-
-        let rrk_secret = open_rrk_secret(
-            &root.kek,
-            rrk_nonce,
-            rrk_ct,
-            tree_id,
-            member_id,
-            KekKind::Passphrase,
-        )?;
-        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret);
-        // Local reachability (OPE-299): did our own DEK bag actually reach the winning write epoch? Derived
-        // here, not from the author-declared coverage hint, so a malicious wrap-to-garbage that suppresses
-        // `needs_reseal` can't hide the lockout. The owner reaches epochs via the RRK, so this trips only on a
-        // genuinely unopenable write epoch.
-        let write_epoch_unreachable = !deks.iter().any(|(k, _, _)| *k == write_key_id);
-        let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
-
-        let owner_key: [u8; 32] = founder
-            .author_public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| VaultError::BadKeyring("owner key is not 32 bytes".into()))?;
-        // The anti-rollback watermark is the anchor's frontier (opaque to us). unlock takes no floor — it
-        // reports the cursor the caller persists and passes back as the floor on the next mutation.
-        let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
-        // Sign entries once the tree HAS BEEN SHARED (`has_been_shared` — a monotonic effective-Add scan). A
-        // never-shared solo dag stays unattributed (the launch gate skips it); once shared the sealer signs
-        // and KEEPS signing after an un-share back to solo (ex-members still hold old-epoch DEKs). The dag
-        // stamps its unlock-time frontier as the opaque governing_ref — the analog of the chain's revision
-        // (Phase C, OPE-351).
-        if resolved.has_been_shared {
-            sealer = sealer.with_author(root.identity, member_id.to_string(), watermark.clone());
-        }
-        Ok(Unlocked {
-            sealer,
-            watermark,
-            did_key: DidKey::from_public_key(&owner_key),
-            needs_reseal,
-            needs_backfill,
-            needs_rrk_backfill,
-            write_epoch_unreachable,
-        })
+        // OPE-543 owner-as-member + OPE-542 durable identity: the owner reads via the MEMBER path using their
+        // durable ACCOUNT identity (the app unlocked the keystore and passes it in) — NOT a passphrase re-derive
+        // off a sealing-carried KDF. The `_passphrase` here is the chain's credential; the dag path takes the
+        // identity from `account`. All the resolve/verify/open work lives in the shared `unlock_with_account`.
+        let account = account.ok_or_else(|| {
+            VaultError::BadKeyring("dag unlock requires the account identity".into())
+        })?;
+        unlock_with_account(ctx, anchor, account)
     }
 
-    /// Recover with the recovery code: unwrap the RRK via the code, re-establish owner access under
-    /// `new_passphrase` (fresh identity + recovery code), and append an RVK-signed `ReFound` retargeting the
-    /// Owner + carrying the re-escrow. The RRK — and every DEK it reaches — is UNCHANGED (re-wrap, not
-    /// rotate), so the RVK is the same and the `ReFound` is authorized by the pinned recovery authority, and
-    /// the returned sealer opens exactly the same data.
+    /// Recover with the recovery code — ACCOUNT-keystore-mediated (OPE-543 2b durable identity). The account
+    /// recovery code restores the SAME durable identity the tree already trusts (`AccountKeystore::
+    /// unlock_with_recovery`); we re-wrap the account blob under `new_passphrase` and open the tree by the
+    /// NORMAL owner path with that restored identity. There is NO on-tree op: no `ReFound`, so the tree anchor
+    /// is UNCHANGED, the resolved owner is UNCHANGED, and `did_key` is preserved — recovery therefore introduces
+    /// no takeover surface and no rollback, it merely re-derives the local wrapping of the durable account.
+    ///
+    /// The only new durable output is the re-wrapped `keystore` blob; the per-tree `recovery_code` is empty
+    /// (the account's recovery code is not consumed/rotated by a recovery — the SAME code keeps working).
     fn recover(
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Recovered, VaultError> {
-        let tree_id = ctx.tree_id.as_bytes();
-        let member_id = ctx.member_id.as_str();
-        let replica_id = ctx.replica_id.as_bytes();
-
-        // Anti-rollback: the served anchor is untrusted on recovery, so refuse one that dropped a frontier
-        // op below the caller's floor before doing any work.
+        // Anti-rollback: the served anchor is untrusted on recovery, so refuse one that dropped a frontier op
+        // below the caller's floor before doing any work. (The anchor is not mutated; this guards the read.)
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
-        // Resolve the current sealing → the escrow, and unwrap the RRK via the recovery code.
-        let resolved =
-            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        let FoldedSealing {
-            epochs,
-            escrow,
-            write_key_id,
-            needs_reseal,
-            needs_backfill,
-            // Surfacing the rotation-orphan signal up through the unlock results is Phase D (OPE-381);
-            // the heal itself is `backfill_rrk`, driven off the fold-level flag.
-            ..
-        } = fold_resolved(&resolved)?;
-        let (rec_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::RecoveryCode)?;
-        let entropy = parse_recovery_code(recovery_code)?;
-        let rec_kek = derive_kek(entropy.as_slice(), &validated_kdf(rec_kdf)?)?;
-        let rrk_secret = open_rrk_secret(
-            &rec_kek,
-            rrk_nonce,
-            rrk_ct,
-            tree_id,
-            member_id,
-            KekKind::RecoveryCode,
-        )?;
+        // Restore the durable account identity from the keystore via the recovery code (SAME member_id / keys),
+        // then re-wrap it under the new passphrase. `from_bytes`+`change_passphrase` never touch the tree.
+        let ks = AccountKeystore::from_bytes(keystore)?;
+        let unlocked = ks.unlock_with_recovery(recovery_code)?;
+        let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
 
-        // Re-establish owner access under the new passphrase, re-wrapping the SAME RRK.
-        let secrets = new_owner_secrets(new_passphrase.expose())?;
-        let new_escrow = build_recovery_escrow(
-            &rrk_secret,
-            &escrow.public_key,
-            tree_id,
-            member_id,
-            &secrets,
-        )?;
-        let new_author = secrets.root.identity.verifying_key().to_bytes();
-        let did_key = DidKey::from_public_key(&new_author);
-
-        // Mint the RVK-signed ReFound retargeting the Owner, carrying the new escrow in its sealing.
-        let rvk = derive_rvk(rrk_secret.expose());
-        let sealing = SealingPayload::escrow_only(new_escrow).to_bytes();
-        let new_anchor = dag_client::append_refound(
-            anchor,
-            member_id,
-            secrets.root.identity.verifying_key(),
-            X25519PublicKey::from_bytes(secrets.root.hpke_public),
-            // era is a UX/rate-limit scalar only; a monotone counter is a later refinement (single recover).
-            1,
-            sealing,
-            &rvk,
-        )
-        .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-
-        // The DEK is unchanged, so the sealer opens the same epochs via the RRK.
-        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret);
-        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
-
-        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
+        // Open the tree with the restored identity by the ordinary owner path — the anchor is unchanged, so the
+        // resolved owner is exactly this identity (anti-substitution inside `unlock_with_account` enforces it).
+        let u = unlock_with_account(ctx, anchor, unlocked)?;
         Ok(Recovered {
-            anchor: new_anchor,
-            recovery_code: secrets.recovery_code,
-            sealer,
-            watermark,
-            did_key,
-            needs_reseal,
-            needs_backfill,
+            anchor: anchor.to_vec(),
+            recovery_code: RecoveryCode::new(String::new()),
+            keystore: new_ks.to_bytes()?,
+            sealer: u.sealer,
+            watermark: u.watermark,
+            did_key: u.did_key,
+            needs_reseal: u.needs_reseal,
+            needs_backfill: u.needs_backfill,
         })
     }
 
-    /// Change the passphrase: unwrap the RRK via the OLD passphrase, re-establish owner access under
-    /// `new_passphrase` (fresh identity + recovery code) by re-wrapping the SAME RRK, and append an ordinary
-    /// (current-key-signed) `Retarget` op retargeting the Owner to the new identity + carrying the new
-    /// escrow in its sealing. The DEK is unchanged, so any running sealer keeps working — no re-seal, and no
-    /// sealer is returned.
+    /// Change the passphrase — ACCOUNT-keystore-mediated (OPE-543 2b). NO on-tree keyring op: the durable
+    /// identity the tree trusts is unchanged, so this is purely an `AccountKeystore::change_passphrase` re-wrap
+    /// of the account blob under the new KEK. The tree `anchor` + `watermark` are UNCHANGED and the running
+    /// sealer keeps working (the DEKs are untouched). Returns the new keystore blob; the per-tree recovery code
+    /// is empty (a passphrase change does not rotate the account's recovery code).
     fn change_passphrase(
         &self,
-        ctx: &VaultContext,
+        _ctx: &VaultContext,
         anchor: &[u8],
+        keystore: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Rekeyed, VaultError> {
-        let tree_id = ctx.tree_id.as_bytes();
-        let member_id = ctx.member_id.as_str();
-
+        // Anti-rollback symmetry with the chain: refuse a rolled-back served anchor before the re-wrap. The
+        // anchor itself is not mutated — the change lives entirely in the account keystore.
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
-        let resolved =
-            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        let founder = resolved
-            .members
-            .owner()
-            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
+        let ks = AccountKeystore::from_bytes(keystore)?;
+        let unlocked = ks.unlock(old_passphrase.expose())?; // a wrong current passphrase fails closed here
+        let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
 
-        // Unwrap the RRK via the OLD passphrase, checking the derived identity is the resolved Owner.
-        let (old_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let old_root = derive_root(old_passphrase.expose(), &validated_kdf(old_kdf)?)?;
-        if old_root.identity.verifying_key().to_bytes().as_slice()
-            != founder.author_public_key.as_slice()
-        {
-            return Err(CryptoError::Signature.into());
-        }
-        let rrk_secret = open_rrk_secret(
-            &old_root.kek,
-            rrk_nonce,
-            rrk_ct,
-            tree_id,
-            member_id,
-            KekKind::Passphrase,
-        )?;
-
-        // Re-establish under the new passphrase, re-wrapping the SAME RRK (re-wrap, not rotate).
-        let secrets = new_owner_secrets(new_passphrase.expose())?;
-        let new_escrow = build_recovery_escrow(
-            &rrk_secret,
-            &escrow.public_key,
-            tree_id,
-            member_id,
-            &secrets,
-        )?;
-        // Mint the Retarget signed by the OLD (current) owner key, retargeting to the new identity.
-        let sealing = SealingPayload::escrow_only(new_escrow).to_bytes();
-        let new_anchor = dag_client::append_retarget(
-            anchor,
-            member_id,
-            secrets.root.identity.verifying_key(),
-            X25519PublicKey::from_bytes(secrets.root.hpke_public),
-            sealing,
-            &old_root.identity,
-        )
-        .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-
-        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
+        let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
         Ok(Rekeyed {
-            anchor: new_anchor,
-            recovery_code: secrets.recovery_code,
+            anchor: anchor.to_vec(),
+            recovery_code: RecoveryCode::new(String::new()),
+            keystore: new_ks.to_bytes()?,
             watermark,
         })
     }
@@ -854,125 +813,11 @@ impl DagVault {
         dag_client::merge(local, remote).map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
-    /// Rotate the recovery authority (OPE-381) — the Owner retires the current recovery root for a fresh one,
-    /// so a holder of the OLD recovery secret can no longer take over the tree. Authorized by the Owner's
-    /// PASSPHRASE-derived IDENTITY key: it both anti-substitutes against the resolved Owner AND is the signing
-    /// key the engine gates the rotation on (NOT the recovery key — so a leaked-recovery-secret holder cannot
-    /// mint a competing rotation, the OPE-381 defense). An owner with total identity loss recovers (`ReFound`)
-    /// first, then rotates.
-    ///
-    /// **Divergence from the chain, by construction.** The anchor is an APPEND-ONLY op-log, so — unlike the
-    /// chain, which rewrites the keyring and re-wraps every epoch onto the new root — this cannot re-lock
-    /// already-written epochs. It APPENDS a fresh RRK wrap (to the new root) to every openable epoch via
-    /// `added_wraps` so the NEW authority can open them; the stale wrap remains (append-only), so the OLD
-    /// secret keeps decrypting HISTORICAL epochs (the same limitation as removing a member — you can't un-share
-    /// DAG history). Forward secrecy still holds: every FUTURE epoch (reseal/remove) wraps only to the new root,
-    /// and the old authority is engine-revoked from ever signing a recovery. A fresh recovery code is minted;
-    /// the founder identity + passphrase are UNCHANGED (only the recovery root moves — the pass KDF is reused
-    /// and the DEKs are untouched, so no re-seal is needed).
-    ///
-    /// Enforces the anti-rollback `floor`; returns the new anchor + watermark + the fresh recovery code.
-    ///
-    /// **The returned recovery code is PROVISIONAL until the rotation is confirmed.** On the append-only log a
-    /// concurrent rotation from another device could win the merge, so the caller MUST keep treating the OLD
-    /// code as live until [`Self::rotation_confirmed`] returns `true` against the synced anchor (two-phase
-    /// gate, §11.2). Read [`Self::resolved_reset_authority`] on the returned anchor to capture the authority to
-    /// confirm.
-    ///
-    /// # Errors
-    /// Returns [`VaultError`] if the floor check fails, the anchor is malformed, the passphrase is wrong (not
-    /// the resolved Owner), or the re-wrap / authoring fails.
-    pub fn rotate_recovery(
-        &self,
-        ctx: &VaultContext,
-        anchor: &[u8],
-        owner_passphrase: &Passphrase,
-        floor: &[u8],
-    ) -> Result<Rekeyed, VaultError> {
-        let tree_id = ctx.tree_id.as_bytes();
-
-        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
-
-        let resolved =
-            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        let founder = resolved
-            .members
-            .owner()
-            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let owner_id = founder.member_id.clone();
-        let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
-
-        // Unwrap the OLD RRK via the passphrase, checking the derived identity is the resolved Owner. Reuse the
-        // SAME pass KDF for the new secrets so the founder identity + passphrase KEK are unchanged.
-        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let pass_kdf = validated_kdf(kdf)?;
-        let root = derive_root(owner_passphrase.expose(), &pass_kdf)?;
-        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
-        {
-            return Err(CryptoError::Signature.into());
-        }
-        let old_rrk = open_rrk_secret(
-            &root.kek,
-            rrk_nonce,
-            rrk_ct,
-            tree_id,
-            &owner_id,
-            KekKind::Passphrase,
-        )?;
-
-        // Mint a fresh RRK (its derived RVK is the new authority); keep the founder + passphrase (reuse KDF),
-        // mint a fresh recovery code to escrow the new RRK under.
-        let HpkeKeypair {
-            secret: new_secret,
-            public: new_rrk_public,
-        } = generate_hpke_keypair()?;
-        let new_rrk = RrkSecret::from(new_secret);
-        let secrets = owner_secrets_reusing_pass_kdf(owner_passphrase.expose(), pass_kdf)?;
-
-        // Append a fresh RRK wrap (to the NEW root) to every OPENABLE epoch so the new authority can open them.
-        // Rides `added_wraps` (attached to existing epochs by the fold), NOT `new_epochs` — a rotate is a
-        // non-minting (`Other`-origin) op whose new_epochs the fold drops (OPE-289). TOLERANT (OPE-287): an
-        // epoch the old RRK can't open (a junk/orphan epoch a hostile member may have planted, which the owner
-        // couldn't reach anyway) is SKIPPED, not fatal — one bad epoch must not brick the whole rotation.
-        let mut added_wraps = Vec::new();
-        for ep in &epochs {
-            let Ok(dek) = open_epoch_dek(ep, tree_id, &owner_id, &old_rrk) else {
-                continue;
-            };
-            let wrap =
-                rrk_wrap_keyeo(&new_rrk_public, &dek, tree_id, &owner_id, ep.key_id.as_bytes())?;
-            added_wraps.push(AddedWrap {
-                key_id: ep.key_id.as_bytes().to_vec(),
-                wrap,
-            });
-        }
-        let new_escrow =
-            build_recovery_escrow(&new_rrk, &new_rrk_public, tree_id, &owner_id, &secrets)?;
-        let sealing = SealingPayload {
-            new_epochs: vec![],
-            added_wraps,
-            escrow: Some(new_escrow),
-        }
-        .to_bytes();
-
-        // Sign with the Owner's CURRENT IDENTITY key (the OPE-381 gate), NOT the old RVK — the engine
-        // authorizes a rotation by the author's registered member key + `is_owner`.
-        let new_anchor = dag_client::append_rotate_recovery(
-            anchor,
-            &owner_id,
-            derive_rvk(new_rrk.expose()).verifying_key(),
-            sealing,
-            &root.identity,
-        )
-        .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-
-        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
-        Ok(Rekeyed {
-            anchor: new_anchor,
-            recovery_code: secrets.recovery_code,
-            watermark,
-        })
-    }
+    // OPE-543 2b: `rotate_recovery` was REMOVED for the dag. Under durable identity there is no per-tree
+    // recovery root (RRK) to rotate — the account keystore owns recovery, and account-level rotation is
+    // `AccountKeystore::rotate_account_root` (wired by OPE-549), not an on-tree op. The two-phase
+    // rotation-confirm observers below remain as read-only anchor queries over the engine's still-supported
+    // reset ops (harmless: on an owner-as-member tree `reset_authority` is `None`).
 
     /// The resolved recovery authority (RVK) at `anchor`'s frontier — `None` for a group with no recovery
     /// authority. The observable half of the two-phase rotation gate ([`Self::rotation_confirmed`]): a caller
@@ -1062,11 +907,10 @@ impl DagVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        owner_passphrase: &Passphrase,
+        account: &UnlockedAccount,
         joiner: &crate::vault::Joiner<KeyringRole>,
     ) -> Result<Vec<u8>, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
-        let owner_id = ctx.member_id.as_str();
         let new_member_id = joiner.member_id.as_str();
 
         let resolved =
@@ -1075,30 +919,26 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
+        // The ON-TREE owner id is the self-certifying derived id.
+        let owner_id = founder.member_id.clone();
+        let FoldedSealing { epochs, .. } = fold_resolved(&resolved)?;
 
-        // The owner unwraps the RRK via their passphrase (anti-substitution vs the resolved Owner key).
-        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let root = derive_root(owner_passphrase.expose(), &validated_kdf(kdf)?)?;
-        if root.identity.verifying_key().to_bytes().as_slice()
-            != founder.author_public_key.as_slice()
+        // OPE-543 owner-as-member + OPE-542 durable identity: the owner authorizes with their durable ACCOUNT
+        // identity (passed in) — anti-substitution vs the resolved Owner key + self-cert on the id — then opens
+        // every epoch's DEK via their OWN per-epoch member wrap (not a recovery-root wrap).
+        let root = &account.root;
+        let derived = root.identity.verifying_key().to_bytes();
+        if derived.as_slice() != founder.author_public_key.as_slice()
+            || derive_member_id(&derived) != owner_id
         {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = open_rrk_secret(
-            &root.kek,
-            rrk_nonce,
-            rrk_ct,
-            tree_id,
-            owner_id,
-            KekKind::Passphrase,
-        )?;
 
         // Reach every epoch's DEK and wrap each to the new member's HPKE key. The joiner's keys were
         // narrowed once (in `Joiner::from_bytes`); the SAME values wrap every DEK and register the member,
         // so the wrapped key and the stored key are provably identical.
         let hpke_public_key = joiner.hpke_public_key.to_bytes();
-        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret);
+        let deks = member_epoch_deks(&epochs, tree_id, &owner_id, &root.hpke_secret);
         let added_wraps: Vec<AddedWrap> = deks
             .iter()
             .map(|(key_id, _epoch, dek)| {
@@ -1125,7 +965,7 @@ impl DagVault {
             author_public_key: joiner.author_public_key.to_bytes(),
             hpke_public_key,
         };
-        dag_client::append_add(anchor, owner_id, &member, sealing, &root.identity)
+        dag_client::append_add(anchor, &owner_id, &member, sealing, &root.identity)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
@@ -1250,11 +1090,10 @@ impl DagVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        owner_passphrase: &Passphrase,
+        account: &UnlockedAccount,
         remove_member_id: &str,
     ) -> Result<Vec<u8>, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
-        let owner_id = ctx.member_id.as_str();
 
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
@@ -1262,34 +1101,30 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
+        let owner_id = founder.member_id.clone();
+        let FoldedSealing { epochs, .. } = fold_resolved(&resolved)?;
 
-        // The owner authorizes via their passphrase-derived signing identity (anti-substitution). Removing
-        // needs no RRK secret — the new DEK is wrapped to the RRK PUBLIC.
-        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let root = derive_root(owner_passphrase.expose(), &validated_kdf(kdf)?)?;
-        if root.identity.verifying_key().to_bytes().as_slice()
-            != founder.author_public_key.as_slice()
+        // The owner authorizes via their durable ACCOUNT signing identity (anti-substitution + self-cert).
+        // Removing needs only PUBLIC keys — the fresh DEK is wrapped to each remaining member's HPKE public.
+        let root = &account.root;
+        let derived = root.identity.verifying_key().to_bytes();
+        if derived.as_slice() != founder.author_public_key.as_slice()
+            || derive_member_id(&derived) != owner_id
         {
             return Err(CryptoError::Signature.into());
         }
 
-        // Forward-secret re-epoch: a fresh DEK wrapped to the RRK (owner) + each REMAINING ordinary member.
+        // Forward-secret re-epoch (OPE-543 owner-as-member): a fresh DEK wrapped to each REMAINING member —
+        // the OWNER INCLUDED, as an ordinary member wrap. The removed member gets no wrap.
         let new_dek = generate_dek()?;
         let new_key_id = generate_salt()?.to_vec();
         let new_ordinal = epochs.iter().map(|e| e.ordinal).max().map_or(Ok(0), |m| {
             m.checked_add(1).ok_or(VaultError::RevisionOverflow)
         })?;
-        let mut wraps = vec![rrk_wrap_keyeo(
-            &escrow.public_key,
-            &new_dek,
-            tree_id,
-            owner_id,
-            &new_key_id,
-        )?];
+        let mut wraps = Vec::with_capacity(resolved.members.members.len());
         for m in &resolved.members.members {
-            if m.member_id == remove_member_id || m.member_id == owner_id {
-                continue; // the removed member gets no wrap; the owner reaches it via the RRK
+            if m.member_id == remove_member_id || m.hpke_public_key.is_empty() {
+                continue; // the removed member gets no wrap; an empty-keyed member can't be wrapped
             }
             wraps.push(member_wrap_keyeo(
                 &m.hpke_public_key,
@@ -1310,7 +1145,7 @@ impl DagVault {
             escrow: None,
         }
         .to_bytes();
-        dag_client::append_remove(anchor, owner_id, remove_member_id, sealing, &root.identity)
+        dag_client::append_remove(anchor, &owner_id, remove_member_id, sealing, &root.identity)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
@@ -1326,24 +1161,23 @@ impl DagVault {
     /// attempt to change the owner's own role.
     pub fn change_role(
         &self,
-        ctx: &VaultContext,
+        _ctx: &VaultContext,
         anchor: &[u8],
-        founder_passphrase: &Passphrase,
+        account: &UnlockedAccount,
         target_member_id: &str,
         new_role: KeyringRole,
     ) -> Result<Vec<u8>, VaultError> {
-        let founder_id = ctx.member_id.as_str();
-
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let founder = resolved
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let owner_id = founder.member_id.clone();
 
         // The owner's role is fixed; and the target must exist. (A signer-touching ChangeRole is authorized
         // OWNER-only verifier-side; these author-side guards keep an ineffective op from being persisted.)
-        if target_member_id == founder.member_id {
+        if target_member_id == owner_id {
             return Err(VaultError::BadKeyring(
                 "the owner's role cannot be changed".into(),
             ));
@@ -1357,17 +1191,18 @@ impl DagVault {
             return Err(VaultError::MemberNotFound);
         }
 
-        // The owner authorizes via their passphrase-derived signing identity (anti-substitution) — the same
-        // gate `remove_member` applies. No RRK secret and no sealing: the role change re-wraps no keys.
-        let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
-        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let root = derive_root(founder_passphrase.expose(), &validated_kdf(kdf)?)?;
-        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
+        // The owner authorizes via their durable ACCOUNT signing identity (anti-substitution + self-cert) — the
+        // same gate `remove_member` applies (OPE-543 owner-as-member). No sealing: the role change re-wraps no
+        // keys, so it reads no epochs.
+        let root = &account.root;
+        let derived = root.identity.verifying_key().to_bytes();
+        if derived.as_slice() != founder.author_public_key.as_slice()
+            || derive_member_id(&derived) != owner_id
         {
             return Err(CryptoError::Signature.into());
         }
 
-        dag_client::append_change_role(anchor, founder_id, target_member_id, new_role, &root.identity)
+        dag_client::append_change_role(anchor, &owner_id, target_member_id, new_role, &root.identity)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
@@ -1385,7 +1220,7 @@ impl DagVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        owner_passphrase: &Passphrase,
+        account: &UnlockedAccount,
         floor: &[u8],
         trigger: ResealTrigger,
     ) -> Result<Resealed, VaultError> {
@@ -1399,9 +1234,9 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let owner_id = founder.member_id.clone();
         let FoldedSealing {
             epochs,
-            escrow,
             needs_reseal,
             ..
         } = fold_resolved(&resolved)?;
@@ -1416,21 +1251,20 @@ impl DagVault {
             });
         }
 
-        // The owner authorizes via their passphrase-derived identity (anti-substitution); the fresh DEK is
-        // wrapped to the RRK PUBLIC, so no RRK secret is needed to reseal.
-        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let root = derive_root(owner_passphrase.expose(), &validated_kdf(kdf)?)?;
-        if root.identity.verifying_key().to_bytes().as_slice()
-            != founder.author_public_key.as_slice()
+        // The owner authorizes via their durable ACCOUNT identity (anti-substitution + self-cert, OPE-543
+        // owner-as-member); the fresh DEK is wrapped to every member's HPKE public (owner included), so no
+        // secret beyond the owner's identity is needed to reseal.
+        let root = &account.root;
+        let derived = root.identity.verifying_key().to_bytes();
+        if derived.as_slice() != founder.author_public_key.as_slice()
+            || derive_member_id(&derived) != owner_id
         {
             return Err(CryptoError::Signature.into());
         }
 
         // Mint a covering epoch; the OWNER both authors and signs it (author == owner).
-        let owner_id = founder.member_id.as_str();
-        let sealing =
-            covering_reseal_sealing(tree_id, owner_id, &escrow, &resolved.members, &epochs)?;
-        let new_anchor = dag_client::append_reseal(anchor, owner_id, sealing, &root.identity)
+        let sealing = covering_reseal_sealing(tree_id, &resolved.members, &epochs)?;
+        let new_anchor = dag_client::append_reseal(anchor, &owner_id, sealing, &root.identity)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Resealed {
@@ -1452,7 +1286,7 @@ impl DagVault {
     pub fn compact(
         &self,
         anchor: &[u8],
-        owner_passphrase: &Passphrase,
+        account: &UnlockedAccount,
         frontier: &[[u8; 32]],
         prev_snapshot: Option<[u8; 32]>,
     ) -> Result<Vec<u8>, VaultError> {
@@ -1462,18 +1296,16 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
-
-        // Owner authorizes via their passphrase-derived identity (anti-substitution) — the checkpoint is
-        // Owner-signed.
-        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let root = derive_root(owner_passphrase.expose(), &validated_kdf(kdf)?)?;
-        if root.identity.verifying_key().to_bytes().as_slice()
-            != founder.author_public_key.as_slice()
+        let owner_id = founder.member_id.clone();
+        // Owner authorizes via their durable ACCOUNT identity (anti-substitution + self-cert, OPE-543
+        // owner-as-member) — the checkpoint is Owner-signed.
+        let root = &account.root;
+        let derived = root.identity.verifying_key().to_bytes();
+        if derived.as_slice() != founder.author_public_key.as_slice()
+            || derive_member_id(&derived) != owner_id
         {
             return Err(CryptoError::Signature.into());
         }
-        let owner_id = founder.member_id.clone();
 
         dag_client::compact_to_checkpoint(
             anchor,
@@ -1512,12 +1344,10 @@ impl DagVault {
 
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        let owner_id = resolved
+        resolved
             .members
             .owner()
-            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?
-            .member_id
-            .clone();
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
         let me = resolved
             .members
             .members
@@ -1526,7 +1356,6 @@ impl DagVault {
             .ok_or_else(|| VaultError::BadKeyring("not a member of this tree".into()))?;
         let FoldedSealing {
             epochs,
-            escrow,
             needs_reseal,
             ..
         } = fold_resolved(&resolved)?;
@@ -1542,16 +1371,16 @@ impl DagVault {
         }
 
         // The member authorizes via their passphrase + account kdf-derived identity (anti-substitution vs
-        // their resolved key). No RRK secret is needed — the fresh DEK is wrapped to the RRK PUBLIC.
+        // their resolved key). The fresh DEK is wrapped to every member's HPKE public (owner included), so no
+        // secret beyond the member's identity is needed (OPE-543 owner-as-member).
         validate_kdf(member_kdf)?;
         let root = derive_root(passphrase.expose(), member_kdf)?;
         if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
 
-        // The member authors + signs the op; the RRK wrap stays keyed to the owner (its holder).
-        let sealing =
-            covering_reseal_sealing(tree_id, &owner_id, &escrow, &resolved.members, &epochs)?;
+        // The member authors + signs the op.
+        let sealing = covering_reseal_sealing(tree_id, &resolved.members, &epochs)?;
         let new_anchor = dag_client::append_reseal(anchor, member_id, sealing, &root.identity)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
@@ -1589,12 +1418,10 @@ impl DagVault {
 
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        let owner_id = resolved
+        resolved
             .members
             .owner()
-            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?
-            .member_id
-            .clone();
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
         let me = resolved
             .members
             .members
@@ -1603,7 +1430,7 @@ impl DagVault {
             .ok_or_else(|| VaultError::BadKeyring("not a member of this tree".into()))?;
         let FoldedSealing {
             epochs,
-            escrow,
+            needs_backfill,
             needs_rrk_backfill,
             ..
         } = fold_resolved(&resolved)?;
@@ -1615,8 +1442,10 @@ impl DagVault {
                 backfilled: false,
             })
         };
-        // Idempotent: no epoch is orphaned from the current recovery root → nothing to do.
-        if !needs_rrk_backfill {
+        // Idempotent: no epoch is missing any resolved member (owner OR non-owner) → nothing to do. This
+        // member-authored heal is the ONLY one that can repair the owner's OWN gap (`needs_rrk_backfill`),
+        // the A3 lockout an owner-authored `backfill` cannot fix.
+        if !needs_backfill && !needs_rrk_backfill {
             return unchanged();
         }
 
@@ -1628,10 +1457,11 @@ impl DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        // Open every epoch this member can reach; for each whose RRK wrap does NOT bind the current escrow
-        // key, add a fresh RRK wrap of its DEK to the current escrow. `member_epoch_deks` verifies each DEK
-        // against the epoch commitment (F3), so a member can only ever backfill a wrap of the epoch's REAL
-        // DEK — a corrupt member wrap would fail to open and be skipped, never re-wrapped.
+        // Open every epoch this member can reach; for each, add a `MemberHpke` wrap for ANY resolved member
+        // (the OWNER INCLUDED — OPE-543 A3) not already covered by a wrap to their CURRENT key.
+        // `member_epoch_deks` verifies each DEK against the epoch commitment (F3), so a member can only ever
+        // backfill a wrap of the epoch's REAL DEK — a corrupt wrap fails to open and is skipped, never
+        // re-wrapped. The fold-side per-(epoch, author, recipient) cap bounds a flood.
         let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret);
         let mut added_wraps: Vec<AddedWrap> = Vec::new();
         for (key_id, _ordinal, dek) in &deks {
@@ -1639,25 +1469,31 @@ impl DagVault {
                 .iter()
                 .find(|e| e.key_id.as_bytes() == key_id.as_slice())
                 .map_or(&[][..], |e| e.wraps.as_slice());
-            // Already covered = an RrkHpke wrap addressed to the owner AND bound to the CURRENT escrow key.
-            let covered = epoch_wraps.iter().any(|w| {
-                w.recipient == owner_id
-                    && matches!(&w.method,
-                        KeyeoWrapMethod::RrkHpke { recipient_key, .. }
-                            if recipient_key.as_ref() == escrow.public_key.as_slice())
-            });
-            if covered {
-                continue;
+            for m in &resolved.members.members {
+                if m.hpke_public_key.is_empty() {
+                    continue;
+                }
+                // Covered = a MemberHpke wrap addressed to this member AND bound to their CURRENT key.
+                let covered = epoch_wraps.iter().any(|w| {
+                    w.recipient == m.member_id
+                        && matches!(&w.method,
+                            KeyeoWrapMethod::MemberHpke { recipient_key, .. }
+                                if recipient_key.as_ref() == m.hpke_public_key.as_slice())
+                });
+                if covered {
+                    continue;
+                }
+                let wrap =
+                    member_wrap_keyeo(&m.hpke_public_key, dek, tree_id, &m.member_id, key_id)?;
+                added_wraps.push(AddedWrap {
+                    key_id: key_id.clone(),
+                    wrap,
+                });
             }
-            let wrap = rrk_wrap_keyeo(&escrow.public_key, dek, tree_id, &owner_id, key_id)?;
-            added_wraps.push(AddedWrap {
-                key_id: key_id.clone(),
-                wrap,
-            });
         }
 
-        // Every orphan was un-openable by this member (skipped) → nothing we can repair here; another member
-        // with a wrap heals it. No-op rather than an empty op.
+        // Every gap was in an epoch this member can't open (skipped) → nothing we can repair here; another
+        // member with a wrap heals it. No-op rather than an empty op.
         if added_wraps.is_empty() {
             return unchanged();
         }
@@ -1692,11 +1528,10 @@ impl DagVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        owner_passphrase: &Passphrase,
+        account: &UnlockedAccount,
         floor: &[u8],
     ) -> Result<Backfilled, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
-        let owner_id = ctx.member_id.as_str();
 
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
@@ -1706,14 +1541,14 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let owner_id = founder.member_id.clone();
         let FoldedSealing {
             epochs,
-            escrow,
             needs_backfill,
             ..
         } = fold_resolved(&resolved)?;
 
-        // Idempotent: every retained epoch already wraps every resolved member → nothing to do.
+        // Idempotent: every retained epoch already wraps every resolved non-owner member → nothing to do.
         let unchanged = || -> Result<Backfilled, VaultError> {
             Ok(Backfilled {
                 watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
@@ -1725,29 +1560,24 @@ impl DagVault {
             return unchanged();
         }
 
-        // The owner authorizes via their passphrase-derived identity (anti-substitution vs the resolved
-        // Owner key) and unwraps the RRK secret — the same open-all-DEKs path as `add_member`.
-        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
-        let root = derive_root(owner_passphrase.expose(), &validated_kdf(kdf)?)?;
-        if root.identity.verifying_key().to_bytes().as_slice()
-            != founder.author_public_key.as_slice()
+        // The owner authorizes via their durable ACCOUNT identity (anti-substitution + self-cert) and opens
+        // every epoch via their OWN member wrap (OPE-543 owner-as-member) — the same open-all-DEKs path as
+        // `add_member`.
+        let root = &account.root;
+        let derived = root.identity.verifying_key().to_bytes();
+        if derived.as_slice() != founder.author_public_key.as_slice()
+            || derive_member_id(&derived) != owner_id
         {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = open_rrk_secret(
-            &root.kek,
-            rrk_nonce,
-            rrk_ct,
-            tree_id,
-            owner_id,
-            KekKind::Passphrase,
-        )?;
 
-        // Open every epoch the RRK can reach; for each, add a wrap for any resolved non-owner member not
+        // Open every epoch the owner can reach; for each, add a wrap for any resolved NON-OWNER member not
         // already covered by a wrap addressed to their CURRENT key (OPE-290: key-bound, so a member left on a
-        // STALE key after a rekey race is re-wrapped too). (`epoch_deks` skips an un-openable epoch rather
-        // than failing, so a corrupt epoch can't brick this.) Empty-key members are skipped — nothing to wrap.
-        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret);
+        // STALE key after a rekey race is re-wrapped too). (`member_epoch_deks` skips an un-openable epoch
+        // rather than failing, so a corrupt epoch can't brick this.) The owner cannot heal its OWN gap here
+        // (it can't open an epoch it lacks a wrap for) — that is `backfill_rrk`'s job (A3). Empty-key members
+        // are skipped — nothing to wrap.
+        let deks = member_epoch_deks(&epochs, tree_id, &owner_id, &root.hpke_secret);
         let mut added_wraps: Vec<AddedWrap> = Vec::new();
         for (key_id, _epoch, dek) in &deks {
             let epoch_wraps = epochs
@@ -1755,7 +1585,7 @@ impl DagVault {
                 .find(|e| e.key_id.as_bytes() == key_id.as_slice())
                 .map_or(&[][..], |e| e.wraps.as_slice());
             for m in &resolved.members.members {
-                if m.is_owner() || m.hpke_public_key.is_empty() {
+                if m.member_id == owner_id || m.hpke_public_key.is_empty() {
                     continue;
                 }
                 // Covered = a MemberHpke wrap addressed to this member AND bound to their CURRENT key.
@@ -1777,7 +1607,7 @@ impl DagVault {
             }
         }
 
-        // Every missing epoch was un-openable (skipped by `epoch_deks`) → nothing we can repair; no-op.
+        // Every missing epoch was un-openable (skipped by `member_epoch_deks`) → nothing we can repair; no-op.
         if added_wraps.is_empty() {
             return unchanged();
         }
@@ -1788,7 +1618,7 @@ impl DagVault {
             escrow: None,
         }
         .to_bytes();
-        let new_anchor = dag_client::append_backfill(anchor, owner_id, sealing, &root.identity)
+        let new_anchor = dag_client::append_backfill(anchor, &owner_id, sealing, &root.identity)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Backfilled {
@@ -1802,6 +1632,27 @@ impl DagVault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // OPE-543 2b: these RRK/escrow-era helpers are no longer used by any dag flow (the credential flows are
+    // account-keystore-mediated), but the fold/opener fixtures + membership scenarios still exercise them.
+    use crate::vault_core::{epoch_deks, open_epoch_dek, rrk_wrap_keyeo};
+    use openom_crypto::{
+        default_kdf_params, generate_hpke_keypair, HpkeKeypair, RootKeys, RrkSecret,
+    };
+
+    /// A member's derived identity + their account KDF params — the test-only bundle the membership scenarios
+    /// admit (replacing the retired `vault_core::new_owner_secrets` owner-credential helper; the dag now takes
+    /// the owner from a durable account keystore, so this mints only an ORDINARY member's passphrase identity).
+    struct MemberSecrets {
+        root: RootKeys,
+        pass_kdf: KeyeoKdfParams,
+    }
+    fn member_secrets(pass: &Passphrase) -> MemberSecrets {
+        let pass_kdf = default_kdf_params(generate_salt().unwrap().to_vec());
+        let root = derive_root(pass.expose(), &pass_kdf).unwrap();
+        MemberSecrets { root, pass_kdf }
+    }
+
+    use crate::AccountKeystore;
     use openom_keyring_api::MemberView;
     use openom_keyring_dag::KeyringRole;
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
@@ -1809,6 +1660,31 @@ mod tests {
 
     const TREE: &[u8] = b"tree-uuid-16byte";
     const MEMBER: &str = "acct-1";
+
+    /// A test owner's durable ACCOUNT keystore (OPE-542) — created once per scenario. The app holds the blob
+    /// and re-derives a fresh [`UnlockedAccount`] per owner-authored op ([`acct`]); the derived identity is
+    /// stable, so provision + every later unlock/mutation resolve the SAME owner.
+    fn owner_ks(pass: &Passphrase) -> AccountKeystore {
+        AccountKeystore::create(pass.expose()).unwrap().0
+    }
+    /// A fresh [`UnlockedAccount`] for an owner-authored op, from the owner's keystore + passphrase.
+    fn acct(ks: &AccountKeystore, pass: &Passphrase) -> UnlockedAccount {
+        ks.unlock(pass.expose()).unwrap()
+    }
+    /// Provision a dag tree owned by a freshly-minted account keystore; returns the keystore (for later owner
+    /// ops) and the provisioned result.
+    fn provision_owned(
+        tree: &TreeId,
+        member: &MemberId,
+        replica: &ReplicaId,
+        pass: &Passphrase,
+    ) -> (AccountKeystore, Provisioned) {
+        let ks = owner_ks(pass);
+        let p = DagVault
+            .provision(&ctx(tree, member, replica), pass, Some(acct(&ks, pass)))
+            .unwrap();
+        (ks, p)
+    }
 
     fn ctx<'a>(tree: &'a TreeId, member: &'a MemberId, replica: &'a ReplicaId) -> VaultContext<'a> {
         VaultContext {
@@ -1818,30 +1694,39 @@ mod tests {
         }
     }
 
-    /// Admit `member_id` as an EDITOR onto `anchor`, returning the new anchor — the verbose
-    /// `add_member` + `Joiner::from_bytes` preamble shared by the membership scenarios.
+    /// The self-certifying member id of an account's identity key (OPE-543): every admitted member's id must
+    /// be `derive_member_id(author_pubkey)` or the engine refuses the Add.
+    fn member_id_of(secrets: &MemberSecrets) -> String {
+        derive_member_id(&secrets.root.identity.verifying_key().to_bytes())
+    }
+
+    /// Admit `secrets` as an EDITOR onto `anchor`, returning `(new anchor, the joiner's self-cert member id)`
+    /// — the verbose `add_member` + `Joiner::from_bytes` preamble shared by the membership scenarios. The
+    /// owner ctx member id is irrelevant (the owner authors under their resolved, self-certifying id).
     fn admit_editor(
         tree: &TreeId,
-        owner: &MemberId,
+        owner_ks: &AccountKeystore,
         owner_pass: &Passphrase,
         anchor: &[u8],
-        member_id: &str,
-        secrets: &crate::vault_core::OwnerSecrets,
-    ) -> Vec<u8> {
-        DagVault
+        secrets: &MemberSecrets,
+    ) -> (Vec<u8>, String) {
+        let mid = member_id_of(secrets);
+        let owner = MemberId::new(MEMBER);
+        let anchor = DagVault
             .add_member(
-                &ctx(tree, owner, &ReplicaId::new(b"r1")),
+                &ctx(tree, &owner, &ReplicaId::new(b"r1")),
                 anchor,
-                owner_pass,
+                &acct(owner_ks, owner_pass),
                 &crate::vault::Joiner::from_bytes(
-                    &MemberId::new(member_id),
+                    &MemberId::new(&mid),
                     KeyringRole::EDITOR,
                     &secrets.root.identity.verifying_key().to_bytes(),
                     &secrets.root.hpke_public,
                 )
                 .unwrap(),
             )
-            .unwrap()
+            .unwrap();
+        (anchor, mid)
     }
 
     /// The DAG vault provisions a tree's recovery-verification key via `openom_crypto::derive_rvk` (the
@@ -1914,6 +1799,11 @@ mod tests {
     fn member_wrap(member: &str) -> keyeo_crypto::Wrap<String> {
         member_wrap_keyed(member, &hpke_key(member))
     }
+    /// The OWNER's per-epoch member wrap (OPE-543 owner-as-member: the owner is an ordinary `MemberHpke`
+    /// recipient, not a recovery-root wrap). Its recipient id is `"owner"`, matching the `membership` fixture.
+    fn owner_wrap() -> keyeo_crypto::Wrap<String> {
+        member_wrap("owner")
+    }
     /// An HPKE wrap for `member` addressed to an explicit `recipient` key — pass a non-current key to model a
     /// STALE-key wrap left after a rekey race (OPE-290).
     fn member_wrap_keyed(member: &str, recipient: &[u8]) -> keyeo_crypto::Wrap<String> {
@@ -1926,26 +1816,10 @@ mod tests {
             ciphertext: placeholder_ct(),
         }
     }
-    /// The recovery escrow's X25519 public key — the recipient the epoch's `RrkHpke` wrap targets. Kept in
-    /// sync with `rrk_wrap` (and `escrow`) so coverage's RRK key-binding (OPE-298) resolves against a real
-    /// key rather than falling back to presence-only.
+    /// A residual pre-543 recovery-escrow public key — retained only so the `escrow()` fixture (fed to the
+    /// not-yet-rewired credential-flow fold paths) resolves against a real X25519 key.
     fn escrow_key() -> Vec<u8> {
         x25519(&hpke_key("owner")).to_bytes().to_vec()
-    }
-    fn rrk_wrap() -> keyeo_crypto::Wrap<String> {
-        rrk_wrap_keyed(&hpke_key("owner"))
-    }
-    /// An `RrkHpke` wrap addressed to an explicit escrow key — pass a non-current key to model a STALE RRK
-    /// wrap left after a recovery-authority rotation (OPE-298).
-    fn rrk_wrap_keyed(recipient: &[u8]) -> keyeo_crypto::Wrap<String> {
-        keyeo_crypto::Wrap {
-            recipient: "owner".to_string(),
-            method: KeyeoWrapMethod::RrkHpke {
-                encapped: placeholder_encapped(),
-                recipient_key: x25519(recipient),
-            },
-            ciphertext: placeholder_ct(),
-        }
     }
     fn sealing_entry(
         op_id: u8,
@@ -1983,26 +1857,27 @@ mod tests {
     }
 
     /// Test lens over the production coverage: does this epoch cover the resolved membership exactly (the
-    /// winner/`needs_reseal` predicate)? Mirrors `finalize_sealing`'s use of `covers_exact`.
+    /// winner/`needs_reseal` predicate)? Mirrors `finalize_sealing`'s owner-inclusive coverage.
     fn epoch_covers(ep: &keyeo_crypto::Epoch<String>, members: &MembershipView) -> bool {
-        let (required, rrk) = coverage_descriptors(members, &escrow_key());
-        covers_exact(ep, &required, &rrk)
+        owner_inclusive_covers_exact(ep, &member_descriptors(members))
     }
-    /// Test lens over the `needs_backfill` check: does any epoch lock a resolved MEMBER out (owner/RRK
-    /// excluded, exactly as `finalize_sealing` filters the rrk id from `missing`)?
+    /// Test lens over the `needs_backfill` check: does any epoch lock a resolved NON-OWNER member out (the
+    /// owner-heals gap, exactly as `finalize_sealing` computes `needs_backfill`)?
     fn any_epoch_missing_a_member(
         epochs: &[keyeo_crypto::Epoch<String>],
         members: &MembershipView,
     ) -> bool {
-        let (required, rrk) = coverage_descriptors(members, &escrow_key());
-        epochs
-            .iter()
-            .any(|ep| missing(ep, &required, &rrk).iter().any(|id| *id != rrk.id))
+        let required = member_descriptors(members);
+        let owner_id = members.owner().map(|o| o.member_id.clone());
+        epochs.iter().any(|ep| {
+            owner_inclusive_missing(ep, &required)
+                .iter()
+                .any(|id| Some(id) != owner_id.as_ref())
+        })
     }
 
     fn assert_folded_eq(a: &FoldedSealing, b: &FoldedSealing) {
         assert_eq!(a.epochs, b.epochs, "epochs differ");
-        assert_eq!(a.escrow, b.escrow, "escrow differs");
         assert_eq!(a.write_key_id, b.write_key_id, "write_key_id differs");
         assert_eq!(a.needs_reseal, b.needs_reseal, "needs_reseal differs");
         assert_eq!(a.needs_backfill, b.needs_backfill, "needs_backfill differs");
@@ -2062,7 +1937,9 @@ mod tests {
     fn compact_to_checkpoint_round_trips_through_resolve() {
         let sk = edsign::SigningKey::from_seed(&[9u8; 32]);
         let pk = sk.verifying_key();
-        let seal = |key: &[u8], ord: u64, esc: Option<RecoveryEscrow>| {
+        // OPE-543: the founder id must self-certify the author key (the engine's admission check).
+        let owner = derive_member_id(&pk.to_bytes());
+        let seal = |key: &[u8], ord: u64| {
             SealingPayload {
                 new_epochs: vec![keyeo_crypto::Epoch {
                     key_id: KeyeoKeyId::new(key.to_vec()),
@@ -2071,22 +1948,22 @@ mod tests {
                     wraps: vec![],
                 }],
                 added_wraps: vec![],
-                escrow: esc,
+                escrow: None,
             }
             .to_bytes()
         };
-        // Provision (genesis epoch-0 + escrow), then two reseals (epoch 1, then 2).
+        // Provision (genesis epoch-0), then two reseals (epoch 1, then 2).
         let a1 = dag_client::provision_anchor(
             b"tree",
-            "owner",
+            &owner,
             pk,
             X25519PublicKey::from_bytes([0xaa; 32]),
-            [1u8; 32],
-            seal(b"k0", 0, Some(escrow())),
+            None,
+            seal(b"k0", 0),
             &sk,
         );
-        let a2 = dag_client::append_reseal(&a1, "owner", seal(b"k1", 1, None), &sk).unwrap();
-        let a3 = dag_client::append_reseal(&a2, "owner", seal(b"k2", 2, None), &sk).unwrap();
+        let a2 = dag_client::append_reseal(&a1, &owner, seal(b"k1", 1), &sk).unwrap();
+        let a3 = dag_client::append_reseal(&a2, &owner, seal(b"k2", 2), &sk).unwrap();
 
         // Cut at reseal1 (a2's single frontier tip): genesis + reseal1 are pruned into the checkpoint; reseal2
         // is retained above the cut.
@@ -2094,7 +1971,7 @@ mod tests {
         let cut: [u8; 32] = wm[..32].try_into().unwrap();
 
         let cp_anchor =
-            dag_client::compact_to_checkpoint(&a3, &[cut], None, "owner".into(), &sk, |pre| {
+            dag_client::compact_to_checkpoint(&a3, &[cut], None, owner.clone(), &sk, |pre| {
                 author_checkpoint_sealing(pre).map_err(|e| format!("{e:?}"))
             })
             .unwrap();
@@ -2159,7 +2036,7 @@ mod tests {
             b"k0",
             0,
             Genesis,
-            vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")],
+            vec![owner_wrap(), member_wrap("bob"), member_wrap("carol")],
             Some(escrow()),
         )];
         assert!(
@@ -2173,7 +2050,7 @@ mod tests {
             b"k0",
             0,
             Genesis,
-            vec![rrk_wrap(), member_wrap("bob")],
+            vec![owner_wrap(), member_wrap("bob")],
             Some(escrow()),
         )];
         assert!(
@@ -2188,7 +2065,7 @@ mod tests {
                 b"k0",
                 0,
                 Genesis,
-                vec![rrk_wrap(), member_wrap("bob")],
+                vec![owner_wrap(), member_wrap("bob")],
                 Some(escrow()),
             ),
             sealing_entry(9, b"evil", 999, Other, vec![member_wrap("attacker")], None),
@@ -2205,40 +2082,37 @@ mod tests {
         );
     }
 
-    /// Coverage key-binds the RRK wrap to the CURRENT recovery escrow key (OPE-298). An epoch whose `RrkHpke`
-    /// wrap still targets a rotated-away escrow key does NOT cover — presence of an owner-addressed RRK wrap
-    /// is not enough, the key must be current — so a stale-authority epoch is forced to reseal even though its
-    /// member wraps are fine. The control (binding to the stale key itself) shows it is the key-binding, not
-    /// some unrelated gap, that fails coverage.
+    /// Coverage key-binds the OWNER's member wrap to their CURRENT key (OPE-543 owner-as-member + OPE-290): an
+    /// epoch whose only owner wrap is on a stale key does NOT cover — the owner is treated exactly like any
+    /// other member. (Replaces the pre-543 RRK-recipient-key-binding test; there is no recovery-root wrap.)
     #[test]
-    fn coverage_binds_the_rrk_recipient_key() {
+    fn coverage_binds_the_owner_recipient_key() {
         let members = membership("owner", &["bob"]);
-        let stale = hpke_key("rotated-away-escrow"); // a since-rotated recovery-authority key
 
-        // An epoch covering {bob@current, RRK@stale}: member wraps are current, only the RRK wrap is stale.
+        // The owner's wrap is on a STALE key; bob's is current → the owner is missing → no cover.
         let ep = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"k0".to_vec()),
             ordinal: 0,
             dek_commitment: [0u8; 32],
-            wraps: vec![rrk_wrap_keyed(&stale), member_wrap("bob")],
+            wraps: vec![member_wrap_keyed("owner", b"old-owner-key"), member_wrap("bob")],
         };
-
-        // Bound to the CURRENT escrow key → the stale RRK wrap fails coverage → the epoch must reseal.
-        let (required, rrk) = coverage_descriptors(&members, &escrow_key());
+        let required = member_descriptors(&members);
         assert!(
-            !covers_exact(&ep, &required, &rrk),
-            "a stale-key RRK wrap must not count as coverage"
+            !owner_inclusive_covers_exact(&ep, &required),
+            "a stale-key owner wrap must not count as coverage"
         );
-        // …and keyeo reports the RRK id (owner) as the sole missing recipient (the members are covered).
-        assert_eq!(missing(&ep, &required, &rrk), vec!["owner".to_string()]);
+        assert_eq!(
+            owner_inclusive_missing(&ep, &required),
+            vec!["owner".to_string()],
+            "the owner is the sole missing recipient (bob is covered)"
+        );
 
-        // Control: bound to the STALE key, the same epoch covers — proving the key-binding is the pivot.
-        let stale_key = x25519(&stale).to_bytes();
-        let (required_s, rrk_s) = coverage_descriptors(&members, &stale_key);
-        assert!(
-            covers_exact(&ep, &required_s, &rrk_s),
-            "against the matching (stale) key it covers"
-        );
+        // With the owner's CURRENT-key wrap present, the epoch covers.
+        let ok = keyeo_crypto::Epoch {
+            wraps: vec![owner_wrap(), member_wrap("bob")],
+            ..ep.clone()
+        };
+        assert!(owner_inclusive_covers_exact(&ok, &required));
     }
 
     /// Ordinal-inflation `DoS` defense (OPE-289): an ELIGIBLE (Remove-origin) epoch grinding an implausible
@@ -2259,7 +2133,7 @@ mod tests {
                 b"k0",
                 0,
                 Genesis,
-                vec![rrk_wrap(), member_wrap("bob")],
+                vec![owner_wrap(), member_wrap("bob")],
                 Some(escrow()),
             ),
             sealing_entry(
@@ -2267,7 +2141,7 @@ mod tests {
                 b"evil",
                 u64::MAX,
                 Remove,
-                vec![rrk_wrap(), member_wrap("bob")],
+                vec![owner_wrap(), member_wrap("bob")],
                 None,
             ),
         ];
@@ -2289,7 +2163,7 @@ mod tests {
                 b"k0",
                 0,
                 Genesis,
-                vec![rrk_wrap(), member_wrap("bob")],
+                vec![owner_wrap(), member_wrap("bob")],
                 Some(escrow()),
             ),
             sealing_entry(
@@ -2297,7 +2171,7 @@ mod tests {
                 b"k1",
                 1,
                 Remove,
-                vec![rrk_wrap(), member_wrap("bob")],
+                vec![owner_wrap(), member_wrap("bob")],
                 None,
             ),
         ];
@@ -2325,7 +2199,7 @@ mod tests {
                 b"k0",
                 0,
                 Genesis,
-                vec![rrk_wrap(), member_wrap("bob")],
+                vec![owner_wrap(), member_wrap("bob")],
                 Some(escrow()),
             ),
             sealing_entry(
@@ -2333,7 +2207,7 @@ mod tests {
                 b"k1",
                 1,
                 Remove,
-                vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")],
+                vec![owner_wrap(), member_wrap("bob"), member_wrap("carol")],
                 None,
             ),
         ];
@@ -2354,7 +2228,7 @@ mod tests {
                 b"k0",
                 0,
                 Genesis,
-                vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")],
+                vec![owner_wrap(), member_wrap("bob"), member_wrap("carol")],
                 Some(escrow()),
             ),
             sealing_entry(
@@ -2362,7 +2236,7 @@ mod tests {
                 b"k1",
                 1,
                 Remove,
-                vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")],
+                vec![owner_wrap(), member_wrap("bob"), member_wrap("carol")],
                 None,
             ),
         ];
@@ -2379,7 +2253,7 @@ mod tests {
                 0,
                 Genesis,
                 vec![
-                    rrk_wrap(),
+                    owner_wrap(),
                     member_wrap("bob"),
                     member_wrap("carol"),
                     member_wrap("dave"),
@@ -2391,7 +2265,7 @@ mod tests {
                 b"k1",
                 1,
                 Remove,
-                vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")],
+                vec![owner_wrap(), member_wrap("bob"), member_wrap("carol")],
                 None,
             ),
         ];
@@ -2412,7 +2286,7 @@ mod tests {
             key_id: KeyeoKeyId::new(b"k".to_vec()),
             ordinal: 0,
             dek_commitment: [0u8; 32],
-            wraps: vec![rrk_wrap(), member_wrap("bob")],
+            wraps: vec![owner_wrap(), member_wrap("bob")],
         };
         assert!(
             epoch_covers(&ok, &members),
@@ -2423,7 +2297,7 @@ mod tests {
             key_id: KeyeoKeyId::new(b"k".to_vec()),
             ordinal: 0,
             dek_commitment: [0u8; 32],
-            wraps: vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key")],
+            wraps: vec![owner_wrap(), member_wrap_keyed("bob", b"old-key")],
         };
         assert!(
             !epoch_covers(&stale, &members),
@@ -2435,7 +2309,7 @@ mod tests {
             ordinal: 0,
             dek_commitment: [0u8; 32],
             wraps: vec![
-                rrk_wrap(),
+                owner_wrap(),
                 member_wrap_keyed("bob", b"old-key"),
                 member_wrap("bob"),
             ],
@@ -2451,7 +2325,7 @@ mod tests {
             b"k0",
             0,
             dag_client::SealingOrigin::Genesis,
-            vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key")],
+            vec![owner_wrap(), member_wrap_keyed("bob", b"old-key")],
             Some(escrow()),
         )];
         assert!(
@@ -2486,7 +2360,7 @@ mod tests {
             key_id: KeyeoKeyId::new(b"k".to_vec()),
             ordinal: 0,
             dek_commitment: [0u8; 32],
-            wraps: vec![rrk_wrap()],
+            wraps: vec![owner_wrap()],
         };
         assert!(
             epoch_covers(&ep, &members),
@@ -2623,21 +2497,20 @@ mod tests {
         let member = MemberId::new(MEMBER);
         let pass = Passphrase::new(b"correct horse");
 
-        let p = DagVault
-            .provision(&ctx(&tree, &member, &ReplicaId::new(b"replica-A")), &pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &member, &ReplicaId::new(b"replica-A"), &pass);
         let sealed = p
             .sealer
             .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"the family tree")
             .unwrap()
             .envelope;
 
-        // Device B: unlock from the anchor bytes alone, a fresh replica.
+        // Device B: unlock from the anchor bytes alone, a fresh replica, with the same durable account.
         let u = DagVault
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"replica-B")),
                 &p.anchor,
                 &pass,
+                Some(acct(&ks, &pass)),
             )
             .unwrap();
         assert_eq!(
@@ -2651,9 +2524,11 @@ mod tests {
         );
     }
 
-    /// Recover under a new passphrase, then unlock the recovered anchor with it and open pre-recovery
-    /// data — exercises the `ReFound` op + the multi-op sealing fold (genesis escrow then the `ReFound`'s
-    /// re-escrow, latest wins) + the anti-substitution check against the retargeted Owner.
+    /// OPE-543 2b — account-keystore-mediated recovery (durable identity). The account recovery code restores
+    /// the SAME durable identity, re-wraps the account blob under a new passphrase, and the tree unlocks
+    /// NORMALLY with that identity: the tree anchor is UNCHANGED, `did_key` is PRESERVED (no fresh identity, no
+    /// `ReFound`), the recovered sealer opens pre-recovery data, and the re-wrapped keystore opens under the new
+    /// passphrase but NOT the old one. This is the property that makes recovery safe with no on-tree takeover.
     #[test]
     fn dag_recover_then_unlock_with_the_new_passphrase_opens_the_same_data() {
         let tree = TreeId::new(TREE);
@@ -2661,8 +2536,14 @@ mod tests {
         let old_pass = Passphrase::new(b"correct horse");
         let new_pass = Passphrase::new(b"a whole new passphrase");
 
+        // The app creates the durable account (keeping its recovery code), then provisions the tree from it.
+        let (ks, account_code, _u) = AccountKeystore::create(old_pass.expose()).unwrap();
         let p = DagVault
-            .provision(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &old_pass)
+            .provision(
+                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+                &old_pass,
+                Some(ks.unlock(old_pass.expose()).unwrap()),
+            )
             .unwrap();
         let sealed = p
             .sealer
@@ -2670,292 +2551,188 @@ mod tests {
             .unwrap()
             .envelope;
 
+        // Recover: the account recovery code restores the SAME identity; the account is re-wrapped under the new
+        // passphrase (the returned keystore blob) and the tree opens with the restored identity.
         let r = DagVault
             .recover(
                 &ctx(&tree, &member, &ReplicaId::new(b"r2")),
                 &p.anchor,
-                &p.recovery_code,
+                &ks.to_bytes().unwrap(),
+                &account_code,
                 &new_pass,
-                &[],
+                &p.watermark,
             )
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             r.did_key, p.did_key,
-            "recovery mints a fresh owner identity"
+            "recovery restores the SAME durable identity (no fresh owner, no ReFound)"
         );
+        assert_eq!(r.anchor, p.anchor, "the tree anchor is unchanged by recovery");
+        assert!(!r.keystore.is_empty(), "recovery returns the re-wrapped account keystore blob");
         assert_eq!(
             r.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"heirloom",
             "the recovered sealer opens pre-recovery data (the DEK is unchanged)"
         );
 
-        // Unlock the recovered anchor with the NEW passphrase on a fresh device.
+        // Unlock the (unchanged) anchor on a fresh device using the re-wrapped account under the NEW passphrase.
+        let new_ks = AccountKeystore::from_bytes(&r.keystore).unwrap();
         let u = DagVault
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r3")),
-                &r.anchor,
+                &p.anchor,
                 &new_pass,
+                Some(new_ks.unlock(new_pass.expose()).unwrap()),
             )
             .unwrap();
         assert_eq!(
-            u.did_key, r.did_key,
-            "unlock resolves the recovered owner identity"
+            u.did_key, p.did_key,
+            "unlock resolves the same durable owner identity"
         );
         assert_eq!(
             u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"heirloom"
         );
 
-        // The OLD passphrase no longer opens the recovered anchor (the owner key was retargeted).
+        // The OLD passphrase no longer opens the re-wrapped account (the passphrase was rotated by recovery).
         assert!(
-            DagVault
-                .unlock(
-                    &ctx(&tree, &member, &ReplicaId::new(b"r4")),
-                    &r.anchor,
-                    &old_pass
-                )
-                .is_err(),
-            "the pre-recovery passphrase is retired"
+            new_ks.unlock(old_pass.expose()).is_err(),
+            "the pre-recovery passphrase no longer opens the re-wrapped account"
         );
     }
 
-    /// Rotate the recovery authority (OPE-381): the OLD recovery code can no longer recover (takeover
-    /// protection), a fresh code does, the founder's passphrase is UNCHANGED, and the owner still reaches
-    /// EVERY epoch afterward — the rotation appends a new RRK wrap to each of the two epochs (genesis + a
-    /// forced reseal), so both open under the new recovery root.
+    /// OPE-543 A3 end-to-end: a hostile co-owner mints a forward-secret (Remove-origin) epoch wrapping ONLY
+    /// themselves — OMITTING the owner. The owner is locked out of that write epoch and CANNOT self-heal (they
+    /// can't open an epoch they have no wrap for), so `backfill` (owner-authored) is powerless. Another member
+    /// who holds a wrap heals it with `backfill_rrk`, adding the owner's missing `MemberHpke` wrap and restoring
+    /// the owner's read.
     #[test]
-    fn dag_rotate_recovery_retires_the_old_code_keeps_owner_and_reaches_every_epoch() {
-        let tree = TreeId::new(TREE);
-        let member = MemberId::new(MEMBER);
-        let pass = Passphrase::new(b"correct horse");
-
-        // Provision + seal under epoch 0.
-        let p = DagVault
-            .provision(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &pass)
-            .unwrap();
-        let data0 = p
-            .sealer
-            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"epoch-0 heirloom")
-            .unwrap()
-            .envelope;
-
-        // Force a reseal so there are TWO epochs to re-wrap; seal fresh data under the new write epoch.
-        let re = DagVault
-            .reseal(
-                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
-                &p.anchor,
-                &pass,
-                &[],
-                ResealTrigger::Force,
-            )
-            .unwrap();
-        assert!(re.resealed, "the forced reseal minted a second epoch");
-        let u1 = DagVault
-            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &re.anchor, &pass)
-            .unwrap();
-        let data1 = u1
-            .sealer
-            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"epoch-1 sequel")
-            .unwrap()
-            .envelope;
-
-        // Rotate the recovery authority. The passphrase is UNCHANGED (the founder is kept), only the recovery
-        // root moves; a fresh recovery code is minted.
-        let rot = DagVault
-            .rotate_recovery(
-                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
-                &re.anchor,
-                &pass,
-                &re.watermark,
-            )
-            .unwrap();
-
-        // The owner still unlocks with the SAME passphrase and reaches BOTH epochs — the new RRK wrap was
-        // appended to each, and coverage stays clean (no spurious reseal, write epoch locally reachable).
-        let u2 = DagVault
-            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r2")), &rot.anchor, &pass)
-            .unwrap();
-        assert!(
-            !u2.needs_reseal && !u2.write_epoch_unreachable,
-            "rotation leaves a clean, locally-reachable keyring"
-        );
-        assert_eq!(
-            u2.sealer.open_entry(EntryKind::Snapshot, &data0).unwrap(),
-            b"epoch-0 heirloom",
-            "the owner reaches epoch 0 via the appended new RRK wrap"
-        );
-        assert_eq!(
-            u2.sealer.open_entry(EntryKind::Snapshot, &data1).unwrap(),
-            b"epoch-1 sequel",
-            "and epoch 1 too"
-        );
-
-        // Recovery works with the NEW code (a fresh owner identity) and opens pre-rotation data.
-        let rec = DagVault
-            .recover(
-                &ctx(&tree, &member, &ReplicaId::new(b"r3")),
-                &rot.anchor,
-                &rot.recovery_code,
-                &Passphrase::new(b"post-rotation passphrase"),
-                &rot.watermark,
-            )
-            .unwrap();
-        assert_eq!(
-            rec.sealer.open_entry(EntryKind::Snapshot, &data0).unwrap(),
-            b"epoch-0 heirloom",
-            "the new recovery code re-establishes access and opens pre-rotation data"
-        );
-
-        // The OLD (retired) recovery code can no longer recover — the takeover-protection guarantee.
-        assert!(
-            DagVault
-                .recover(
-                    &ctx(&tree, &member, &ReplicaId::new(b"r4")),
-                    &rot.anchor,
-                    &p.recovery_code,
-                    &Passphrase::new(b"does not matter"),
-                    &rot.watermark,
-                )
-                .is_err(),
-            "the pre-rotation recovery code is retired — it can neither open the new escrow nor sign a ReFound"
-        );
-    }
-
-    /// OPE-381 / F3 end-to-end: a reseal authored CONCURRENTLY with a recovery rotation mints an epoch the
-    /// rotation never re-wraps, so its only RRK wrap targets the retired escrow — the owner (holding only the
-    /// new recovery secret) can't read it. A MEMBER who still holds a per-epoch wrap heals it with
-    /// `backfill_rrk`, adding an RRK wrap to the current escrow and restoring the owner's read. Built with a
-    /// real DAG fork (owner-rotation ∥ member-reseal) merged back together.
-    #[test]
-    fn dag_backfill_rrk_heals_a_rotation_orphaned_epoch_for_the_owner() {
+    fn dag_backfill_rrk_lets_a_member_heal_the_owners_locked_out_epoch() {
         let tree = TreeId::new(TREE);
         let owner = MemberId::new(MEMBER);
         let owner_pass = Passphrase::new(b"correct horse");
 
-        // Provision + admit bob (he gets a wrap on epoch 0). `base` is the frontier both branches fork from.
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
-            .unwrap();
-        let bob_pass = Passphrase::new(b"bobs own passphrase");
-        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
-        let bob_id = "acct-bob";
-        let base = admit_editor(&tree, &owner, &owner_pass, &p.anchor, bob_id, &bob);
-        let base_floor = dag_client::watermark(&base).unwrap();
+        let (ks, p) = provision_owned(&tree, &owner, &ReplicaId::new(b"r1"), &owner_pass);
 
-        // Branch A: the owner rotates the recovery authority (escrow A → B; epoch 0 re-wrapped to B).
-        let rot = DagVault
-            .rotate_recovery(
+        // bob is a CO-OWNER (authorized to author a Remove); carol is an editor bob will remove.
+        let bob_pass = Passphrase::new(b"bobs own passphrase");
+        let bob = member_secrets(&bob_pass);
+        let bob_id = member_id_of(&bob);
+        let a1 = DagVault
+            .add_member(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &base,
-                &owner_pass,
-                &base_floor,
+                &p.anchor,
+                &acct(&ks, &owner_pass),
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new(&bob_id),
+                    KeyringRole::CO_OWNER,
+                    &bob.root.identity.verifying_key().to_bytes(),
+                    &bob.root.hpke_public,
+                )
+                .unwrap(),
             )
             .unwrap();
+        let carol = member_secrets(&Passphrase::new(b"carol pass"));
+        let (a2, carol_id) = admit_editor(&tree, &ks, &owner_pass, &a1, &carol);
 
-        // Branch B (CONCURRENT, from the same base → still escrow A): bob force-reseals, minting epoch 1
-        // wrapped to {escrow-A RRK, bob}. Its RRK wrap targets the about-to-be-retired escrow.
-        let bob_mid = MemberId::new(bob_id);
+        // Hostile co-owner: remove carol, but mint the forward-secret epoch wrapping ONLY bob — the owner is
+        // OMITTED. A Remove-origin epoch is always eligible, so (highest ordinal) it becomes the write epoch.
+        let new_dek = generate_dek().unwrap();
+        let key_id = generate_salt().unwrap().to_vec();
+        let bob_only =
+            member_wrap_keyeo(&bob.root.hpke_public, &new_dek, TREE, &bob_id, &key_id).unwrap();
+        let sealing = SealingPayload {
+            new_epochs: vec![keyeo_crypto::Epoch {
+                key_id: KeyeoKeyId::new(key_id.clone()),
+                ordinal: 1,
+                dek_commitment: keyeo_crypto::dek_commitment(&new_dek),
+                wraps: vec![bob_only],
+            }],
+            added_wraps: vec![],
+            escrow: None,
+        }
+        .to_bytes();
+        let hostile =
+            dag_client::append_remove(&a2, &bob_id, &carol_id, sealing, &bob.root.identity).unwrap();
+
+        // The owner is missing from the write epoch → `needs_rrk_backfill` (the member-heal signal).
+        assert!(
+            fold_resolved(&dag_client::resolve(&hostile).unwrap())
+                .unwrap()
+                .needs_rrk_backfill,
+            "the owner is missing from the hostile forward-secret epoch"
+        );
+
+        // bob seals data under the new write epoch he minted.
+        let bob_mid = MemberId::new(&bob_id);
         let bob_rid = ReplicaId::new(b"rb");
         let bob_ctx = ctx(&tree, &bob_mid, &bob_rid);
-        let resealed = DagVault
-            .reseal_as_member(
-                &bob_ctx,
-                &base,
-                &bob_pass,
-                &bob.pass_kdf,
-                &base_floor,
-                ResealTrigger::Force,
-            )
-            .unwrap();
-        assert!(resealed.resealed, "bob's concurrent reseal minted epoch 1");
-
-        // bob seals data under epoch 1 (the write epoch he just minted).
         let (bob_u, _hp) = DagVault
-            .unlock_as_member(&bob_ctx, &resealed.anchor, &bob_pass, &bob.pass_kdf)
+            .unlock_as_member(&bob_ctx, &hostile, &bob_pass, &bob.pass_kdf)
             .unwrap();
         let data1 = bob_u
             .sealer
-            .seal_entry(
-                &SealContext::snapshot(1, Vec::new(), 0),
-                b"epoch-1 under old escrow",
-            )
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"post-removal, owner locked out")
             .unwrap()
             .envelope;
 
-        // Merge the branches: epoch 1 is now an orphan — its only RRK wrap targets the retired escrow A while
-        // the resolved escrow is B.
-        let merged = dag_client::merge(&rot.anchor, &resealed.anchor).unwrap();
-        assert!(
-            fold_resolved(&dag_client::resolve(&merged).unwrap())
-                .unwrap()
-                .needs_rrk_backfill,
-            "the concurrently-minted epoch is flagged as a rotation orphan"
-        );
-
-        // The owner unlocks (new escrow B) but CANNOT open epoch 1 — the rotation never reached it.
+        // The owner unlocks but CANNOT reach the write epoch — locked out, cannot self-heal.
         let u_before = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &merged, &owner_pass)
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &hostile, &owner_pass, Some(acct(&ks, &owner_pass)))
             .unwrap();
         assert!(
-            u_before
-                .sealer
-                .open_entry(EntryKind::Snapshot, &data1)
-                .is_err(),
-            "before the heal, the owner can't read the orphaned epoch"
+            u_before.write_epoch_unreachable,
+            "the owner cannot reach the epoch that omitted their wrap"
+        );
+        assert!(
+            u_before.sealer.open_entry(EntryKind::Snapshot, &data1).is_err(),
+            "before the heal, the owner can't read the locked-out epoch"
         );
 
-        // bob heals it: opens epoch 1 via his member wrap, adds an RRK wrap to the CURRENT escrow (B).
-        let merged_floor = dag_client::watermark(&merged).unwrap();
+        // bob heals it: opens the epoch via his member wrap, adds the OWNER's missing `MemberHpke` wrap.
+        let floor = dag_client::watermark(&hostile).unwrap();
         let healed = DagVault
-            .backfill_rrk(&bob_ctx, &merged, &bob_pass, &bob.pass_kdf, &merged_floor)
+            .backfill_rrk(&bob_ctx, &hostile, &bob_pass, &bob.pass_kdf, &floor)
             .unwrap();
-        assert!(
-            healed.backfilled,
-            "the member backfilled the orphaned epoch's RRK wrap"
-        );
+        assert!(healed.backfilled, "the member backfilled the owner's missing wrap");
         assert!(
             !fold_resolved(&dag_client::resolve(&healed.anchor).unwrap())
                 .unwrap()
                 .needs_rrk_backfill,
-            "the orphan signal clears after the heal"
+            "the owner-lockout signal clears after the member heal"
         );
 
-        // Now the owner reaches epoch 1 via the freshly-added RRK wrap.
+        // Now the owner reaches the once-locked-out epoch.
         let u_after = DagVault
-            .unlock(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r3")),
-                &healed.anchor,
-                &owner_pass,
-            )
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r3")), &healed.anchor, &owner_pass, Some(acct(&ks, &owner_pass)))
             .unwrap();
+        assert!(!u_after.write_epoch_unreachable, "the owner now reaches the write epoch");
         assert_eq!(
-            u_after
-                .sealer
-                .open_entry(EntryKind::Snapshot, &data1)
-                .unwrap(),
-            b"epoch-1 under old escrow",
-            "after the member heal, the owner reads the once-orphaned epoch"
+            u_after.sealer.open_entry(EntryKind::Snapshot, &data1).unwrap(),
+            b"post-removal, owner locked out",
+            "after the member heal, the owner reads the once-locked-out epoch"
         );
     }
 
-    /// OPE-381 / F3 `DoS` bound: one author may add at most `MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH` `RrkHpke`
-    /// wraps to a single epoch. A hostile member piling junk RRK wraps onto an epoch (to inflate the owner's
-    /// per-unlock HPKE work) is capped at fold time; the epoch's OWN minted RRK wrap is never counted, so the
-    /// baseline recovery access is untouched.
+    /// OPE-381 / F3 `DoS` bound, re-scoped for OPE-543 owner-as-member: one author may add at most
+    /// `MAX_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH_PER_RECIPIENT` HPKE wraps to a single epoch FOR A SINGLE RECIPIENT.
+    /// A hostile member piling junk `MemberHpke` wraps addressed to the OWNER (to inflate the owner's per-unlock
+    /// HPKE work — the A3 vector) is capped at fold time; the epoch's OWN minted owner wrap (in `new_epochs`,
+    /// not `added_wraps`) is never counted, so baseline access is untouched.
     #[test]
-    fn fold_caps_rrk_added_wraps_per_author_per_epoch() {
+    fn fold_caps_added_wraps_per_author_per_epoch_per_recipient() {
         let members = membership("owner", &["bob"]);
-        // Genesis epoch k0 with its minted RRK wrap + bob's member wrap.
+        // Genesis epoch k0 with the owner's minted member wrap + bob's member wrap.
         let genesis = sealing_entry(
             0,
             b"k0",
             0,
             dag_client::SealingOrigin::Genesis,
-            vec![rrk_wrap(), member_wrap("bob")],
-            Some(escrow()),
+            vec![owner_wrap(), member_wrap("bob")],
+            None,
         );
-        // A single hostile op by "bob" piling on far more RRK wraps than the cap.
-        let flood_count = MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH * 3;
+        // A single hostile op by "bob" piling on far more owner-addressed member wraps than the cap.
+        let flood_count = MAX_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH_PER_RECIPIENT * 3;
         let flood = dag_client::SealingEntry {
             op_id: [5u8; 32],
             origin: dag_client::SealingOrigin::Other,
@@ -2965,7 +2742,7 @@ mod tests {
                 added_wraps: (0..flood_count)
                     .map(|_| AddedWrap {
                         key_id: b"k0".to_vec(),
-                        wrap: rrk_wrap(),
+                        wrap: owner_wrap(),
                     })
                     .collect(),
                 escrow: None,
@@ -2978,153 +2755,24 @@ mod tests {
             .iter()
             .find(|e| e.key_id.as_bytes() == b"k0")
             .unwrap();
-        let rrk_wraps = k0
+        let owner_wraps = k0
             .wraps
             .iter()
-            .filter(|w| matches!(w.method, KeyeoWrapMethod::RrkHpke { .. }))
+            .filter(|w| {
+                w.recipient == "owner" && matches!(w.method, KeyeoWrapMethod::MemberHpke { .. })
+            })
             .count();
         assert_eq!(
-            rrk_wraps,
-            1 + MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH,
-            "the genesis RRK wrap plus bob's capped flood — the excess is dropped"
+            owner_wraps,
+            1 + MAX_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH_PER_RECIPIENT,
+            "the genesis owner wrap plus bob's capped flood — the excess is dropped"
         );
     }
 
-    /// OPE-381 / §11.2 two-phase confirm: a rotation is complete only once its authority is observed in the
-    /// synced anchor. Two rotations forked from the same frontier merge to a single deterministic winner, so
-    /// the loser's freshly-minted code never becomes the resolved authority — `rotation_confirmed` catches
-    /// that, so the losing device keeps the OLD code live instead of trusting a superseded one.
-    #[test]
-    fn dag_rotation_confirmed_catches_a_superseded_concurrent_rotation() {
-        let tree = TreeId::new(TREE);
-        let owner = MemberId::new(MEMBER);
-        let pass = Passphrase::new(b"correct horse");
-
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass)
-            .unwrap();
-        let base_floor = dag_client::watermark(&p.anchor).unwrap();
-
-        // Two concurrent rotations from the same base (two devices), each minting its OWN new authority.
-        let rot_a = DagVault
-            .rotate_recovery(
-                &ctx(&tree, &owner, &ReplicaId::new(b"ra")),
-                &p.anchor,
-                &pass,
-                &base_floor,
-            )
-            .unwrap();
-        let rot_b = DagVault
-            .rotate_recovery(
-                &ctx(&tree, &owner, &ReplicaId::new(b"rb")),
-                &p.anchor,
-                &pass,
-                &base_floor,
-            )
-            .unwrap();
-
-        let auth_a = DagVault
-            .resolved_reset_authority(&rot_a.anchor)
-            .unwrap()
-            .expect("rotation A set an authority");
-        let auth_b = DagVault
-            .resolved_reset_authority(&rot_b.anchor)
-            .unwrap()
-            .expect("rotation B set an authority");
-        assert_ne!(auth_a, auth_b, "each rotation mints a distinct recovery authority");
-
-        // Each device confirms its OWN rotation on its OWN anchor; the pre-rotation base confirms neither.
-        assert!(DagVault.rotation_confirmed(&rot_a.anchor, &auth_a).unwrap());
-        assert!(DagVault.rotation_confirmed(&rot_b.anchor, &auth_b).unwrap());
-        assert!(
-            !DagVault.rotation_confirmed(&p.anchor, &auth_a).unwrap(),
-            "the pre-rotation anchor confirms neither new authority"
-        );
-
-        // Merge the two branches: exactly ONE rotation wins the deterministic tiebreak.
-        let merged = dag_client::merge(&rot_a.anchor, &rot_b.anchor).unwrap();
-        let a_won = DagVault.rotation_confirmed(&merged, &auth_a).unwrap();
-        let b_won = DagVault.rotation_confirmed(&merged, &auth_b).unwrap();
-        assert!(
-            a_won ^ b_won,
-            "exactly one rotation survives the merge — the loser's code is provisional-void"
-        );
-        let winner = DagVault
-            .resolved_reset_authority(&merged)
-            .unwrap()
-            .expect("the merged anchor has a resolved authority");
-        assert!(
-            winner == auth_a || winner == auth_b,
-            "the resolved authority is one of the two rotations'"
-        );
-    }
-
-    /// OPE-381 / §11.2 superseded-recovery signal: an owner who recovers with the OLD code on one device
-    /// concurrently with a rotation on another finds, on merge, that rule (b) voids their `ReFound` — the
-    /// recovery is superseded and the resolved Owner reverts. `recovery_confirmed` catches it so the
-    /// recovering owner learns they are NOT in control instead of silently believing they are.
-    #[test]
-    fn dag_recovery_confirmed_catches_a_recovery_superseded_by_a_concurrent_rotation() {
-        let tree = TreeId::new(TREE);
-        let owner = MemberId::new(MEMBER);
-        let pass = Passphrase::new(b"correct horse");
-
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass)
-            .unwrap();
-        let base_floor = dag_client::watermark(&p.anchor).unwrap();
-
-        // Branch A: the owner rotates the recovery authority (retiring the current code).
-        let rot = DagVault
-            .rotate_recovery(
-                &ctx(&tree, &owner, &ReplicaId::new(b"ra")),
-                &p.anchor,
-                &pass,
-                &base_floor,
-            )
-            .unwrap();
-
-        // Branch B (CONCURRENT): the owner recovers with the OLD code on another device — a fresh identity.
-        let rec = DagVault
-            .recover(
-                &ctx(&tree, &owner, &ReplicaId::new(b"rb")),
-                &p.anchor,
-                &p.recovery_code,
-                &Passphrase::new(b"post-recovery pass"),
-                &base_floor,
-            )
-            .unwrap();
-        let recovered_owner = DagVault
-            .resolved_owner_key(&rec.anchor)
-            .unwrap()
-            .expect("the recovery established an owner");
-
-        // On device B alone the recovery is in force.
-        assert!(DagVault
-            .recovery_confirmed(&rec.anchor, &recovered_owner)
-            .unwrap());
-
-        // Merge: rule (b) voids the old-code ReFound concurrent with the rotation — recovery SUPERSEDED.
-        let merged = dag_client::merge(&rot.anchor, &rec.anchor).unwrap();
-        assert!(
-            !DagVault
-                .recovery_confirmed(&merged, &recovered_owner)
-                .unwrap(),
-            "the concurrent rotation supersedes the recovery — the recovering owner is not the resolved owner"
-        );
-        let rot_auth = DagVault
-            .resolved_reset_authority(&rot.anchor)
-            .unwrap()
-            .expect("the rotation set an authority");
-        assert!(
-            DagVault.rotation_confirmed(&merged, &rot_auth).unwrap(),
-            "the rotation stands"
-        );
-    }
-
-    /// Change the passphrase (a current-key-signed Retarget), then unlock with the new passphrase and open
-    /// pre-change data; the old passphrase is retired; and recovery still works via the rotated code — the
-    /// three-op fold (genesis → retarget → refound) resolves the current escrow correctly.
+    /// OPE-543 2b — account-keystore-mediated passphrase change (durable identity). The change re-wraps the
+    /// account blob under a new KEK with NO on-tree op: the tree anchor + watermark are unchanged, the running
+    /// sealer keeps working, the new passphrase opens the tree via the re-wrapped keystore while the old one no
+    /// longer opens the account, and the account recovery code (unchanged by a passphrase change) still recovers.
     #[test]
     fn dag_change_passphrase_then_unlock_and_still_recover() {
         let tree = TreeId::new(TREE);
@@ -3132,8 +2780,13 @@ mod tests {
         let old_pass = Passphrase::new(b"correct horse");
         let new_pass = Passphrase::new(b"battery staple unicorn");
 
+        let (ks, account_code, _u) = AccountKeystore::create(old_pass.expose()).unwrap();
         let p = DagVault
-            .provision(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &old_pass)
+            .provision(
+                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+                &old_pass,
+                Some(ks.unlock(old_pass.expose()).unwrap()),
+            )
             .unwrap();
         let sealed = p
             .sealer
@@ -3141,22 +2794,29 @@ mod tests {
             .unwrap()
             .envelope;
 
+        // Change the passphrase = re-wrap the account keystore blob; the tree anchor + watermark are unchanged.
         let re = DagVault
             .change_passphrase(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
                 &p.anchor,
+                &ks.to_bytes().unwrap(),
                 &old_pass,
                 &new_pass,
-                &[],
+                &p.watermark,
             )
             .unwrap();
+        assert_eq!(re.anchor, p.anchor, "a passphrase change does not touch the tree anchor");
+        assert_eq!(re.watermark, p.watermark, "nor the anti-rollback watermark");
+        assert!(!re.keystore.is_empty(), "it returns the re-wrapped account keystore blob");
 
-        // The NEW passphrase opens the rekeyed anchor (DEK unchanged); the OLD one no longer does.
+        // The NEW passphrase opens the tree via the re-wrapped account (DEK unchanged); the OLD one does not.
+        let new_ks = AccountKeystore::from_bytes(&re.keystore).unwrap();
         let u = DagVault
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r2")),
-                &re.anchor,
+                &p.anchor,
                 &new_pass,
+                Some(new_ks.unlock(new_pass.expose()).unwrap()),
             )
             .unwrap();
         assert_eq!(
@@ -3164,24 +2824,19 @@ mod tests {
             b"keepsake"
         );
         assert!(
-            DagVault
-                .unlock(
-                    &ctx(&tree, &member, &ReplicaId::new(b"r3")),
-                    &re.anchor,
-                    &old_pass
-                )
-                .is_err(),
-            "the pre-change passphrase is retired"
+            new_ks.unlock(old_pass.expose()).is_err(),
+            "the pre-change passphrase no longer opens the account"
         );
 
-        // Recovery still works, via the recovery code the passphrase change rotated.
+        // Recovery still works via the account recovery code — a passphrase change does NOT rotate it.
         let r = DagVault
             .recover(
                 &ctx(&tree, &member, &ReplicaId::new(b"r4")),
-                &re.anchor,
-                &re.recovery_code,
+                &p.anchor,
+                &re.keystore,
+                &account_code,
                 &Passphrase::new(b"a third passphrase"),
-                &[],
+                &p.watermark,
             )
             .unwrap();
         assert_eq!(
@@ -3198,16 +2853,14 @@ mod tests {
         let tree = TreeId::new(TREE);
         let member = MemberId::new(MEMBER);
         let old_pass = Passphrase::new(b"correct horse");
-        let new_pass = Passphrase::new(b"battery staple unicorn");
 
-        let p = DagVault
-            .provision(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &old_pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &member, &ReplicaId::new(b"r1"), &old_pass);
         let u = DagVault
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
                 &p.anchor,
                 &old_pass,
+                Some(acct(&ks, &old_pass)),
             )
             .unwrap();
         assert!(
@@ -3215,28 +2868,32 @@ mod tests {
             "unlock reports the frontier watermark, not a stub"
         );
 
-        // A passphrase change, gated on the unlock floor, advances the watermark.
+        // A floor-enforcing mutation (a forced reseal) gated on the unlock floor advances the watermark.
+        // (OPE-543: the anti-rollback wiring is engine-level and orthogonal to the owner-as-member sealing —
+        // exercised via `reseal`, a green flow, since credential-change is deferred to the durable-identity
+        // increment.)
         let re = DagVault
-            .change_passphrase(
+            .reseal(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
                 &p.anchor,
-                &old_pass,
-                &new_pass,
+                &acct(&ks, &old_pass),
                 &u.watermark,
+                ResealTrigger::Force,
             )
             .unwrap();
+        assert!(re.resealed, "the forced reseal appended an op");
         assert_ne!(
             re.watermark, u.watermark,
             "a keyring change advances the watermark"
         );
 
         // Serving the ORIGINAL anchor now — its op set is behind the advanced floor — is a rollback.
-        let rolled_back = DagVault.change_passphrase(
+        let rolled_back = DagVault.reseal(
             &ctx(&tree, &member, &ReplicaId::new(b"r1")),
             &p.anchor,
-            &old_pass,
-            &new_pass,
+            &acct(&ks, &old_pass),
             &re.watermark,
+            ResealTrigger::Force,
         );
         assert!(
             matches!(rolled_back, Err(VaultError::WatermarkRollback { .. })),
@@ -3244,12 +2901,12 @@ mod tests {
         );
 
         // A corrupt floor (not a multiple of 32 bytes) is refused, not silently ignored.
-        let bad_floor = DagVault.change_passphrase(
+        let bad_floor = DagVault.reseal(
             &ctx(&tree, &member, &ReplicaId::new(b"r1")),
             &re.anchor,
-            &new_pass,
-            &Passphrase::new(b"third one"),
+            &acct(&ks, &old_pass),
             &[1, 2, 3],
+            ResealTrigger::Force,
         );
         assert!(
             matches!(bad_floor, Err(VaultError::MalformedWatermark)),
@@ -3265,9 +2922,7 @@ mod tests {
         let owner = MemberId::new(MEMBER);
         let pass = Passphrase::new(b"correct horse");
 
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &owner, &ReplicaId::new(b"r1"), &pass);
         let sealed = p
             .sealer
             .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"shared secret")
@@ -3275,22 +2930,22 @@ mod tests {
             .envelope;
 
         // bob's OOB-verified keys: a real HPKE public key so the wrap succeeds, and a real Ed25519 author
-        // key so `Joiner::from_bytes` accepts it (it validates the author key is a well-formed point).
-        let bob_id = "acct-bob";
+        // key so `Joiner::from_bytes` accepts it. His member id SELF-CERTIFIES that author key (OPE-543).
         let HpkeKeypair {
             public: bob_hpke, ..
         } = generate_hpke_keypair().unwrap();
         let bob_author = edsign::SigningKey::from_seed(&[9u8; 32])
             .verifying_key()
             .to_bytes();
+        let bob_id = derive_member_id(&bob_author);
 
         let new_anchor = DagVault
             .add_member(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &p.anchor,
-                &pass,
+                &acct(&ks, &pass),
                 &crate::vault::Joiner::from_bytes(
-                    &MemberId::new(bob_id),
+                    &MemberId::new(&bob_id),
                     KeyringRole::EDITOR,
                     &bob_author,
                     &bob_hpke,
@@ -3316,6 +2971,7 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &new_anchor,
                 &pass,
+                Some(acct(&ks, &pass)),
             )
             .unwrap();
         assert_eq!(
@@ -3349,9 +3005,7 @@ mod tests {
         let owner_pass = Passphrase::new(b"owner passphrase");
 
         // Solo (never shared): the sealer attaches no author → entries are unattributed.
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &owner, &ReplicaId::new(b"r1"), &owner_pass);
         assert!(
             seal_header(&p.sealer, b"solo edit")
                 .author_signature
@@ -3359,31 +3013,26 @@ mod tests {
             "a never-shared dag writes unattributed"
         );
 
-        // First share — admit bob.
+        // First share — admit bob (self-cert member id).
         let bob_pass = Passphrase::new(b"bobs own passphrase");
-        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
-        let bob_author = bob.root.identity.verifying_key().to_bytes();
-        let new_anchor = DagVault
-            .add_member(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &p.anchor,
-                &owner_pass,
-                &crate::vault::Joiner::from_bytes(
-                    &MemberId::new("acct-bob"),
-                    KeyringRole::EDITOR,
-                    &bob_author,
-                    &bob.root.hpke_public,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let bob = member_secrets(&bob_pass);
+        let (new_anchor, bob_id) = admit_editor(&tree, &ks, &owner_pass, &p.anchor, &bob);
+        // The owner's ON-TREE attribution id is their SELF-CERTIFYING derived id (not `ctx.member_id`).
+        let owner_id = dag_client::resolve(&new_anchor)
+            .unwrap()
+            .members
+            .owner()
+            .unwrap()
+            .member_id
+            .clone();
 
-        // Owner unlock on the shared anchor: now signs, attributed to the owner.
+        // Owner unlock on the shared anchor: now signs, attributed to the owner's derived id.
         let u_owner = DagVault
             .unlock(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &new_anchor,
                 &owner_pass,
+                Some(acct(&ks, &owner_pass)),
             )
             .unwrap();
         let owner_h = seal_header(&u_owner.sealer, b"owner edit");
@@ -3391,13 +3040,13 @@ mod tests {
             !owner_h.author_signature.is_empty(),
             "shared dag: owner signs"
         );
-        assert_eq!(owner_h.author_member_id, MEMBER);
+        assert_eq!(owner_h.author_member_id, owner_id);
 
         // Member unlock: bob signs as himself.
-        let bob_id = MemberId::new("acct-bob");
+        let bob_mid = MemberId::new(&bob_id);
         let (u_member, _) = DagVault
             .unlock_as_member(
-                &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
+                &ctx(&tree, &bob_mid, &ReplicaId::new(b"r-bob")),
                 &new_anchor,
                 &bob_pass,
                 &bob.pass_kdf,
@@ -3408,7 +3057,7 @@ mod tests {
             !member_h.author_signature.is_empty(),
             "shared dag: member signs"
         );
-        assert_eq!(member_h.author_member_id, "acct-bob");
+        assert_eq!(member_h.author_member_id, bob_id);
     }
 
     /// §B3 verify-on-ingest over the dag engine (OPE-382 / §8.2): a real shared-dag `DagMembershipResolver` accepts a
@@ -3426,30 +3075,14 @@ mod tests {
         let owner_pass = Passphrase::new(b"owner passphrase");
 
         // Provision, then SHARE (add bob) so the tree requires attribution and the owner signs.
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &owner, &ReplicaId::new(b"r1"), &owner_pass);
         let bob_pass = Passphrase::new(b"bobs own passphrase");
-        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
-        let bob_author = bob.root.identity.verifying_key().to_bytes();
-        let shared = DagVault
-            .add_member(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &p.anchor,
-                &owner_pass,
-                &crate::vault::Joiner::from_bytes(
-                    &MemberId::new("acct-bob"),
-                    KeyringRole::EDITOR,
-                    &bob_author,
-                    &bob.root.hpke_public,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let bob = member_secrets(&bob_pass);
+        let (shared, bob_id) = admit_editor(&tree, &ks, &owner_pass, &p.anchor, &bob);
 
         // The owner seals an entry under the CURRENT (first) epoch.
         let u = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &shared, &owner_pass)
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &shared, &owner_pass, Some(acct(&ks, &owner_pass)))
             .unwrap();
         let sealed = u
             .sealer
@@ -3483,8 +3116,8 @@ mod tests {
             .remove_member(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r3")),
                 &shared,
-                &owner_pass,
-                "acct-bob",
+                &acct(&ks, &owner_pass),
+                &bob_id,
             )
             .unwrap();
         let m1 = DagMembershipResolver::new(&rotated).unwrap();
@@ -3503,9 +3136,7 @@ mod tests {
         let owner = MemberId::new(MEMBER);
         let owner_pass = Passphrase::new(b"owner passphrase");
 
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &owner, &ReplicaId::new(b"r1"), &owner_pass);
         let sealed = p
             .sealer
             .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"family data")
@@ -3514,26 +3145,12 @@ mod tests {
 
         // bob's account: identity + HPKE + KDF derived from his own passphrase.
         let bob_pass = Passphrase::new(b"bobs own passphrase");
-        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
+        let bob = member_secrets(&bob_pass);
         let bob_author = bob.root.identity.verifying_key().to_bytes();
-
-        let new_anchor = DagVault
-            .add_member(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &p.anchor,
-                &owner_pass,
-                &crate::vault::Joiner::from_bytes(
-                    &MemberId::new("acct-bob"),
-                    KeyringRole::EDITOR,
-                    &bob_author,
-                    &bob.root.hpke_public,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let (new_anchor, bob_id_str) = admit_editor(&tree, &ks, &owner_pass, &p.anchor, &bob);
 
         // bob unlocks with his own passphrase + account KDF and reads the shared data.
-        let bob_id = MemberId::new("acct-bob");
+        let bob_id = MemberId::new(&bob_id_str);
         let (u, _) = DagVault
             .unlock_as_member(
                 &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
@@ -3570,28 +3187,12 @@ mod tests {
         let tree = TreeId::new(TREE);
         let owner = MemberId::new(MEMBER);
         let owner_pass = Passphrase::new(b"owner passphrase");
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &owner, &ReplicaId::new(b"r1"), &owner_pass);
 
         let bob_pass = Passphrase::new(b"bobs passphrase");
-        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
-        let bob_author = bob.root.identity.verifying_key().to_bytes();
-        let bob_id = MemberId::new("acct-bob");
-        let a1 = DagVault
-            .add_member(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &p.anchor,
-                &owner_pass,
-                &crate::vault::Joiner::from_bytes(
-                    &MemberId::new("acct-bob"),
-                    KeyringRole::EDITOR,
-                    &bob_author,
-                    &bob.root.hpke_public,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let bob = member_secrets(&bob_pass);
+        let (a1, bob_id_str) = admit_editor(&tree, &ks, &owner_pass, &p.anchor, &bob);
+        let bob_id = MemberId::new(&bob_id_str);
         assert!(
             DagVault
                 .unlock_as_member(
@@ -3608,8 +3209,8 @@ mod tests {
             .remove_member(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &a1,
-                &owner_pass,
-                "acct-bob",
+                &acct(&ks, &owner_pass),
+                &bob_id_str,
             )
             .unwrap();
 
@@ -3631,6 +3232,7 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &a2,
                 &owner_pass,
+                Some(acct(&ks, &owner_pass)),
             )
             .unwrap();
         let post = u
@@ -3652,31 +3254,29 @@ mod tests {
         let tree = TreeId::new(TREE);
         let owner = MemberId::new(MEMBER);
         let owner_pass = Passphrase::new(b"owner passphrase");
-        let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
-            .unwrap();
+        let (ks, p) = provision_owned(&tree, &owner, &ReplicaId::new(b"r1"), &owner_pass);
 
-        // Add bob + carol as editors.
-        let bob = new_owner_secrets(Passphrase::new(b"bob pass").expose()).unwrap();
-        let carol = new_owner_secrets(Passphrase::new(b"carol pass").expose()).unwrap();
-        let a1 = admit_editor(&tree, &owner, &owner_pass, &p.anchor, "acct-bob", &bob);
-        let a2 = admit_editor(&tree, &owner, &owner_pass, &a1, "acct-carol", &carol);
+        // Add bob + carol as editors (self-cert member ids derived from their keys).
+        let bob = member_secrets(&Passphrase::new(b"bob pass"));
+        let carol = member_secrets(&Passphrase::new(b"carol pass"));
+        let (a1, bob_id) = admit_editor(&tree, &ks, &owner_pass, &p.anchor, &bob);
+        let (a2, carol_id) = admit_editor(&tree, &ks, &owner_pass, &a1, &carol);
 
         // Two CONCURRENT removals from a2 (both parent on the same frontier): A removes bob, B removes carol.
         let branch_a = DagVault
             .remove_member(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &a2,
-                &owner_pass,
-                "acct-bob",
+                &acct(&ks, &owner_pass),
+                &bob_id,
             )
             .unwrap();
         let branch_b = DagVault
             .remove_member(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &a2,
-                &owner_pass,
-                "acct-carol",
+                &acct(&ks, &owner_pass),
+                &carol_id,
             )
             .unwrap();
         let merged = dag_client::merge(&branch_a, &branch_b).unwrap();
@@ -3687,6 +3287,7 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &merged,
                 &owner_pass,
+                Some(acct(&ks, &owner_pass)),
             )
             .unwrap();
         assert!(
@@ -3699,7 +3300,7 @@ mod tests {
             .reseal(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &merged,
-                &owner_pass,
+                &acct(&ks, &owner_pass),
                 &[],
                 ResealTrigger::WhenStale,
             )
@@ -3710,6 +3311,7 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &r.anchor,
                 &owner_pass,
+                Some(acct(&ks, &owner_pass)),
             )
             .unwrap();
         assert!(
@@ -3731,7 +3333,7 @@ mod tests {
             .reseal(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &r.anchor,
-                &owner_pass,
+                &acct(&ks, &owner_pass),
                 &[],
                 ResealTrigger::WhenStale,
             )
@@ -3744,7 +3346,7 @@ mod tests {
             .reseal(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &r.anchor,
-                &owner_pass,
+                &acct(&ks, &owner_pass),
                 &[],
                 ResealTrigger::Force,
             )
@@ -3755,6 +3357,7 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &r3.anchor,
                 &owner_pass,
+                Some(acct(&ks, &owner_pass)),
             )
             .unwrap();
         assert!(
@@ -3763,25 +3366,126 @@ mod tests {
         );
     }
 
+    /// OPE-543 owner-as-member: unlock authenticates via the durable ACCOUNT identity — the passphrase gates the
+    /// keystore at the APP layer (not the vault), so the vault-level rejection is of a FOREIGN account: an
+    /// account whose identity is not the resolved owner's can't open the tree, even though it is itself valid.
     #[test]
-    fn dag_unlock_rejects_a_wrong_passphrase() {
+    fn dag_unlock_rejects_a_foreign_account() {
         let tree = TreeId::new(TREE);
         let member = MemberId::new(MEMBER);
-        let p = DagVault
-            .provision(
-                &ctx(&tree, &member, &ReplicaId::new(b"r")),
-                &Passphrase::new(b"correct horse"),
-            )
-            .unwrap();
+        let pass = Passphrase::new(b"correct horse");
+        let (_ks, p) = provision_owned(&tree, &member, &ReplicaId::new(b"r"), &pass);
+        // A DIFFERENT account (a stranger): its identity is not the resolved owner's, so unlock fails closed at
+        // the anti-substitution check.
+        let stranger_pass = Passphrase::new(b"stranger");
+        let stranger = owner_ks(&stranger_pass);
         assert!(
             DagVault
                 .unlock(
                     &ctx(&tree, &member, &ReplicaId::new(b"r")),
                     &p.anchor,
-                    &Passphrase::new(b"wrong"),
+                    &pass,
+                    Some(acct(&stranger, &stranger_pass)),
                 )
                 .is_err(),
-            "a wrong passphrase does not open the dag vault"
+            "a foreign account does not open the dag vault"
         );
+    }
+
+    /// OPE-543 A4 regression — the OWNER-COVERAGE LOCKSTEP safety net (the flagged trap). The owner is a
+    /// resolved member whose id is in `required` AND is wrapped in EVERY retained (minted) epoch at provision,
+    /// `add_member`, reseal, and a member removal's forward-secret epoch — so a freshly-provisioned or -mutated
+    /// tree NEVER leaves the owner `write_epoch_unreachable` or flagged `needs_rrk_backfill`, and the owner
+    /// opens every epoch. If ANY owner-exclusion site were missed the owner would be silently, permanently
+    /// locked out — this test would then fail at that stage.
+    #[test]
+    fn a4_owner_is_covered_in_every_minted_epoch_and_never_unreachable() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let pass = Passphrase::new(b"owner passphrase");
+        // The owner's durable account keystore, created once; every owner-authored op below re-derives a fresh
+        // `UnlockedAccount` from it (the app-layer pattern).
+        let ks = owner_ks(&pass);
+
+        // At `stage`: the owner id is in `required`; the owner has a current-key `MemberHpke` wrap in EVERY
+        // retained epoch; the fold does not flag the owner locked out; `unlock` reaches the write epoch and
+        // opens every epoch DEK; and `reset_authority` is None.
+        let assert_owner_covered = |anchor: &[u8], stage: &str| {
+            let resolved = dag_client::resolve(anchor).unwrap();
+            let owner_id = resolved.members.owner().unwrap().member_id.clone();
+            let owner_key = resolved.members.owner().unwrap().hpke_public_key.clone();
+            let folded = fold_resolved(&resolved).unwrap();
+
+            let required = member_descriptors(&resolved.members);
+            assert!(
+                required.iter().any(|d| d.id == owner_id),
+                "{stage}: the owner is in `required`"
+            );
+            for ep in &folded.epochs {
+                assert!(
+                    ep.wraps.iter().any(|w| w.recipient == owner_id
+                        && matches!(&w.method,
+                            KeyeoWrapMethod::MemberHpke { recipient_key, .. }
+                                if recipient_key.as_ref() == owner_key.as_slice())),
+                    "{stage}: the owner is wrapped (current key) in every minted epoch"
+                );
+            }
+            assert!(
+                !folded.needs_rrk_backfill,
+                "{stage}: the owner is not locked out of any retained epoch"
+            );
+            let u = DagVault
+                .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"ra")), anchor, &pass, Some(acct(&ks, &pass)))
+                .unwrap();
+            assert!(
+                !u.write_epoch_unreachable,
+                "{stage}: unlock never reports write_epoch_unreachable"
+            );
+            assert_eq!(
+                DagVault.resolved_reset_authority(anchor).unwrap(),
+                None,
+                "{stage}: reset_authority stays None (owner-as-member has no recovery authority)"
+            );
+        };
+
+        // provision
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass, Some(acct(&ks, &pass)))
+            .unwrap();
+        assert_eq!(
+            DagVault.resolved_reset_authority(&p.anchor).unwrap(),
+            None,
+            "provision yields reset_authority == None"
+        );
+        assert_owner_covered(&p.anchor, "provision");
+
+        // add_member
+        let bob = member_secrets(&Passphrase::new(b"bob pass"));
+        let (a1, bob_id) = admit_editor(&tree, &ks, &pass, &p.anchor, &bob);
+        assert_owner_covered(&a1, "add_member");
+
+        // reseal (forced, mints a fresh covering epoch)
+        let re = DagVault
+            .reseal(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &a1,
+                &acct(&ks, &pass),
+                &[],
+                ResealTrigger::Force,
+            )
+            .unwrap();
+        assert!(re.resealed, "the forced reseal minted an epoch");
+        assert_owner_covered(&re.anchor, "reseal");
+
+        // remove_member forward-secret epoch
+        let a2 = DagVault
+            .remove_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &re.anchor,
+                &acct(&ks, &pass),
+                &bob_id,
+            )
+            .unwrap();
+        assert_owner_covered(&a2, "remove_member");
     }
 }

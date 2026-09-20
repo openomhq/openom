@@ -530,6 +530,9 @@ pub struct OpenResult {
     handle: Option<AppCoreHandle>,
     /// The encoded keyring anchor to persist (empty for unlock).
     pub keyring: Vec<u8>,
+    /// The durable-account keystore blob to persist (OPE-542/543). Non-empty only for a dag `provision`; the
+    /// platform/JS layer stores it and passes it back to `unlock`. Empty for chain / non-provision flows.
+    pub keystore: Vec<u8>,
     /// The one-time recovery code to show once (empty for unlock).
     #[wasm_bindgen(js_name = recoveryCode)]
     pub recovery_code: String,
@@ -595,6 +598,7 @@ pub fn provision(
     Ok(OpenResult {
         handle: Some(AppCoreHandle { inner: p.core }),
         keyring: p.keyring,
+        keystore: p.keystore,
         recovery_code: p.recovery_code,
         did_key: p.did_key,
         watermark: p.watermark,
@@ -610,6 +614,7 @@ pub fn provision(
 /// # Errors
 /// Returns a [`JsError`] if the engine is unknown, or unlock fails (wrong passphrase / stale keyring).
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn unlock(
     engine: &str,
     passphrase: String,
@@ -617,11 +622,13 @@ pub fn unlock(
     member_id: &str,
     replica_id: &[u8],
     anchor: &[u8],
+    keystore: &[u8],
     doc: String,
 ) -> Result<OpenResult, JsValue> {
     // Shared rlib construction (crate::unlock). No bootstrap here — hydration is host-driven and uniform: the
     // worker `importLog`s the durably persisted log, THEN `bootstrap`s. Bootstrapping the fresh empty store here
-    // would be dead work and would conflate a bad passphrase with one corrupt log entry.
+    // would be dead work and would conflate a bad passphrase with one corrupt log entry. `keystore` is the
+    // durable-account blob the platform layer persisted at provision (empty for a chain tree).
     let u = crate::unlock(
         MemoryBlob::new(),
         parse_engine(engine)?,
@@ -630,12 +637,14 @@ pub fn unlock(
         member_id,
         replica_id,
         anchor,
+        keystore,
         doc,
     )
     .map_err(|e| vault_err_to_js(&e))?;
     Ok(OpenResult {
         handle: Some(AppCoreHandle { inner: u.core }),
         keyring: Vec::new(),
+        keystore: Vec::new(),
         recovery_code: String::new(),
         did_key: u.did_key,
         watermark: u.watermark,
@@ -647,8 +656,12 @@ pub fn unlock(
 }
 
 /// Recover owner access with the recovery code under a new passphrase, then wrap the fresh `SealerSet`
-/// in a ready core (recovery mints a new identity, so a new `didKey`). `anchor` is the stored keyring;
-/// `floor` is the persisted anti-rollback watermark. Returns the new keyring + a NEW recovery code.
+/// in a ready core. `anchor` is the stored keyring; `keystore` is the persisted durable-account blob (dag);
+/// `floor` is the persisted anti-rollback watermark. Returns the (dag: unchanged) keyring, the re-wrapped
+/// `keystore` blob to persist, and — for the chain — a new recovery code.
+///
+/// OPE-543 2b (dag): recovery is account-keystore-mediated — it restores the SAME durable identity (so `didKey`
+/// is unchanged and the anchor is not mutated) and returns the account blob re-wrapped under the new passphrase.
 ///
 /// # Errors
 /// Returns a [`JsError`] if the engine is unknown, or recovery fails (wrong code / stale keyring).
@@ -662,12 +675,13 @@ pub fn recover(
     member_id: &str,
     replica_id: &[u8],
     anchor: &[u8],
+    keystore: &[u8],
     floor: &[u8],
     doc: String,
 ) -> Result<OpenResult, JsValue> {
     // Shared rlib construction (crate::recover) over the wasm worker's in-memory store, so this veneer and the
-    // native host can't drift. recover mints a fresh escrow reaching every epoch → no rotation orphan / no
-    // unreachable write epoch, so those two flags are always false here.
+    // native host can't drift. `keystore` is the persisted durable-account blob (empty for the chain); the dag
+    // re-wraps it under the new passphrase and returns the new blob in `r.keystore`.
     let r = crate::recover(
         MemoryBlob::new(),
         parse_engine(engine)?,
@@ -677,6 +691,7 @@ pub fn recover(
         member_id,
         replica_id,
         anchor,
+        keystore,
         floor,
         doc,
     )
@@ -684,6 +699,7 @@ pub fn recover(
     Ok(OpenResult {
         handle: Some(AppCoreHandle { inner: r.core }),
         keyring: r.keyring,
+        keystore: r.keystore,
         recovery_code: r.recovery_code,
         did_key: r.did_key,
         watermark: r.watermark,
@@ -712,9 +728,12 @@ pub fn change_passphrase(
     member_id: &str,
     replica_id: &[u8],
     anchor: &[u8],
+    keystore: &[u8],
     floor: &[u8],
 ) -> Result<OpenResult, JsValue> {
-    // Shared rlib re-key (crate::change_passphrase) so this veneer and the native host can't drift.
+    // Shared rlib re-key (crate::change_passphrase) so this veneer and the native host can't drift. The dag
+    // re-wraps the account `keystore` blob (no on-tree op; `re.keyring` == the input anchor); the chain re-keys
+    // the keyring op-based (empty `keystore`).
     let re = crate::change_passphrase(
         parse_engine(engine)?,
         &Passphrase::new(old_passphrase.into_bytes()),
@@ -723,12 +742,14 @@ pub fn change_passphrase(
         member_id,
         replica_id,
         anchor,
+        keystore,
         floor,
     )
     .map_err(|e| vault_err_to_js(&e))?;
     Ok(OpenResult {
         handle: None, // the DEK is unchanged — the running core keeps working
         keyring: re.keyring,
+        keystore: re.keystore,
         recovery_code: re.recovery_code,
         did_key: String::new(),
         watermark: re.watermark,
@@ -737,23 +758,6 @@ pub fn change_passphrase(
         needs_rrk_backfill: false,
         write_epoch_unreachable: false, // the DEK is unchanged, so the running core still reaches it (OPE-299)
     })
-}
-
-/// Result of [`rotate_recovery`]: the new keyring anchor to persist, the fresh recovery code, the new
-/// recovery authority to record for confirmation, and the watermark. The code is PROVISIONAL until
-/// [`rotation_confirmed`] returns `true` against the synced anchor (OPE-381 / §11.2).
-#[wasm_bindgen(getter_with_clone)]
-pub struct DagRotated {
-    /// The rotated keyring anchor to persist.
-    pub keyring: Vec<u8>,
-    /// The one-time NEW recovery code to show once — provisional until confirmed.
-    #[wasm_bindgen(js_name = recoveryCode)]
-    pub recovery_code: String,
-    /// The new recovery authority (RVK) to hand back to [`rotation_confirmed`] after syncing.
-    #[wasm_bindgen(js_name = resetAuthority)]
-    pub reset_authority: Vec<u8>,
-    /// The anti-rollback cursor to persist.
-    pub watermark: Vec<u8>,
 }
 
 /// Result of [`backfill_rrk`]: the (possibly unchanged) keyring anchor + watermark to persist, and whether a
@@ -768,54 +772,14 @@ pub struct DagBackfilled {
     pub backfilled: bool,
 }
 
-/// Rotate the recovery authority (OPE-381): the owner retires the current recovery code for a fresh one so a
-/// holder of the old code can no longer take over. Authorized by the owner's passphrase-derived identity.
-/// Returns the rotated keyring + new code + the authority to confirm. The code is PROVISIONAL — the worker
-/// keeps the OLD code live until [`rotation_confirmed`] returns `true` against the synced anchor.
-///
-/// # Errors
-/// Returns a [`JsError`] if the engine isn't the dag keyring, the passphrase isn't the resolved owner's, or
-/// the rotation fails.
-#[wasm_bindgen(js_name = rotateRecovery)]
-#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
-pub fn rotate_recovery(
-    engine: &str,
-    owner_passphrase: String,
-    tree_id: &[u8],
-    member_id: &str,
-    replica_id: &[u8],
-    anchor: &[u8],
-    floor: &[u8],
-) -> Result<DagRotated, JsError> {
-    let dag = AppVault::from_kind(parse_engine(engine)?)
-        .as_dag()
-        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
-    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
-    let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
-    };
-    let r = dag
-        .rotate_recovery(&ctx, anchor, &Passphrase::new(owner_passphrase.into_bytes()), floor)
-        .map_err(to_js)?;
-    let reset_authority = dag
-        .resolved_reset_authority(&r.anchor)
-        .map_err(to_js)?
-        .map(|a| a.to_vec())
-        .unwrap_or_default();
-    Ok(DagRotated {
-        keyring: r.anchor,
-        recovery_code: r.recovery_code.into_string(),
-        reset_authority,
-        watermark: r.watermark,
-    })
-}
+// OPE-543 2b: the `rotateRecovery` wasm export was REMOVED — under durable identity there is no per-tree
+// recovery root to rotate (recovery lives in the account keystore; account-level rotation is OPE-549). The
+// read-only rotation/recovery-confirm observers below remain (harmless on an owner-as-member tree, whose
+// resolved reset authority is `None`).
 
-/// Confirm a rotation survived the merge (OPE-381 / §11.2): `expected_reset_authority` is what
-/// [`rotate_recovery`] returned; re-resolves `synced_anchor` and reports whether that authority is now the
-/// resolved one. `false` means the rotation was superseded — the new code is void and the OLD code is still
-/// live, so the worker must re-rotate.
+/// Confirm a reset/rotation authority is the resolved one in `synced_anchor` (OPE-381 / §11.2 observer):
+/// re-resolves the anchor and reports whether `expected_reset_authority` is now the resolved recovery
+/// authority. Retained as a read-only query over the engine's still-supported reset ops.
 ///
 /// # Errors
 /// Returns a [`JsError`] if the engine isn't the dag keyring, the authority isn't 32 bytes, or resolve fails.
@@ -962,6 +926,7 @@ pub fn add_member(
     engine: &str,
     keyring: &[u8],
     owner_passphrase: String,
+    owner_keystore: &[u8],
     tree_id: &[u8],
     owner_member_id: &str,
     replica_id: &[u8],
@@ -975,6 +940,7 @@ pub fn add_member(
         parse_engine(engine)?,
         keyring,
         &Passphrase::new(owner_passphrase.into_bytes()),
+        owner_keystore,
         tree_id,
         owner_member_id,
         replica_id,
@@ -1005,6 +971,7 @@ pub fn remove_member(
     engine: &str,
     keyring: &[u8],
     owner_passphrase: String,
+    owner_keystore: &[u8],
     tree_id: &[u8],
     owner_member_id: &str,
     replica_id: &[u8],
@@ -1015,6 +982,7 @@ pub fn remove_member(
         parse_engine(engine)?,
         keyring,
         &Passphrase::new(owner_passphrase.into_bytes()),
+        owner_keystore,
         tree_id,
         owner_member_id,
         replica_id,
@@ -1044,6 +1012,7 @@ pub fn change_role(
     engine: &str,
     keyring: &[u8],
     owner_passphrase: String,
+    owner_keystore: &[u8],
     tree_id: &[u8],
     owner_member_id: &str,
     replica_id: &[u8],
@@ -1055,6 +1024,7 @@ pub fn change_role(
         parse_engine(engine)?,
         keyring,
         &Passphrase::new(owner_passphrase.into_bytes()),
+        owner_keystore,
         tree_id,
         owner_member_id,
         replica_id,
@@ -1112,6 +1082,7 @@ pub fn unlock_as_member(
     Ok(OpenResult {
         handle: Some(AppCoreHandle { inner: m.core }),
         keyring: Vec::new(),
+        keystore: Vec::new(),
         recovery_code: String::new(),
         did_key: m.did_key,
         watermark: m.watermark,

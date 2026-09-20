@@ -23,7 +23,7 @@ use openom_sealer::SealerSet;
 
 use crate::dag_vault::DagVault;
 use crate::lifecycle::VaultContext;
-use crate::{vault, VaultError};
+use crate::{vault, AccountKeystore, UnlockedAccount, VaultError};
 
 /// An orchestration diagnostic → [`VaultError::Sharing`] (verbatim message, no prefix).
 fn err(msg: impl Into<String>) -> VaultError {
@@ -773,9 +773,22 @@ fn parse_trusted_signers(bytes: &[u8]) -> Result<Vec<VerifyingKey>, VaultError> 
         .collect()
 }
 
+/// Re-derive the owner's durable ACCOUNT identity (OPE-542/543) from its persisted keystore blob + passphrase.
+/// The dag owner-authored membership ops sign with this account identity (owner-as-member); the chain keeps its
+/// per-tree passphrase credential and never calls this, so a chain caller passes an empty `owner_keystore`.
+fn owner_account(
+    owner_keystore: &[u8],
+    owner_passphrase: &Passphrase,
+) -> Result<UnlockedAccount, VaultError> {
+    AccountKeystore::from_bytes(owner_keystore)?.unlock(owner_passphrase.expose())
+}
+
 /// Add a member (owner action) — HPKE-wrap the tree DEK to the OOB-verified joiner keys + record them in a
 /// new signed keyring revision (chain) / `Add` op (dag). Returns the new keyring/anchor + its watermark to
 /// persist; the owner's own session is unchanged (an add mints no new epoch), so it just re-reads membership.
+///
+/// `owner_keystore` is the owner's durable account keystore blob (dag owner-as-member identity source; empty
+/// for the chain, which authorizes from `owner_passphrase` alone).
 ///
 /// # Errors
 /// Returns [`VaultError`] on a malformed keyring, a wrong owner passphrase, a bad joiner key, or an
@@ -785,6 +798,7 @@ pub fn add_member(
     engine: EngineKind,
     keyring: &[u8],
     owner_passphrase: &Passphrase,
+    owner_keystore: &[u8],
     tree_id: &[u8],
     owner_member_id: &str,
     replica_id: &[u8],
@@ -797,9 +811,12 @@ pub fn add_member(
     let joiner_id = MemberId::new(new_member_id);
     match engine {
         EngineKind::Chain => {
+            // OPE-543 durable identity: the chain owner authorizes with their durable ACCOUNT (re-derived
+            // from the persisted keystore blob + passphrase), symmetric with the dag.
+            let account = owner_account(owner_keystore, owner_passphrase)?;
             let added = vault::add_member(
                 keyring,
-                owner_passphrase,
+                &account,
                 &TreeId::new(tree_id),
                 &MemberId::new(owner_member_id),
                 min_revision,
@@ -836,7 +853,8 @@ pub fn add_member(
                 member_author_public,
                 member_hpke_public,
             )?;
-            let anchor = DagVault.add_member(&ctx, keyring, owner_passphrase, &joiner)?;
+            let account = owner_account(owner_keystore, owner_passphrase)?;
+            let anchor = DagVault.add_member(&ctx, keyring, &account, &joiner)?;
             let watermark = DagVault.watermark(&anchor)?;
             Ok(AcceptedKeyring {
                 keyring: anchor,
@@ -861,6 +879,7 @@ pub fn remove_member(
     engine: EngineKind,
     keyring: &[u8],
     owner_passphrase: &Passphrase,
+    owner_keystore: &[u8],
     tree_id: &[u8],
     owner_member_id: &str,
     replica_id: &[u8],
@@ -869,9 +888,10 @@ pub fn remove_member(
 ) -> Result<AcceptedKeyring, VaultError> {
     match engine {
         EngineKind::Chain => {
+            let account = owner_account(owner_keystore, owner_passphrase)?;
             let removed = vault::remove_member(
                 keyring,
-                owner_passphrase,
+                &account,
                 &TreeId::new(tree_id),
                 &MemberId::new(owner_member_id),
                 min_revision,
@@ -898,7 +918,8 @@ pub fn remove_member(
                 member_id: &owner,
                 replica_id: &replica,
             };
-            let anchor = DagVault.remove_member(&ctx, keyring, owner_passphrase, remove_member_id)?;
+            let account = owner_account(owner_keystore, owner_passphrase)?;
+            let anchor = DagVault.remove_member(&ctx, keyring, &account, remove_member_id)?;
             let watermark = DagVault.watermark(&anchor)?;
             Ok(AcceptedKeyring {
                 keyring: anchor,
@@ -929,6 +950,7 @@ pub fn change_role(
     engine: EngineKind,
     keyring: &[u8],
     founder_passphrase: &Passphrase,
+    founder_keystore: &[u8],
     tree_id: &[u8],
     founder_member_id: &str,
     replica_id: &[u8],
@@ -946,12 +968,13 @@ pub fn change_role(
             );
             // PROMOTE adds to the signer set; DEMOTE lowers the co-owner to a non-signer role (admin/editor/
             // viewer) — forward-secure via the OPE-421 look-behind. Both return the same `CoOwnerChanged`.
+            let account = owner_account(founder_keystore, founder_passphrase)?;
             let changed = if promote {
-                vault::add_co_owner(keyring, founder_passphrase, &tree, &owner, min_revision, &target)?
+                vault::add_co_owner(keyring, &account, &tree, &owner, min_revision, &target)?
             } else {
                 vault::remove_co_owner(
                     keyring,
-                    founder_passphrase,
+                    &account,
                     &tree,
                     &owner,
                     min_revision,
@@ -979,8 +1002,14 @@ pub fn change_role(
                 member_id: &owner,
                 replica_id: &replica,
             };
-            let anchor =
-                DagVault.change_role(&ctx, keyring, founder_passphrase, target_member_id, parse_keyring_role(new_role)?)?;
+            let account = owner_account(founder_keystore, founder_passphrase)?;
+            let anchor = DagVault.change_role(
+                &ctx,
+                keyring,
+                &account,
+                target_member_id,
+                parse_keyring_role(new_role)?,
+            )?;
             let watermark = DagVault.watermark(&anchor)?;
             Ok(AcceptedKeyring {
                 keyring: anchor,
@@ -1112,8 +1141,9 @@ mod tests {
     /// at the verified head. If this passes, the worker join is just marshalling these calls.
     #[test]
     fn chain_genesis_walk_join_end_to_end() {
-        use crate::vault;
+        use crate::{vault, AccountKeystore};
         use openom_crypto::Passphrase;
+        use openom_keyring_api::derive_member_id;
         use openom_keyring_chain::{keyring_hash, wire::Keyring};
         use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
@@ -1121,14 +1151,30 @@ mod tests {
         let owner = MemberId::new("acct-owner");
         let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
 
-        // Owner provisions the genesis (rev 1); bob mints his member account; owner admits bob (rev 2).
-        let prov = vault::provision(&owner_pass, &tree, &owner, &ReplicaId::new(b"ro".to_vec())).unwrap();
+        // OPE-543 durable identity: the owner IS a durable account. Owner provisions the genesis (rev 1) from
+        // its account; bob mints his member account; owner admits bob (rev 2) authorized by the account.
+        let (owner_ks, _code, _u) = AccountKeystore::create(owner_pass.expose()).unwrap();
+        let owner_ks_bytes = owner_ks.to_bytes().unwrap();
+        let prov = vault::provision(
+            &owner_ks.unlock(owner_pass.expose()).unwrap(),
+            &tree,
+            &owner,
+            &ReplicaId::new(b"ro".to_vec()),
+        )
+        .unwrap();
         let owner_key = prov.did_key.to_public_key(); // the signer bob pins
+        // OPE-543: the owner's on-tree id is SELF-CERTIFYING — `derive_member_id(account key)`, not the caller's
+        // "acct-owner" label — so the owner-path DEK lookups must be keyed by the derived id.
+        let owner_derived = derive_member_id(
+            &owner_ks.unlock(owner_pass.expose()).unwrap().root.identity.verifying_key().to_bytes(),
+        );
         let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
         let bob = vault::provision_member(&bob_pass).unwrap();
+        // The joiner id self-certifies its author key (OPE-543 `Joiner::from_bytes` admission).
+        let bob_id = derive_member_id(&bob.author_public_key);
         let shared = super::add_member(
-            EngineKind::Chain, &prov.keyring, &owner_pass, b"tree-uuid-16byte", "acct-owner", b"ro", 1,
-            "acct-bob", "editor", &bob.author_public_key, &bob.hpke_public_key,
+            EngineKind::Chain, &prov.keyring, &owner_pass, &owner_ks_bytes, b"tree-uuid-16byte", &owner_derived, b"ro", 1,
+            &bob_id, "editor", &bob.author_public_key, &bob.hpke_public_key,
         )
         .unwrap()
         .keyring;
@@ -1152,7 +1198,7 @@ mod tests {
         let unlocked = super::unlock_as_member(
             EngineKind::Chain, &walk.head_keyring, &bob_pass,
             &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-            b"tree-uuid-16byte", "acct-bob", &owner_key, b"rb", walk.revision,
+            b"tree-uuid-16byte", &bob_id, &owner_key, b"rb", walk.revision,
         )
         .unwrap();
         assert!(!unlocked.did_key.is_empty(), "bob unlocks as a member and gets his author did:key");

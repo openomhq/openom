@@ -563,34 +563,41 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     // end-to-end. A signed write from a member of the shared keyring is accepted on a peer's fold; an UNSIGNED
     // write on the same shared tree (same DEK, no author signature) is rejected and surfaced.
     use openom_crypto::Passphrase;
-    use openom_keyring_api::EngineKind;
+    use openom_keyring_api::{derive_member_id, EngineKind};
     use openom_protocol::ids::MemberId;
-    use openom_vault::{sharing, vault, ChainMembershipResolver, MembershipResolver};
+    use openom_vault::{sharing, vault, AccountKeystore, ChainMembershipResolver, MembershipResolver};
 
     const TREE: &[u8] = b"tree-uuid-16byte";
     let tree = TreeId::new(TREE.to_vec());
-    let owner_id = MemberId::new("acct-owner");
     let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
 
-    // 1. Owner provisions a solo chain tree (genesis revision 1).
-    let prov = vault::provision(&owner_pass, &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    // 1. Owner provisions a solo chain tree (genesis revision 1) owned by their durable account (OPE-543).
+    let (owner_ks, _code, _u) = AccountKeystore::create(owner_pass.expose()).unwrap();
+    let owner_ks_bytes = owner_ks.to_bytes().unwrap();
+    // OPE-543: the owner's on-tree id is SELF-CERTIFYING — the account keystore's derived `member_id`, so the
+    // owner-path chain DEK lookups (unlock below) are keyed by it, not the "acct-owner" label.
+    let owner_id = MemberId::new(owner_ks.member_id.clone());
+    let prov = vault::provision(&owner_ks.unlock(owner_pass.expose()).unwrap(), &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
     let owner_author = prov.did_key.to_public_key();
     let rev1 = prov.keyring.clone();
 
-    // 2. Bob mints his member account keys (kdf + author + hpke publics).
+    // 2. Bob mints his member account keys (kdf + author + hpke publics); his id self-certifies his key.
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
+    let bob_id = derive_member_id(&bob.author_public_key);
 
     // 3. Owner admits bob (Editor) → a SHARED keyring, revision 2.
     let added = sharing::add_member(
         EngineKind::Chain,
         &rev1,
         &owner_pass,
+        &owner_ks_bytes,
         TREE,
-        "acct-owner",
+        // OPE-543: owner id is SELF-CERTIFYING — the account keystore's derived `member_id`, not "acct-owner".
+        &owner_ks.member_id,
         b"ro",
         1,
-        "acct-bob",
+        &bob_id,
         "editor",
         &bob.author_public_key,
         &bob.hpke_public_key,
@@ -608,7 +615,7 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     let remote = Arc::new(MemoryBlob::new());
 
     // 4. Owner re-unlocks the SHARED keyring → a signing sealer, and writes a signed delta.
-    let ou = vault::unlock(&rev2, &owner_pass, &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    let ou = vault::unlock(&rev2, owner_ks.unlock(owner_pass.expose()).unwrap(), &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
     let mut owner = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
     owner.set_membership(resolver()).unwrap();
     owner.tree_mut().assert_anchor("pSigned", PERSON, 1).unwrap();
@@ -618,7 +625,7 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     // 5. THE FORGERY: unlock the pre-share genesis (rev 1) on a DISTINCT replica → a sealer with the shared
     //    DEK that does NOT sign (solo era). Its write is unsigned with an empty governing_ref — a backdate
     //    forgery that, on a shared tree, must be rejected.
-    let fu = vault::unlock(&rev1, &owner_pass, &tree, &owner_id, &ReplicaId::new(b"rf".to_vec())).unwrap();
+    let fu = vault::unlock(&rev1, owner_ks.unlock(owner_pass.expose()).unwrap(), &tree, &owner_id, &ReplicaId::new(b"rf".to_vec())).unwrap();
     let mut forger = AppCore::new(fu.did_key.into_string(), fu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rf");
     forger.tree_mut().assert_anchor("pForged", PERSON, 2).unwrap();
     forger.commit().unwrap();
@@ -631,7 +638,7 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
         &bob_pass,
         &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
         TREE,
-        "acct-bob",
+        &bob_id,
         &owner_author,
         b"rb",
         2,
@@ -660,28 +667,35 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
     let tree = TreeId::new(TREE.to_vec());
     let owner_id = MemberId::new("acct-owner");
     let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
+    let owner_ks = owner_account(&owner_pass);
     let ro = ReplicaId::new(b"ro".to_vec());
 
-    // 1. Owner provisions a solo dag tree.
+    // 1. Owner provisions a solo dag tree from their durable account identity.
     let prov = DagVault
-        .provision(&VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro }, &owner_pass)
+        .provision(
+            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro },
+            &owner_pass,
+            Some(acct(&owner_ks, &owner_pass)),
+        )
         .unwrap();
     let solo = prov.anchor.clone();
 
-    // 2. Bob's member account keys.
+    // 2. Bob's member account keys; his member id self-certifies his author key (OPE-543).
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
+    let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
 
     // 3. Owner admits bob (Editor) → a shared anchor (dag ignores min_revision).
     let added = sharing::add_member(
         EngineKind::Dag,
         &solo,
         &owner_pass,
+        &owner_ks.to_bytes().unwrap(),
         TREE,
         "acct-owner",
         b"ro",
         0,
-        "acct-bob",
+        &bob_id,
         "editor",
         &bob.author_public_key,
         &bob.hpke_public_key,
@@ -696,7 +710,12 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
 
     // 4. Owner re-unlocks the shared anchor → a signing sealer, and writes a signed delta.
     let ou = DagVault
-        .unlock(&VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro }, &shared, &owner_pass)
+        .unlock(
+            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro },
+            &shared,
+            &owner_pass,
+            Some(acct(&owner_ks, &owner_pass)),
+        )
         .unwrap();
     let mut owner = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
     owner.set_membership(resolver()).unwrap();
@@ -708,7 +727,12 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
     //    shared DEK; its write is unsigned/unattributed and must be rejected on the shared tree.
     let rf = ReplicaId::new(b"rf".to_vec());
     let fu = DagVault
-        .unlock(&VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &rf }, &solo, &owner_pass)
+        .unlock(
+            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &rf },
+            &solo,
+            &owner_pass,
+            Some(acct(&owner_ks, &owner_pass)),
+        )
         .unwrap();
     let mut forger = AppCore::new(fu.did_key.into_string(), fu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rf");
     forger.tree_mut().assert_anchor("pForged", PERSON, 2).unwrap();
@@ -722,7 +746,7 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
         &bob_pass,
         &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
         TREE,
-        "acct-bob",
+        &bob_id,
         &[],
         b"rb",
         0,
@@ -758,11 +782,13 @@ fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
 
     // Provision, share (add bob as Maintainer — the role that commits deltas directly), bob writes a signed
     // entry.
-    let solo = DagVault.provision(&ctx_ro, &owner_pass).unwrap().anchor;
+    let owner_ks = owner_account(&owner_pass);
+    let solo = DagVault.provision(&ctx_ro, &owner_pass, Some(acct(&owner_ks, &owner_pass))).unwrap().anchor;
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
+    let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
     let shared = sharing::add_member(
-        EngineKind::Dag, &solo, &owner_pass, TREE, "acct-owner", b"ro", 0, "acct-bob", "maintainer",
+        EngineKind::Dag, &solo, &owner_pass, &owner_ks.to_bytes().unwrap(), TREE, "acct-owner", b"ro", 0, &bob_id, "maintainer",
         &bob.author_public_key, &bob.hpke_public_key,
     )
     .unwrap()
@@ -771,7 +797,7 @@ fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
     let remote = Arc::new(MemoryBlob::new());
     let bu = sharing::unlock_as_member(
         EngineKind::Dag, &shared, &bob_pass, &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-        TREE, "acct-bob", &[], b"rb", 0,
+        TREE, &bob_id, &[], b"rb", 0,
     )
     .unwrap();
     let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
@@ -780,20 +806,20 @@ fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
     push(&bob_core, &remote);
 
     // The owner opens the shared tree, pulls + accepts bob's entry (bob is a current member), then removes bob.
-    let ou = DagVault.unlock(&ctx_ro, &shared, &owner_pass).unwrap();
+    let ou = DagVault.unlock(&ctx_ro, &shared, &owner_pass, Some(acct(&owner_ks, &owner_pass))).unwrap();
     let mut owner = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
     owner.set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap()).unwrap();
     pull(&mut owner, &remote);
     assert!(live_ids(&owner).contains("pBob"), "owner accepted bob's entry while bob was a member");
 
-    let rotated = DagVault.remove_member(&ctx_ro, &shared, &owner_pass, "acct-bob").unwrap();
+    let rotated = DagVault.remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id).unwrap();
     owner.set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()).unwrap();
 
     // A resolver over the ROTATED anchor (bob is no longer a member).
     let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
 
     // Control: a fresh replica pulls the remote BEFORE the cover exists → bob's now-unattributed entry drops.
-    let mut control = fresh_owner_replica(&rotated, &owner_pass, &tree, b"r1");
+    let mut control = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r1");
     control.set_membership(resolver()).unwrap();
     pull(&mut control, &remote);
     assert!(!live_ids(&control).contains("pBob"), "without a cover, a removed member's entry is dropped");
@@ -804,18 +830,18 @@ fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
     push(&owner, &remote);
 
     // Healed: a fresh replica pulls the remote WITH the cover → the cover folds first and blesses bob's entry.
-    let mut healed = fresh_owner_replica(&rotated, &owner_pass, &tree, b"r2");
+    let mut healed = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r2");
     healed.set_membership(resolver()).unwrap();
     pull(&mut healed, &remote);
     assert!(live_ids(&healed).contains("pBob"), "the cover lets the removed member's history verify");
     assert_eq!(healed.anomalies(), 0, "nothing is rejected — the cover is honored, and it is not a forgery");
     // The cover itself is projection-inert: it is not a claim.
-    assert!(!live_ids(&healed).contains("acct-bob"));
+    assert!(!live_ids(&healed).contains(bob_id.as_str()));
 
     // Pin P6 — the covered-accept gate distinguishes a legitimately-removed member (whose Add is effective, so
     // their history MAY be covered) from someone who was NEVER a legitimate member (never coverable).
     let r = resolver();
-    assert!(r.ever_member_info("acct-bob").is_some(), "a legitimately added-then-removed member is an ever-member");
+    assert!(r.ever_member_info(&bob_id).is_some(), "a legitimately added-then-removed member is an ever-member");
     assert!(r.ever_member_info("acct-never").is_none(), "someone never admitted is not an ever-member → not coverable");
 }
 
@@ -837,11 +863,13 @@ fn the_writer_authors_a_cover_that_heals_a_removed_members_history() {
     let ctx_ro = VaultContext { tree_id: &tree, member_id: &owner, replica_id: &ro };
 
     // Provision, share (add bob as Maintainer — the role that commits deltas directly); bob writes an entry.
-    let solo = DagVault.provision(&ctx_ro, &owner_pass).unwrap().anchor;
+    let owner_ks = owner_account(&owner_pass);
+    let solo = DagVault.provision(&ctx_ro, &owner_pass, Some(acct(&owner_ks, &owner_pass))).unwrap().anchor;
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
+    let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
     let shared = sharing::add_member(
-        EngineKind::Dag, &solo, &owner_pass, TREE, "acct-owner", b"ro", 0, "acct-bob", "maintainer",
+        EngineKind::Dag, &solo, &owner_pass, &owner_ks.to_bytes().unwrap(), TREE, "acct-owner", b"ro", 0, &bob_id, "maintainer",
         &bob.author_public_key, &bob.hpke_public_key,
     )
     .unwrap()
@@ -850,7 +878,7 @@ fn the_writer_authors_a_cover_that_heals_a_removed_members_history() {
     let remote = Arc::new(MemoryBlob::new());
     let bu = sharing::unlock_as_member(
         EngineKind::Dag, &shared, &bob_pass, &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-        TREE, "acct-bob", &[], b"rb", 0,
+        TREE, &bob_id, &[], b"rb", 0,
     )
     .unwrap();
     let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
@@ -859,14 +887,14 @@ fn the_writer_authors_a_cover_that_heals_a_removed_members_history() {
     push(&bob_core, &remote);
 
     // The OWNER opens the shared tree, pulls + accepts + stores bob's entry (bob is a current member).
-    let ou = DagVault.unlock(&ctx_ro, &shared, &owner_pass).unwrap();
+    let ou = DagVault.unlock(&ctx_ro, &shared, &owner_pass, Some(acct(&owner_ks, &owner_pass))).unwrap();
     let mut owner_core = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
     owner_core.set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap()).unwrap();
     pull(&mut owner_core, &remote);
     assert!(live_ids(&owner_core).contains("pBob"), "owner accepted bob's entry while bob was a member");
 
     // Owner removes bob, refreshes its resolver → bob is no longer current (but is an ever-member).
-    let rotated = DagVault.remove_member(&ctx_ro, &shared, &owner_pass, "acct-bob").unwrap();
+    let rotated = DagVault.remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id).unwrap();
     owner_core.set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()).unwrap();
 
     // THE WRITER: author a cover over bob's (now-removed) entry, then confirm a second sweep is idempotent.
@@ -876,7 +904,7 @@ fn the_writer_authors_a_cover_that_heals_a_removed_members_history() {
 
     // A fresh replica on the rotated anchor honors the authored cover — bob's history verifies.
     let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
-    let mut healed = fresh_owner_replica(&rotated, &owner_pass, &tree, b"r9");
+    let mut healed = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r9");
     healed.set_membership(resolver()).unwrap();
     pull(&mut healed, &remote);
     assert!(live_ids(&healed).contains("pBob"), "the authored cover heals the removed member's history");
@@ -904,7 +932,7 @@ fn delta_hash_by_author(store: &Arc<MemoryBlob>, author: &str) -> Vec<u8> {
 /// tree_id)` — the common prelude for the two below-role self-heal regressions.
 fn shared_then_bob_removed(
     role: &str,
-) -> (Arc<MemoryBlob>, AppCore<MemoryBlob>, Vec<u8>, openom_crypto::Passphrase, TreeId) {
+) -> (Arc<MemoryBlob>, AppCore<MemoryBlob>, Vec<u8>, openom_crypto::Passphrase, TreeId, openom_vault::AccountKeystore, String) {
     use openom_crypto::Passphrase;
     use openom_keyring_api::EngineKind;
     use openom_protocol::ids::MemberId;
@@ -918,11 +946,13 @@ fn shared_then_bob_removed(
     let ro = ReplicaId::new(b"ro".to_vec());
     let ctx_ro = VaultContext { tree_id: &tree, member_id: &owner, replica_id: &ro };
 
-    let solo = DagVault.provision(&ctx_ro, &owner_pass).unwrap().anchor;
+    let owner_ks = owner_account(&owner_pass);
+    let solo = DagVault.provision(&ctx_ro, &owner_pass, Some(acct(&owner_ks, &owner_pass))).unwrap().anchor;
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
+    let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
     let shared = sharing::add_member(
-        EngineKind::Dag, &solo, &owner_pass, TREE, "acct-owner", b"ro", 0, "acct-bob", role,
+        EngineKind::Dag, &solo, &owner_pass, &owner_ks.to_bytes().unwrap(), TREE, "acct-owner", b"ro", 0, &bob_id, role,
         &bob.author_public_key, &bob.hpke_public_key,
     )
     .unwrap()
@@ -931,7 +961,7 @@ fn shared_then_bob_removed(
     let remote = Arc::new(MemoryBlob::new());
     let bu = sharing::unlock_as_member(
         EngineKind::Dag, &shared, &bob_pass, &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-        TREE, "acct-bob", &[], b"rb", 0,
+        TREE, &bob_id, &[], b"rb", 0,
     )
     .unwrap();
     let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
@@ -939,14 +969,14 @@ fn shared_then_bob_removed(
     bob_core.commit().unwrap();
     push(&bob_core, &remote);
 
-    let ou = DagVault.unlock(&ctx_ro, &shared, &owner_pass).unwrap();
+    let ou = DagVault.unlock(&ctx_ro, &shared, &owner_pass, Some(acct(&owner_ks, &owner_pass))).unwrap();
     let mut owner_core = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
     owner_core.set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap()).unwrap();
     pull(&mut owner_core, &remote);
 
-    let rotated = DagVault.remove_member(&ctx_ro, &shared, &owner_pass, "acct-bob").unwrap();
+    let rotated = DagVault.remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id).unwrap();
     owner_core.set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()).unwrap();
-    (remote, owner_core, rotated, owner_pass, tree)
+    (remote, owner_core, rotated, owner_pass, tree, owner_ks, bob_id)
 }
 
 #[test]
@@ -954,7 +984,7 @@ fn a_removed_editors_planted_delta_is_refused_by_the_cover_writer() {
     // H1, writer side: an Editor is below the Maintainer a Delta requires, so their direct delta is §B3-rejected
     // (never folded) — yet it sits in the dumb-mirror store. author_cover must REFUSE to bless it (it covers only
     // what the reader would accept), so a routine removal can't activate a below-role member's planted write.
-    let (_remote, mut owner_core, _rotated, _pass, _tree) = shared_then_bob_removed("editor");
+    let (_remote, mut owner_core, _rotated, _pass, _tree, _owner_ks, _bob_id) = shared_then_bob_removed("editor");
     assert!(!live_ids(&owner_core).contains("pBob"), "an editor's direct delta is role-rejected, never folded");
     assert!(
         !owner_core.author_cover().unwrap(),
@@ -971,15 +1001,15 @@ fn a_compromised_maintainers_cover_cannot_heal_a_removed_editors_delta() {
     use openom_protocol::v1::{CoverBody, CoveredEntry};
     use openom_vault::{resolver_from, MembershipResolver};
 
-    let (remote, mut owner_core, rotated, owner_pass, tree) = shared_then_bob_removed("editor");
+    let (remote, mut owner_core, rotated, owner_pass, tree, owner_ks, bob_id) = shared_then_bob_removed("editor");
 
     // A compromised Maintainer force-covers the editor's plant (author_cover itself would refuse — proven above).
-    let hash = delta_hash_by_author(&remote, "acct-bob");
+    let hash = delta_hash_by_author(&remote, &bob_id);
     owner_core
         .push_raw_cover_for_test(&CoverBody {
             entries: vec![CoveredEntry {
                 ciphertext_hash: hash,
-                author_member_id: "acct-bob".into(),
+                author_member_id: bob_id.clone(),
             }],
         })
         .unwrap();
@@ -987,18 +1017,33 @@ fn a_compromised_maintainers_cover_cannot_heal_a_removed_editors_delta() {
 
     let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
     // Sanity: bob is a genuine ever-member (so the rejection is the ROLE gate, not the P6 ever-member gate).
-    assert!(resolver().ever_member_info("acct-bob").is_some());
+    assert!(resolver().ever_member_info(&bob_id).is_some());
 
-    let mut fresh = fresh_owner_replica(&rotated, &owner_pass, &tree, b"r7");
+    let mut fresh = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r7");
     fresh.set_membership(resolver()).unwrap();
     pull(&mut fresh, &remote);
     assert!(!live_ids(&fresh).contains("pBob"), "the reader rejects a below-role author's entry despite a cover");
     assert!(fresh.anomalies() >= 1, "the forced cover doesn't launder the role check — the plant is still rejected");
 }
 
-/// A fresh owner replica over the rotated dag anchor (a new device: owner unlock + a fresh store/replica).
+/// A test owner's durable ACCOUNT keystore (OPE-542/543 dag owner-as-member), minted from a passphrase. The
+/// derived identity is random-but-stable across `unlock`, so one keystore is the tree's single owner across
+/// provision + every later owner op. `acct` re-derives a fresh `UnlockedAccount` for each op.
+fn owner_account(pass: &openom_crypto::Passphrase) -> openom_vault::AccountKeystore {
+    openom_vault::AccountKeystore::create(pass.expose()).unwrap().0
+}
+fn acct(
+    ks: &openom_vault::AccountKeystore,
+    pass: &openom_crypto::Passphrase,
+) -> openom_vault::UnlockedAccount {
+    ks.unlock(pass.expose()).unwrap()
+}
+
+/// A fresh owner replica over the rotated dag anchor (a new device: owner unlock via the SAME durable account +
+/// a fresh store/replica).
 fn fresh_owner_replica(
     anchor: &[u8],
+    ks: &openom_vault::AccountKeystore,
     pass: &openom_crypto::Passphrase,
     tree: &TreeId,
     replica: &'static [u8],
@@ -1014,6 +1059,7 @@ fn fresh_owner_replica(
             },
             anchor,
             pass,
+            Some(acct(ks, pass)),
         )
         .unwrap();
     AppCore::new(u.did_key.into_string(), u.sealer, Arc::new(MemoryBlob::new()), DOC, replica)
@@ -1037,29 +1083,39 @@ struct SharedTree {
     owner_pass: openom_crypto::Passphrase,
     owner_id: openom_protocol::ids::MemberId,
     owner_author: [u8; 32],
+    /// The owner's durable account keystore blob (OPE-543) — re-unlocked to rebuild a signing owner sealer.
+    owner_ks_bytes: Vec<u8>,
     rev1: Vec<u8>,
     rev2: Vec<u8>,
     bob_kdf: Vec<u8>,
     bob_pass: openom_crypto::Passphrase,
+    /// Bob's self-certifying member id (`derive_member_id(bob author key)`).
+    bob_id: String,
 }
 
 fn shared_owner_and_editor() -> SharedTree {
     use openom_crypto::Passphrase;
-    use openom_keyring_api::EngineKind;
+    use openom_keyring_api::{derive_member_id, EngineKind};
     use openom_protocol::ids::MemberId;
-    use openom_vault::{sharing, vault};
+    use openom_vault::{sharing, vault, AccountKeystore};
 
     let tree = TreeId::new(TREE_BYTES.to_vec());
-    let owner_id = MemberId::new("acct-owner");
     let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
-    let prov = vault::provision(&owner_pass, &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    let (owner_ks, _code, _u) = AccountKeystore::create(owner_pass.expose()).unwrap();
+    let owner_ks_bytes = owner_ks.to_bytes().unwrap();
+    // OPE-543: the owner's on-tree id is SELF-CERTIFYING — the account keystore's derived `member_id`; the
+    // chain owner unlock (`owner_core`) is keyed by it, not the "acct-owner" label.
+    let owner_id = MemberId::new(owner_ks.member_id.clone());
+    let prov = vault::provision(&owner_ks.unlock(owner_pass.expose()).unwrap(), &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
     let owner_author = prov.did_key.to_public_key();
     let rev1 = prov.keyring.clone();
 
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
+    let bob_id = derive_member_id(&bob.author_public_key);
     let added = sharing::add_member(
-        EngineKind::Chain, &rev1, &owner_pass, TREE_BYTES, "acct-owner", b"ro", 1, "acct-bob", "editor",
+        // OPE-543: owner id is SELF-CERTIFYING — the account keystore's derived `member_id`, not "acct-owner".
+        EngineKind::Chain, &rev1, &owner_pass, &owner_ks_bytes, TREE_BYTES, &owner_ks.member_id, b"ro", 1, &bob_id, "editor",
         &bob.author_public_key, &bob.hpke_public_key,
     )
     .unwrap();
@@ -1068,10 +1124,12 @@ fn shared_owner_and_editor() -> SharedTree {
         owner_pass,
         owner_id,
         owner_author,
+        owner_ks_bytes,
         rev1,
         rev2: added.keyring.clone(),
         bob_kdf: keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
         bob_pass,
+        bob_id,
     }
 }
 
@@ -1083,8 +1141,12 @@ fn chain_res(s: &SharedTree) -> Box<dyn MembershipResolver> {
 
 /// The owner's core, re-unlocked on the shared keyring (a signing Maintainer sealer) with membership set.
 fn owner_core(s: &SharedTree) -> AppCore<MemoryBlob> {
+    let account = openom_vault::AccountKeystore::from_bytes(&s.owner_ks_bytes)
+        .unwrap()
+        .unlock(s.owner_pass.expose())
+        .unwrap();
     let ou = openom_vault::vault::unlock(
-        &s.rev2, &s.owner_pass, &s.tree, &s.owner_id, &ReplicaId::new(b"ro".to_vec()),
+        &s.rev2, account, &s.tree, &s.owner_id, &ReplicaId::new(b"ro".to_vec()),
     )
     .unwrap();
     let mut c = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
@@ -1096,7 +1158,7 @@ fn owner_core(s: &SharedTree) -> AppCore<MemoryBlob> {
 fn editor_sealer(s: &SharedTree, replica: &[u8]) -> (String, SealerSet) {
     use openom_keyring_api::EngineKind;
     let bu = openom_vault::sharing::unlock_as_member(
-        EngineKind::Chain, &s.rev2, &s.bob_pass, &s.bob_kdf, TREE_BYTES, "acct-bob", &s.owner_author, replica, 2,
+        EngineKind::Chain, &s.rev2, &s.bob_pass, &s.bob_kdf, TREE_BYTES, &s.bob_id, &s.owner_author, replica, 2,
     )
     .unwrap();
     (bu.did_key, bu.sealer)

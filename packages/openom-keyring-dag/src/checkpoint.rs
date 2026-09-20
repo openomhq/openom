@@ -54,25 +54,36 @@ impl GroupStateView {
 
     /// Rebuild a resolved `GroupState`, restoring the anchor-level `group_id` + `reset_authority` around the
     /// member map. `epoch`/`dek_wraps` are left at their defaults (unused by openom).
-    pub(crate) fn into_state(self, group_id: GroupId, reset_authority: Option<[u8; 32]>) -> KeyringState {
+    ///
+    /// OPE-543 (A2): checkpoint adopt is an unguarded ADMISSION path — `into_state` builds `MemberState`s
+    /// from wire DTOs, so a fabricated checkpoint could seed a member whose id does not self-certify against
+    /// its carried key (the binding the resolver's Add/Create gate enforces everywhere else). Re-enforce the
+    /// self-cert invariant here: every restored member's `member_id` MUST be `derive_member_id(author key)`,
+    /// else the checkpoint is rejected. Returns `Err(id)` naming the first member that fails to bind.
+    pub(crate) fn into_state(
+        self,
+        group_id: GroupId,
+        reset_authority: Option<[u8; 32]>,
+    ) -> Result<KeyringState, String> {
         let mut state = KeyringState::create(group_id, &[]).with_reset_authority(reset_authority);
-        state.members = self
-            .members
-            .into_iter()
-            .map(|m| {
-                (
-                    m.id,
-                    MemberState {
-                        role: m.role,
-                        member_counter: m.member_counter,
-                        access_counter: m.access_counter,
-                        author_public_key: m.author_public_key,
-                        hpke_public_key: m.hpke_public_key,
-                    },
-                )
-            })
-            .collect();
-        state
+        let mut members = std::collections::HashMap::with_capacity(self.members.len());
+        for m in self.members {
+            if !crate::member_id_binds_key(&m.id, &m.author_public_key) {
+                return Err(m.id);
+            }
+            members.insert(
+                m.id,
+                MemberState {
+                    role: m.role,
+                    member_counter: m.member_counter,
+                    access_counter: m.access_counter,
+                    author_public_key: m.author_public_key,
+                    hpke_public_key: m.hpke_public_key,
+                },
+            );
+        }
+        state.members = members;
+        Ok(state)
     }
 }
 
@@ -260,18 +271,23 @@ mod tests {
         let gid = GroupId::new(b"tree".to_vec());
         let mut state = KeyringState::create(gid.clone(), &[]).with_reset_authority(Some([9u8; 32]));
         // Two members with DISTINCT, non-zero counters — exactly the fields a `MemberInit` re-genesis would
-        // lose. bob's ODD member_counter models a removed-but-present member.
+        // lose. bob's ODD member_counter models a removed-but-present member. OPE-543: `into_state` enforces
+        // the self-cert admission gate, so each member's id MUST bind its carried author key.
+        let alice_key = [1u8; 32];
+        let bob_key = [3u8; 32];
+        let alice = openom_keyring_api::derive_member_id(&alice_key);
+        let bob = openom_keyring_api::derive_member_id(&bob_key);
         state.members.insert(
-            "alice".into(),
-            MemberState { role: KeyringRole(3), member_counter: 4, access_counter: 2, author_public_key: [1u8; 32], hpke_public_key: [2u8; 32] },
+            alice.clone(),
+            MemberState { role: KeyringRole(3), member_counter: 4, access_counter: 2, author_public_key: alice_key, hpke_public_key: [2u8; 32] },
         );
         state.members.insert(
-            "bob".into(),
-            MemberState { role: KeyringRole(1), member_counter: 1, access_counter: 0, author_public_key: [3u8; 32], hpke_public_key: [4u8; 32] },
+            bob.clone(),
+            MemberState { role: KeyringRole(1), member_counter: 1, access_counter: 0, author_public_key: bob_key, hpke_public_key: [4u8; 32] },
         );
 
         let view = GroupStateView::of(&state);
-        let rebuilt = view.clone().into_state(gid.clone(), Some([9u8; 32]));
+        let rebuilt = view.clone().into_state(gid.clone(), Some([9u8; 32])).expect("self-certifying members");
 
         assert_eq!(rebuilt.members, state.members, "members (roles + keys + both counters) round-trip losslessly");
         assert_eq!(rebuilt.reset_authority, state.reset_authority, "reset_authority is restored");

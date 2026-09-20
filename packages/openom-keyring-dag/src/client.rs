@@ -210,8 +210,9 @@ fn mint(
 /// Create a brand-new dag keyring anchor.
 ///
 /// a content-addressed genesis `Create` op naming `founder_id` as
-/// the sole Owner, carrying the opaque `sealing` payload (the vault's epoch-0 + recovery escrow), with the
-/// recovery authority (RVK) pinned.
+/// the sole Owner, carrying the opaque `sealing` payload (the vault's epoch-0 + any owner KDF/escrow), with an
+/// optional recovery authority (RVK) pinned — `None` under OPE-543 owner-as-member (the owner recovers via
+/// their account keystore, not a per-tree recovery root).
 ///
 /// Returns the serialized anchor bytes.
 ///
@@ -223,7 +224,7 @@ pub fn provision_anchor(
     founder_id: &str,
     author_public_key: edsign::VerifyingKey,
     hpke_public_key: keyeo_wrap::X25519PublicKey,
-    reset_authority: [u8; 32],
+    reset_authority: Option<[u8; 32]>,
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
 ) -> Vec<u8> {
@@ -250,7 +251,7 @@ pub fn provision_anchor(
     let anchor = DagAnchor {
         group_id: tree_id.to_vec(),
         genesis: vec![minit_to_dto(&founder)],
-        reset_authority: Some(reset_authority),
+        reset_authority,
         genesis_op_id: op.id,
         ops: vec![encode_op(&op)],
         checkpoint: None,
@@ -325,6 +326,20 @@ pub enum SealingOrigin {
     Other,
 }
 
+/// OPE-543 (A2) self-cert admission for a seeded base: every member's id must be `derive_member_id(author
+/// key)`. Refuses fail-closed (naming the first offender) so a forged binding can't enter the trusted base.
+fn check_genesis_self_cert(members: &[KeyringMemberInit]) -> Result<(), ClientError> {
+    for m in members {
+        if !crate::member_id_binds_key(&m.id, m.author_public_key.as_ref()) {
+            return Err(ClientError::Malformed(format!(
+                "genesis member {} id does not bind its author key (self-cert admission)",
+                m.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve an anchor: rebuild the engine from the pinned config, replay the op closure, and return the
 /// membership view + the effective ops' sealing (in fold order).
 ///
@@ -336,6 +351,10 @@ pub enum SealingOrigin {
 /// # Errors
 /// Returns [`ClientError`] if the anchor is malformed, a stored op is rejected on replay, or history
 /// rolled back below the caller's watermark.
+// A long, linear orchestration (build base → replay → fold sealing → collect ever-members); the OPE-543
+// admission checks nudged it just past the line cap. Kept whole — splitting the single-pass fold would
+// obscure it more than the length costs.
+#[allow(clippy::too_many_lines)]
 pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     let anchor: DagAnchor =
         postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
@@ -350,10 +369,15 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         // Seed the base's recovery authority from the CHECKPOINT (which carries the resolved value at the cut,
         // reflecting any below-cut rotation), NOT the anchor-level genesis pin — otherwise a rotation pruned
         // below the cut would silently revert (OPE-381).
-        let base = cp.state.clone().into_state(
-            keyeo_dag::GroupId::new(anchor.group_id.clone()),
-            cp.reset_authority,
-        );
+        let base = cp
+            .state
+            .clone()
+            .into_state(keyeo_dag::GroupId::new(anchor.group_id.clone()), cp.reset_authority)
+            .map_err(|id| {
+                ClientError::Malformed(format!(
+                    "checkpoint member {id} id does not bind its author key (self-cert admission)"
+                ))
+            })?;
         // Checkpoint sanity (OPE-381): `Signed::verify` proves AUTHORSHIP, not AUTHORITY. On the self-authored
         // local-compaction path — the ONLY path that reaches here today (`merge()` never imports a peer's
         // checkpoint, and `verify_anchor` rejects checkpoint-bearing anchors, H3) — require the checkpoint's
@@ -390,6 +414,9 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         (engine, Some(cp.sealing.clone()), cp.minting_ops_baseline)
     } else {
         let genesis: Vec<KeyringMemberInit> = anchor.genesis.iter().map(dto_to_minit).collect();
+        // OPE-543 (A2): the pinned genesis DTOs are an admission path too — the resolver's Add/Create gate
+        // never runs against them (they seed the trusted base directly), so re-enforce the self-cert binding.
+        check_genesis_self_cert(&genesis)?;
         let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
             .with_reset_authority(anchor.reset_authority);
         (Keyeo::new(base, KeyringAccess, StrongRemove), None, 0)
@@ -1122,7 +1149,6 @@ pub fn append_rotate_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recovery;
 
     fn sk(seed: u8) -> edsign::SigningKey {
         edsign::SigningKey::from_seed(&[seed; 32])
@@ -1136,9 +1162,13 @@ mod tests {
     fn xpk(seed: u8) -> keyeo_wrap::X25519PublicKey {
         keyeo_wrap::X25519PublicKey::from_bytes([seed; 32])
     }
-    fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
+    /// OPE-543: fixture member ids are the self-certifying `uuid8` of their own author key.
+    fn mid(seed: u8) -> String {
+        openom_keyring_api::derive_member_id(&vk(seed))
+    }
+    fn minit(role: KeyringRole, seed: u8) -> KeyringMemberInit {
         KeyringMemberInit {
-            id: id.to_string(),
+            id: mid(seed),
             role,
             author_public_key: vk(seed),
             hpke_public_key: [seed; 32],
@@ -1146,100 +1176,6 @@ mod tests {
     }
 
     /// A privileged op concurrent with a surviving recovery is carve-out-voided — and its SEALING must be
-    /// dropped from the fold, not merely its membership effect. Proves `resolve()` folds over the engine's
-    /// `effective_ops` (topo + carve-out + quorum), never mere op presence. (OPE-285.)
-    #[test]
-    fn a_carve_out_voided_ops_sealing_is_dropped() {
-        let founder = minit("founder", KeyringRole::OWNER, 1);
-        let bob = minit("bob", KeyringRole::CO_OWNER, 2);
-        let rvk = recovery::derive_rvk(&[42u8; 32]);
-        let rvk_pub = rvk.verifying_key().to_bytes();
-
-        // Genesis {founder Owner, bob CoOwner}, RVK pinned; carries a genesis sealing.
-        let genesis_op = mint(
-            &keyeo_dag::GroupId::unscoped(),
-            vec![],
-            "founder".to_string(),
-            MembershipAction::Create {
-                initial_members: vec![founder.clone(), bob.clone()],
-            },
-            b"GENESIS-SEALING".to_vec(),
-            &sk(1),
-        );
-        let genesis_id = genesis_op.id;
-
-        // (A) the compromised founder key adds a co-owner (a signer = privileged), concurrent with (B) an
-        // RVK-signed recovery ReFound. Both are children of genesis. Each carries a sealing delta.
-        let thief = mint(
-            &keyeo_dag::GroupId::unscoped(),
-            vec![genesis_id],
-            "founder".to_string(),
-            MembershipAction::Add {
-                member: "mallory".to_string(),
-                role: KeyringRole::CO_OWNER,
-                author_public_key: vk(9),
-                hpke_public_key: [9; 32],
-                member_proof: None,
-            },
-            b"THIEF-SEALING".to_vec(),
-            &sk(1),
-        );
-        let recovery_op = mint(
-            &keyeo_dag::GroupId::unscoped(),
-            vec![genesis_id],
-            "founder".to_string(),
-            MembershipAction::ReFound {
-                member: "founder".to_string(),
-                new_author_public_key: vk(7),
-                new_hpke_public_key: [7; 32],
-                era: 1,
-            },
-            b"RECOVERY-SEALING".to_vec(),
-            &rvk,
-        );
-
-        let anchor = DagAnchor {
-            group_id: Vec::new(),
-            genesis: vec![minit_to_dto(&founder), minit_to_dto(&bob)],
-            reset_authority: Some(rvk_pub),
-            genesis_op_id: genesis_id,
-            ops: vec![
-                encode_op(&genesis_op),
-                encode_op(&thief),
-                encode_op(&recovery_op),
-            ],
-            checkpoint: None,
-        };
-        let resolved = resolve(&postcard::to_allocvec(&anchor).unwrap()).unwrap();
-
-        let has = |needle: &[u8]| {
-            resolved
-                .sealing
-                .iter()
-                .any(|s| s.bytes.as_slice() == needle)
-        };
-        assert!(
-            has(b"GENESIS-SEALING"),
-            "the pinned genesis op always contributes"
-        );
-        assert!(
-            has(b"RECOVERY-SEALING"),
-            "the surviving recovery contributes"
-        );
-        assert!(
-            !has(b"THIEF-SEALING"),
-            "a carve-out-voided op's sealing is dropped, not folded"
-        );
-        assert!(
-            !resolved
-                .members
-                .members
-                .iter()
-                .any(|m| m.member_id == "mallory"),
-            "and the voided op has no membership effect either"
-        );
-    }
-
     /// The watermark is the frontier op-id set, and `check_floor` is causal-descendant containment: an
     /// advanced anchor still satisfies an older floor (the old tip remains an ancestor), while a stale
     /// anchor fails a newer floor (the advanced tip is absent). Empty = no floor; a non-32-multiple = bad.
@@ -1247,10 +1183,10 @@ mod tests {
     fn watermark_advances_and_check_floor_catches_rollback() {
         let a0 = provision_anchor(
             b"tree-1",
-            "founder",
+            &mid(1),
             vpk(1),
             xpk(1),
-            vk(3),
+            Some(vk(3)),
             b"seal".to_vec(),
             &sk(1),
         );
@@ -1276,8 +1212,8 @@ mod tests {
         // Append an Add — an authorized owner adds a co-owner; the frontier moves to the new op.
         let a1 = append_add(
             &a0,
-            "founder",
-            &minit("bob", KeyringRole::CO_OWNER, 2),
+            &mid(1),
+            &minit(KeyringRole::CO_OWNER, 2),
             b"wrap".to_vec(),
             &sk(1),
         )
@@ -1296,8 +1232,8 @@ mod tests {
 
     /// A shared anchor (owner + an added member) with its OOB pin — the join fixture.
     fn shared_anchor_and_pin() -> (Vec<u8>, DagPin) {
-        let a0 = provision_anchor(b"tree-vd", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
-        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
+        let a0 = provision_anchor(b"tree-vd", &mid(1), vpk(1), xpk(1), Some(vk(3)), b"seal".to_vec(), &sk(1));
+        let a1 = append_add(&a0, &mid(1), &minit(KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
             .unwrap();
         let pin = anchor_pin(&a1).unwrap();
         (a1, pin)
@@ -1308,7 +1244,7 @@ mod tests {
         let (anchor, pin) = shared_anchor_and_pin();
         let resolved = verify_anchor(&anchor, b"tree-vd", &pin).unwrap();
         assert!(resolved.has_been_shared, "a shared tree resolves as shared");
-        assert!(resolved.members.members.iter().any(|m| m.member_id == "bob"), "bob is a resolved member");
+        assert!(resolved.members.members.iter().any(|m| m.member_id == mid(2)), "bob is a resolved member");
     }
 
     #[test]
@@ -1330,7 +1266,7 @@ mod tests {
         // Without the DTO<->genesis-op binding, resolve would trust the attacker's key; the H1 check refuses it.
         let (anchor, pin) = shared_anchor_and_pin();
         let mut tampered: DagAnchor = postcard::from_bytes(&anchor).unwrap();
-        tampered.genesis = vec![crate::blob_sync::minit_to_dto(&minit("founder", KeyringRole::OWNER, 99))];
+        tampered.genesis = vec![crate::blob_sync::minit_to_dto(&minit(KeyringRole::OWNER, 99))];
         let bytes = postcard::to_allocvec(&tampered).unwrap();
         assert!(
             verify_anchor(&bytes, b"tree-vd", &pin).is_err(),
@@ -1342,8 +1278,8 @@ mod tests {
     fn verify_anchor_rejects_a_rolled_back_anchor() {
         // H4: pin at the CURRENT (post-add) frontier, then serve the older pre-add anchor. The invite-time
         // freshness floor must reject it — else a server could serve a stale subset (e.g. before a Remove).
-        let a0 = provision_anchor(b"tree-rb", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
-        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
+        let a0 = provision_anchor(b"tree-rb", &mid(1), vpk(1), xpk(1), Some(vk(3)), b"seal".to_vec(), &sk(1));
+        let a1 = append_add(&a0, &mid(1), &minit(KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
             .unwrap();
         let pin = anchor_pin(&a1).unwrap(); // watermark = the post-add frontier
         assert!(verify_anchor(&a1, b"tree-rb", &pin).is_ok(), "the current anchor satisfies its own floor");
@@ -1357,13 +1293,13 @@ mod tests {
     fn accept_remote_anchor_adopts_forward_and_refuses_rollback() {
         // The sync/adopt path: a member on a0 adopts the owner's advanced a1 (forward — ok), but refuses to
         // "adopt" the stale a0 when its floor is already at a1 (a rollback).
-        let a0 = provision_anchor(b"tree-ad", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
-        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
+        let a0 = provision_anchor(b"tree-ad", &mid(1), vpk(1), xpk(1), Some(vk(3)), b"seal".to_vec(), &sk(1));
+        let a1 = append_add(&a0, &mid(1), &minit(KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
             .unwrap();
         let pin = anchor_pin(&a0).unwrap();
         let floor0 = watermark(&a0).unwrap();
         let merged = accept_remote_anchor(&a0, &a1, b"tree-ad", &pin, &floor0).unwrap();
-        assert!(resolve(&merged).unwrap().members.members.iter().any(|m| m.member_id == "bob"), "adopts a1");
+        assert!(resolve(&merged).unwrap().members.members.iter().any(|m| m.member_id == mid(2)), "adopts a1");
         let floor1 = watermark(&a1).unwrap();
         assert!(
             accept_remote_anchor(&a1, &a0, b"tree-ad", &pin, &floor1).is_err(),
@@ -1375,7 +1311,7 @@ mod tests {
     fn merge_drops_a_content_id_relabeled_op() {
         // Defense in depth (review observation): `merge` must never union a content-id-relabeled op from the
         // other anchor — else an UNguarded caller would PERSIST a poisoned op that fails every later resolve().
-        let a0 = provision_anchor(b"tree-mg", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
+        let a0 = provision_anchor(b"tree-mg", &mid(1), vpk(1), xpk(1), Some(vk(3)), b"seal".to_vec(), &sk(1));
         let genesis_id = {
             let a: DagAnchor = postcard::from_bytes(&a0).unwrap();
             a.genesis_op_id
@@ -1384,9 +1320,9 @@ mod tests {
         let mut relabeled = mint(
             &keyeo_dag::GroupId::new(b"tree-mg".to_vec()),
             vec![genesis_id],
-            "founder".to_string(),
+            mid(1),
             MembershipAction::Add {
-                member: "mallory".to_string(),
+                member: mid(9),
                 role: KeyringRole::CO_OWNER,
                 author_public_key: vk(9),
                 hpke_public_key: [9; 32],
@@ -1402,7 +1338,7 @@ mod tests {
         // The relabeled op was dropped at the merge chokepoint: the merged anchor still resolves cleanly and
         // mallory (carried only by the relabeled Add) is not a member.
         let resolved = resolve(&merged).expect("a merge that dropped the relabeled op still resolves");
-        assert!(!resolved.members.members.iter().any(|m| m.member_id == "mallory"));
+        assert!(!resolved.members.members.iter().any(|m| m.member_id == mid(9)));
     }
 
     #[test]
@@ -1410,10 +1346,10 @@ mod tests {
         // Solo genesis: never shared.
         let a0 = provision_anchor(
             b"tree-es",
-            "founder",
+            &mid(1),
             vpk(1),
             xpk(1),
-            vk(3),
+            Some(vk(3)),
             b"seal".to_vec(),
             &sk(1),
         );
@@ -1425,8 +1361,8 @@ mod tests {
         // Admit a member → shared.
         let a1 = append_add(
             &a0,
-            "founder",
-            &minit("bob", KeyringRole::CO_OWNER, 2),
+            &mid(1),
+            &minit(KeyringRole::CO_OWNER, 2),
             b"wrap".to_vec(),
             &sk(1),
         )
@@ -1437,7 +1373,7 @@ mod tests {
         );
 
         // Remove the member → solo membership again, but has_been_shared stays TRUE (the effective Add persists).
-        let a2 = append_remove(&a1, "founder", "bob", b"reseal".to_vec(), &sk(1)).unwrap();
+        let a2 = append_remove(&a1, &mid(1), &mid(2), b"reseal".to_vec(), &sk(1)).unwrap();
         assert!(
             resolve(&a2).unwrap().has_been_shared,
             "an un-shared-back-to-solo dag still reports has_been_shared (monotonic)"
@@ -1448,51 +1384,49 @@ mod tests {
     fn ever_members_folds_strongest_role_and_every_key_ever_held() {
         // The self-heal covered-accept inputs (OPE-397 role/key gate): `strongest_role` is the MIN over a
         // member's whole role history (a promotion is honored, so a promoted-then-removed member's Maintainer-era
-        // history stays coverable), and `keys_ever_held` unions the admission key with every self-rekey key (so a
-        // rekeyed member's older-key history still verifies). Bob is admitted as EDITOR, promoted to MAINTAINER,
-        // and self-rekeys — then removed. His ever-member record must reflect all of it.
-        let a0 = provision_anchor(b"tree-em", "founder", vpk(1), xpk(1), vk(9), b"g".to_vec(), &sk(1));
-        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::EDITOR, 2), b"w".to_vec(), &sk(1)).unwrap();
+        // history stays coverable), and `keys_ever_held` retains the admission key. Bob is admitted as EDITOR,
+        // promoted to MAINTAINER, then removed. His ever-member record must reflect all of it. (OPE-543: under
+        // durable identity a member's key is immutable on-tree — the old self-rekey `Retarget` rung is gone —
+        // so `keys_ever_held` is exactly the admission key.)
+        let a0 = provision_anchor(b"tree-em", &mid(1), vpk(1), xpk(1), Some(vk(9)), b"g".to_vec(), &sk(1));
+        let a1 = append_add(&a0, &mid(1), &minit(KeyringRole::EDITOR, 2), b"w".to_vec(), &sk(1)).unwrap();
         // Promote bob EDITOR→MAINTAINER (owner-authored ChangeRole — no public append needed, so exercise the
         // private `append` directly rather than add speculative API).
         let a2 = append(
             &a1,
-            "founder",
-            MembershipAction::ChangeRole { member: "bob".to_string(), new_role: KeyringRole::MAINTAINER },
+            &mid(1),
+            MembershipAction::ChangeRole { member: mid(2), new_role: KeyringRole::MAINTAINER },
             b"w".to_vec(),
             &sk(1),
         )
         .unwrap();
-        // Bob self-rekeys (signed by his CURRENT key, seed 2) to a fresh key (seed 7).
-        let a3 = append_retarget(&a2, "bob", vpk(7), xpk(7), b"w".to_vec(), &sk(2)).unwrap();
-        let a4 = append_remove(&a3, "founder", "bob", b"reseal".to_vec(), &sk(1)).unwrap();
+        let a3 = append_remove(&a2, &mid(1), &mid(2), b"reseal".to_vec(), &sk(1)).unwrap();
 
-        let ever = resolve(&a4).unwrap().ever_members;
-        let bob = ever.get("bob").expect("a removed member is still an ever-member");
+        let ever = resolve(&a3).unwrap().ever_members;
+        let bob = ever.get(&mid(2)).expect("a removed member is still an ever-member");
         assert_eq!(
             bob.strongest_role,
             openom_keyring_api::ROLE_MAINTAINER,
             "strongest_role is the MIN over the role history — the promotion is honored"
         );
         assert!(bob.keys_ever_held.contains(&vk(2).to_vec()), "the admission key is retained");
-        assert!(bob.keys_ever_held.contains(&vk(7).to_vec()), "the self-rekey key is retained");
     }
 
     #[test]
     fn compact_computes_a_decision_over_the_rebuilt_engine() {
         let a0 = provision_anchor(
             b"tree-cp",
-            "founder",
+            &mid(1),
             vpk(1),
             xpk(1),
-            vk(3),
+            Some(vk(3)),
             b"g".to_vec(),
             &sk(1),
         );
         let a1 = append_add(
             &a0,
-            "founder",
-            &minit("bob", KeyringRole::CO_OWNER, 2),
+            &mid(1),
+            &minit(KeyringRole::CO_OWNER, 2),
             b"w".to_vec(),
             &sk(1),
         )
@@ -1525,68 +1459,6 @@ mod tests {
             "history below the head frontier is prunable"
         );
     }
-
-    /// F1 (OPE-381): a recovery-authority rotation SURVIVES compaction. After rotating rvk1 → rvk2 and then
-    /// compacting PAST the rotate op, the resolved authority must still be rvk2 (carried in the signed
-    /// checkpoint), not the genesis rvk1 — else the retired code would work again and the new one would not.
-    /// Proven via authorization: on the compacted anchor a `ReFound` signed by rvk2 (the rotated-in authority)
-    /// takes effect, while one signed by rvk1 (the retired genesis authority) does not.
-    #[test]
-    fn a_rotation_survives_compaction() {
-        let rvk1 = recovery::derive_rvk(&[42u8; 32]);
-        let rvk2 = recovery::derive_rvk(&[43u8; 32]);
-        let a0 = provision_anchor(
-            b"tree-cp-rot",
-            "founder",
-            vpk(1),
-            xpk(1),
-            rvk1.verifying_key().to_bytes(),
-            b"g".to_vec(),
-            &sk(1),
-        );
-        // Owner rotates the recovery authority to rvk2 (authorized by the owner's identity key sk(1)).
-        let a1 =
-            append_rotate_recovery(&a0, "founder", rvk2.verifying_key(), b"re".to_vec(), &sk(1)).unwrap();
-        let rotate_tip: [u8; 32] = watermark(&a1).unwrap().try_into().unwrap();
-        // A benign op ABOVE the cut, so the retained frontier is non-empty (later appends parent on it).
-        let a2 = append_reseal(&a1, "founder", b"x".to_vec(), &sk(1)).unwrap();
-        // Compact with the cut AT the rotation: genesis + the rotate op are pruned below it, the reseal is
-        // retained above it. The rotation's effect (reset_authority == rvk2) survives only via the checkpoint.
-        let a3 = compact_to_checkpoint(&a2, &[rotate_tip], None, "founder".into(), &sk(1), |pre| {
-            Ok((pre.to_vec(), 0))
-        })
-        .unwrap();
-
-        let founder_key = |anchor: &[u8]| {
-            resolve(anchor)
-                .unwrap()
-                .members
-                .members
-                .into_iter()
-                .find(|m| m.member_id == "founder")
-                .unwrap()
-                .author_public_key
-        };
-
-        // A ReFound signed by rvk2 (the rotated-in authority) is authorized → founder retargeted: proof that
-        // reset_authority == rvk2 survived the prune.
-        let a4 = append_refound(&a3, "founder", vpk(7), xpk(7), 1, b"rf".to_vec(), &rvk2).unwrap();
-        assert_eq!(
-            founder_key(&a4),
-            vk(7).to_vec(),
-            "the rotated-in authority (rvk2) still governs after compaction"
-        );
-
-        // A ReFound signed by rvk1 (the RETIRED genesis authority) has NO effect — the rotation was not
-        // reverted by compaction.
-        let a5 = append_refound(&a3, "founder", vpk(8), xpk(8), 1, b"rf".to_vec(), &rvk1).unwrap();
-        assert_eq!(
-            founder_key(&a5),
-            vk(1).to_vec(),
-            "the retired genesis authority (rvk1) cannot recover post-compaction"
-        );
-    }
-
     #[test]
     fn dag_pin_round_trips_through_its_encoding() {
         let pin = DagPin {
@@ -1611,10 +1483,10 @@ mod tests {
 
     #[test]
     fn append_change_role_promotes_a_member_and_resolves() {
-        let a0 = provision_anchor(b"tree-1", "founder", vpk(1), xpk(1), [42; 32], b"g".to_vec(), &sk(1));
-        let carol = minit("carol", KeyringRole::EDITOR, 3);
-        let a1 = append_add(&a0, "founder", &carol, Vec::new(), &sk(1)).unwrap();
-        let a2 = append_change_role(&a1, "founder", "carol", KeyringRole::CO_OWNER, &sk(1)).unwrap();
+        let a0 = provision_anchor(b"tree-1", &mid(1), vpk(1), xpk(1), Some([42; 32]), b"g".to_vec(), &sk(1));
+        let carol = minit(KeyringRole::EDITOR, 3);
+        let a1 = append_add(&a0, &mid(1), &carol, Vec::new(), &sk(1)).unwrap();
+        let a2 = append_change_role(&a1, &mid(1), &mid(3), KeyringRole::CO_OWNER, &sk(1)).unwrap();
         // The ChangeRole op must resolve and promote carol into the signer set (a constant/empty return
         // would not decode as an anchor).
         assert_eq!(
@@ -1626,8 +1498,8 @@ mod tests {
 
     #[test]
     fn append_backfill_adds_a_reseal_that_resolves() {
-        let a0 = provision_anchor(b"tree-1", "founder", vpk(1), xpk(1), [42; 32], b"g".to_vec(), &sk(1));
-        let a1 = append_backfill(&a0, "founder", b"BACKFILL".to_vec(), &sk(1)).unwrap();
+        let a0 = provision_anchor(b"tree-1", &mid(1), vpk(1), xpk(1), Some([42; 32]), b"g".to_vec(), &sk(1));
+        let a1 = append_backfill(&a0, &mid(1), b"BACKFILL".to_vec(), &sk(1)).unwrap();
         let resolved = resolve(&a1).unwrap();
         assert!(
             resolved.sealing.iter().any(|s| s.bytes.as_slice() == b"BACKFILL"),
@@ -1643,14 +1515,14 @@ mod tests {
 
     #[test]
     fn compaction_preserves_below_cut_sealing_with_correct_origins() {
-        let a0 = provision_anchor(b"tree-seal", "founder", vpk(1), xpk(1), vk(3), b"GEN".to_vec(), &sk(1));
-        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"ADD".to_vec(), &sk(1)).unwrap();
-        let a2 = append_reseal(&a1, "founder", b"RSL".to_vec(), &sk(1)).unwrap();
-        let a3 = append_remove(&a2, "founder", "bob", b"REM".to_vec(), &sk(1)).unwrap();
+        let a0 = provision_anchor(b"tree-seal", &mid(1), vpk(1), xpk(1), Some(vk(3)), b"GEN".to_vec(), &sk(1));
+        let a1 = append_add(&a0, &mid(1), &minit(KeyringRole::CO_OWNER, 2), b"ADD".to_vec(), &sk(1)).unwrap();
+        let a2 = append_reseal(&a1, &mid(1), b"RSL".to_vec(), &sk(1)).unwrap();
+        let a3 = append_remove(&a2, &mid(1), &mid(2), b"REM".to_vec(), &sk(1)).unwrap();
         let cut: [u8; 32] = watermark(&a3).unwrap().try_into().unwrap();
         // A benign op above the cut so the retained frontier is non-empty.
-        let a4 = append_reseal(&a3, "founder", b"ABOVE".to_vec(), &sk(1)).unwrap();
-        let cp = compact_to_checkpoint(&a4, &[cut], None, "founder".into(), &sk(1), |pre| Ok((pre.to_vec(), 0))).unwrap();
+        let a4 = append_reseal(&a3, &mid(1), b"ABOVE".to_vec(), &sk(1)).unwrap();
+        let cp = compact_to_checkpoint(&a4, &[cut], None, mid(1), &sk(1), |pre| Ok((pre.to_vec(), 0))).unwrap();
         let resolved = resolve(&cp).unwrap();
         let sealing = resolved.checkpoint_sealing.expect("a checkpoint anchor carries preserved sealing");
         let entry = |n: &[u8]| sealing.iter().find(|s| s.bytes.as_slice() == n);
@@ -1664,13 +1536,13 @@ mod tests {
 
     #[test]
     fn a_checkpoint_authored_by_a_non_owner_is_rejected() {
-        let a0 = provision_anchor(b"tree-cp2", "founder", vpk(1), xpk(1), vk(3), b"g".to_vec(), &sk(1));
-        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"w".to_vec(), &sk(1)).unwrap();
+        let a0 = provision_anchor(b"tree-cp2", &mid(1), vpk(1), xpk(1), Some(vk(3)), b"g".to_vec(), &sk(1));
+        let a1 = append_add(&a0, &mid(1), &minit(KeyringRole::CO_OWNER, 2), b"w".to_vec(), &sk(1)).unwrap();
         let cut: [u8; 32] = watermark(&a1).unwrap().try_into().unwrap();
-        let a2 = append_reseal(&a1, "founder", b"x".to_vec(), &sk(1)).unwrap();
+        let a2 = append_reseal(&a1, &mid(1), b"x".to_vec(), &sk(1)).unwrap();
         // bob is a CoOwner (an active signer) but NOT the Owner: a checkpoint he authors must be refused,
         // even though his signature verifies. The author must be the resolved Owner AND its registered key.
-        let cp = compact_to_checkpoint(&a2, &[cut], None, "bob".into(), &sk(2), |pre| Ok((pre.to_vec(), 0))).unwrap();
+        let cp = compact_to_checkpoint(&a2, &[cut], None, mid(2), &sk(2), |pre| Ok((pre.to_vec(), 0))).unwrap();
         assert!(resolve(&cp).is_err(), "a non-Owner-authored checkpoint is rejected");
     }
 
@@ -1678,12 +1550,12 @@ mod tests {
     fn a_removed_genesis_member_is_still_an_ever_member() {
         // A GENESIS member who is later removed is no longer a current member and was never Added, so the
         // only path that keeps them in the ever-member set (self-heal coverage) is the Create arm.
-        let founder = minit("founder", KeyringRole::OWNER, 1);
-        let bob = minit("bob", KeyringRole::CO_OWNER, 2);
+        let founder = minit(KeyringRole::OWNER, 1);
+        let bob = minit(KeyringRole::CO_OWNER, 2);
         let genesis = mint(
             &keyeo_dag::GroupId::unscoped(),
             vec![],
-            "founder".into(),
+            mid(1),
             MembershipAction::Create { initial_members: vec![founder.clone(), bob.clone()] },
             b"g".to_vec(),
             &sk(1),
@@ -1692,8 +1564,8 @@ mod tests {
         let remove = mint(
             &keyeo_dag::GroupId::unscoped(),
             vec![gid],
-            "founder".into(),
-            MembershipAction::Remove { member: "bob".into() },
+            mid(1),
+            MembershipAction::Remove { member: mid(2) },
             b"r".to_vec(),
             &sk(1),
         );
@@ -1708,6 +1580,6 @@ mod tests {
             checkpoint: None,
         };
         let ever = resolve(&postcard::to_allocvec(&anchor).unwrap()).unwrap().ever_members;
-        assert!(ever.contains_key("bob"), "a removed genesis member remains an ever-member");
+        assert!(ever.contains_key(&mid(2)), "a removed genesis member remains an ever-member");
     }
 }

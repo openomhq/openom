@@ -6,11 +6,15 @@
 //! honest DIVERGENCE the decision doc flagged is asserted as such: an unauthorized change is REFUSED by
 //! the chain (it verifies a candidate) but ADMITTED-as-a-no-op by the dag (admit-then-resolve) — the same
 //! EFFECT (no membership change) reached by different mechanisms.
+//!
+//! OPE-543: dag member ids must be the self-certifying `uuid8` of their author key. The chain imposes no
+//! such rule, so to keep the cross-engine comparison honest both sides use the SAME derived ids (via
+//! [`mid`]) — the chain simply carries them as opaque labels.
 
 use keyeo_dag::{MemberInit, MembershipAction};
 use openom_keyring_chain::verifier::ChainVerifier;
 use openom_keyring_dag::verifier::{bootstrap_update, op_update, DagVerifier};
-use openom_keyring_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
+use openom_keyring_dag::{derive_member_id, sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
 use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
 use openom_protocol::v1::MemberRole;
 use openom_keyring_chain::wire::{Keyring, Member};
@@ -30,6 +34,10 @@ fn pk(seed: u8) -> Vec<u8> {
 }
 fn vk(seed: u8) -> [u8; 32] {
     sk(seed).verifying_key().to_bytes()
+}
+/// The self-certifying member id for a seed's author key — used on BOTH engines so the views compare.
+fn mid(seed: u8) -> String {
+    derive_member_id(&vk(seed))
 }
 
 /// The shared contract we compare across engines: the resolved (`member_id`, role) set. Key bytes are
@@ -63,7 +71,7 @@ fn chain_genesis() -> Keyring {
         prev_keyring_hash: vec![],
         // The OWNER-role member is the founder signer (the signer set derives from members, OPE-309).
         members: vec![Member {
-            member_id: "owner".into(),
+            member_id: mid(1),
             role: MEMBER_OWNER,
             author_public_key: pk(1),
             hpke_public_key: vec![9; 32],
@@ -74,7 +82,7 @@ fn chain_genesis() -> Keyring {
             key_id: KeyId::new(vec![0]),
             ordinal: 0,
             dek_commitment: [0u8; 32],
-            wraps: vec![wrap("owner", KeyeoWrapMethod::TAG_RRK_HPKE)],
+            wraps: vec![wrap(&mid(1), KeyeoWrapMethod::TAG_RRK_HPKE)],
         }]),
         ..Default::default()
     };
@@ -84,12 +92,12 @@ fn chain_genesis() -> Keyring {
 /// Add a Maintainer "dave" (seed 4) — a MEMBER but NOT a signer — to a genesis, founder re-signed.
 fn with_maintainer_dave(mut g: Keyring) -> Keyring {
     g.members.push(Member {
-        member_id: "dave".into(),
+        member_id: mid(4),
         role: MemberRole::Admin as i32, // UI: "Maintainer"
         author_public_key: pk(4),
         hpke_public_key: vec![9; 32],
     });
-    push_wrap(&mut g, wrap("dave", KeyeoWrapMethod::TAG_MEMBER_HPKE));
+    push_wrap(&mut g, wrap(&mid(4), KeyeoWrapMethod::TAG_MEMBER_HPKE));
     g.signatures.clear();
     openom_keyring_chain::sign_keyring(&mut g, &sk(1));
     g
@@ -100,12 +108,12 @@ fn chain_add_carol(prior: &Keyring, signer_seed: u8) -> Keyring {
     k.revision = 2;
     k.prev_keyring_hash = openom_keyring_chain::keyring_hash(prior).to_vec();
     k.members.push(Member {
-        member_id: "carol".into(),
+        member_id: mid(3),
         role: MemberRole::Editor as i32,
         author_public_key: pk(3),
         hpke_public_key: vec![9; 32],
     });
-    push_wrap(&mut k, wrap("carol", KeyeoWrapMethod::TAG_MEMBER_HPKE));
+    push_wrap(&mut k, wrap(&mid(3), KeyeoWrapMethod::TAG_MEMBER_HPKE));
     k.signatures.clear();
     openom_keyring_chain::sign_keyring(&mut k, &sk(signer_seed));
     k
@@ -113,9 +121,9 @@ fn chain_add_carol(prior: &Keyring, signer_seed: u8) -> Keyring {
 
 // ── dag construction (the equivalent ops) ──
 
-fn dag_minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
+fn dag_minit(role: KeyringRole, seed: u8) -> KeyringMemberInit {
     MemberInit {
-        id: id.to_string(),
+        id: mid(seed),
         role,
         author_public_key: vk(seed),
         hpke_public_key: [seed; 32],
@@ -126,9 +134,9 @@ fn chain_env(k: &Keyring) -> Vec<u8> {
     MembershipEnvelope::wrap(EngineKind::Chain, k.encode_to_vec()).encode()
 }
 
-fn dag_add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
+fn dag_add(role: KeyringRole, seed: u8) -> KeyringAction {
     MembershipAction::Add {
-        member: member.to_string(),
+        member: mid(seed),
         role,
         author_public_key: vk(seed),
         hpke_public_key: [seed; 32],
@@ -148,15 +156,19 @@ fn both_engines_resolve_the_same_membership_for_equivalent_authorized_ops() {
     let c_next = cv.admit(Some(&c_boot.state), &chain_env(&chain_add_carol(&cg, 1))).unwrap();
 
     // dag
-    let gm = vec![dag_minit("owner", KeyringRole::OWNER, 1)];
-    let gop = sign_op([1; 32], vec![], "owner", MembershipAction::Create { initial_members: gm.clone() }, &sk(1));
+    let gm = vec![dag_minit(KeyringRole::OWNER, 1)];
+    let gop = sign_op([1; 32], vec![], mid(1), MembershipAction::Create { initial_members: gm.clone() }, &sk(1));
     let d_boot = dv.admit(None, &bootstrap_update(&gm, None, &gop)).unwrap();
-    let add = sign_op([2; 32], vec![[1; 32]], "owner", dag_add("carol", KeyringRole::EDITOR, 3), &sk(1));
+    let add = sign_op([2; 32], vec![[1; 32]], mid(1), dag_add(KeyringRole::EDITOR, 3), &sk(1));
     let d_next = dv.admit(Some(&d_boot.state), &op_update(&add)).unwrap();
 
     assert_eq!(semantic(&c_boot.view), semantic(&d_boot.view), "genesis membership agrees");
     assert_eq!(semantic(&c_next.view), semantic(&d_next.view), "post-add membership agrees");
-    assert_eq!(semantic(&c_next.view), vec![("carol".into(), 4), ("owner".into(), 1)]);
+    let mut expected = vec![(mid(3), 4), (mid(1), 1)];
+    expected.sort();
+    let mut got = semantic(&c_next.view);
+    got.sort();
+    assert_eq!(got, expected);
     assert!(c_boot.changed && c_next.changed && d_boot.changed && d_next.changed);
 }
 
@@ -178,12 +190,12 @@ fn both_engines_refuse_a_permanently_unauthorized_change() {
 
     // dag: dave (a member, not a signer) authors Add(carol) — unauthorized at its causal position.
     let gm = vec![
-        dag_minit("owner", KeyringRole::OWNER, 1),
-        dag_minit("dave", KeyringRole::MAINTAINER, 4),
+        dag_minit(KeyringRole::OWNER, 1),
+        dag_minit(KeyringRole::MAINTAINER, 4),
     ];
-    let gop = sign_op([1; 32], vec![], "owner", MembershipAction::Create { initial_members: gm.clone() }, &sk(1));
+    let gop = sign_op([1; 32], vec![], mid(1), MembershipAction::Create { initial_members: gm.clone() }, &sk(1));
     let d_boot = dv.admit(None, &bootstrap_update(&gm, None, &gop)).unwrap();
-    let daves_add = sign_op([2; 32], vec![[1; 32]], "dave", dag_add("carol", KeyringRole::EDITOR, 3), &sk(4));
+    let daves_add = sign_op([2; 32], vec![[1; 32]], mid(4), dag_add(KeyringRole::EDITOR, 3), &sk(4));
     let d_out = dv.admit(Some(&d_boot.state), &op_update(&daves_add));
     assert_eq!(d_out.unwrap_err(), VerifyError::Unauthorized, "dag refuses the unauthorized-at-position op");
 }

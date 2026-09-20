@@ -302,6 +302,17 @@ impl<St: VaultStore> AppCoreHost<St> {
         &self.store
     }
 
+    /// The persisted durable-account keystore blob for `doc` (OPE-542/543), or empty when none is stored — the
+    /// dag (owner-as-member) engine's owner identity source, re-derived per owner-authored op. Empty for the
+    /// chain, which ignores it. Loaded from native custody, never a webview argument.
+    fn keystore_blob(&self, doc: &str) -> Result<Vec<u8>, HostError> {
+        Ok(self
+            .store
+            .load_keystore(doc)
+            .map_err(HostError::Store)?
+            .unwrap_or_default())
+    }
+
     /// This doc's local device store: a `FsBlob` under `data_dir/{doc}`. The `doc` id is validated first so a
     /// webview-supplied value can never traverse out of `data_dir`.
     fn doc_store(&self, doc: &str) -> Result<FsBlob, HostError> {
@@ -445,6 +456,11 @@ impl<St: VaultStore> AppCoreHost<St> {
         self.store
             .commit_keyring(doc, &p.keyring, &p.watermark)
             .map_err(HostError::Store)?;
+        // Persist the durable-account keystore blob (OPE-542/543) so a later unlock/recover/passphrase-change
+        // can re-derive the owner's account identity. Non-empty for the dag (owner-as-member); empty for the chain.
+        self.store
+            .commit_keystore(doc, &p.keystore)
+            .map_err(HostError::Store)?;
         // Retain the genesis revision for the §B3 look-behind (a later rotation must still judge writes made
         // under this revision). Chain-meaningful; a harmless unused blob for the dag.
         self.retain_revision(
@@ -487,6 +503,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             member_id,
             &fresh_replica()?,
             &anchor,
+            &self.keystore_blob(doc)?,
             doc.to_string(),
         )?;
         self.register(doc, u.core);
@@ -531,11 +548,17 @@ impl<St: VaultStore> AppCoreHost<St> {
             member_id,
             &fresh_replica()?,
             &anchor,
+            &self.keystore_blob(doc)?,
             &floor,
             doc.to_string(),
         )?;
         self.store
             .commit_keyring(doc, &r.keyring, &r.watermark)
+            .map_err(HostError::Store)?;
+        // Persist the re-wrapped account keystore blob (dag: recovery re-wrapped it under the new passphrase;
+        // empty for the chain). Written after the keyring so a crash never leaves a keystore ahead of the anchor.
+        self.store
+            .commit_keystore(doc, &r.keystore)
             .map_err(HostError::Store)?;
         self.register(doc, r.core);
         Ok(Recovered {
@@ -579,10 +602,16 @@ impl<St: VaultStore> AppCoreHost<St> {
             member_id,
             &fresh_replica()?,
             &anchor,
+            &self.keystore_blob(doc)?,
             &floor,
         )?;
         self.store
             .commit_keyring(doc, &re.keyring, &re.watermark)
+            .map_err(HostError::Store)?;
+        // Persist the re-wrapped account keystore blob (dag). For the dag this is the ONLY durable change — the
+        // keyring anchor is unchanged; for the chain it is empty and the keyring carries the re-key.
+        self.store
+            .commit_keystore(doc, &re.keystore)
             .map_err(HostError::Store)?;
         Ok(PassphraseChanged { recovery_code: re.recovery_code })
     }
@@ -641,6 +670,9 @@ impl<St: VaultStore> AppCoreHost<St> {
         // Whether THIS add flips solo→shared (read from the OLD keyring, before the rotation) — so the owner's
         // own pre-share history is folded as trusted BEFORE the §B3 gate goes live (OPE-360 §5).
         let first_share = !openom_vault::sharing::keyring_has_been_shared(self.engine, &keyring)?;
+        // The owner's durable-account keystore blob (dag owner-as-member identity source; empty for the chain),
+        // used to authorize the add AND to re-open the owner core below.
+        let owner_keystore = self.keystore_blob(doc)?;
         let floor = openom_vault::sharing::chain_watermark_floor(
             &self.store.watermark(doc).map_err(HostError::Store)?,
         );
@@ -648,6 +680,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             self.engine,
             &keyring,
             owner_passphrase,
+            &owner_keystore,
             tree_id,
             owner_member_id,
             &fresh_replica()?,
@@ -672,6 +705,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             owner_member_id,
             &fresh_replica()?,
             &added.keyring,
+            &owner_keystore,
             doc.to_string(),
         )?;
         let mut new_core = re.core;
@@ -732,6 +766,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             .load_keyring(doc)
             .map_err(HostError::Store)?
             .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let owner_keystore = self.keystore_blob(doc)?;
         let floor = openom_vault::sharing::chain_watermark_floor(
             &self.store.watermark(doc).map_err(HostError::Store)?,
         );
@@ -748,6 +783,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             self.engine,
             &keyring,
             owner_passphrase,
+            &owner_keystore,
             tree_id,
             owner_member_id,
             &fresh_replica()?,
@@ -770,6 +806,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             owner_member_id,
             &fresh_replica()?,
             &removed.keyring,
+            &owner_keystore,
             doc.to_string(),
         )?;
         let mut new_core = re.core;
@@ -832,6 +869,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             self.engine,
             &keyring,
             owner_passphrase,
+            &self.keystore_blob(doc)?,
             tree_id,
             owner_member_id,
             &fresh_replica()?,
@@ -1685,6 +1723,7 @@ mod tests {
     #[derive(Default)]
     struct MemStore {
         rows: Mutex<Rows>,
+        keystores: Mutex<HashMap<String, Vec<u8>>>,
     }
     impl VaultStore for MemStore {
         fn load_keyring(&self, tree_key: &str) -> Result<Option<Vec<u8>>, String> {
@@ -1700,6 +1739,13 @@ mod tests {
                 .insert(tree_key.to_string(), (anchor.to_vec(), watermark.to_vec()));
             Ok(())
         }
+        fn load_keystore(&self, tree_key: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.keystores.lock().unwrap().get(tree_key).cloned())
+        }
+        fn commit_keystore(&self, tree_key: &str, keystore: &[u8]) -> Result<(), String> {
+            self.keystores.lock().unwrap().insert(tree_key.to_string(), keystore.to_vec());
+            Ok(())
+        }
     }
 
     fn temp_dir() -> std::path::PathBuf {
@@ -1713,6 +1759,15 @@ mod tests {
         dir
     }
 
+    /// The owner's SELF-CERTIFYING on-tree `member_id` (OPE-543): `derive_member_id(account key)`, read from the
+    /// persisted durable-account keystore. `provision` derives the owner id from the account key (ignoring the
+    /// caller's label), so the owner-path ops (unlock / recover / membership) must be keyed by this id.
+    fn owner_mid<St: VaultStore>(host: &AppCoreHost<St>, doc: &str) -> String {
+        openom_vault::AccountKeystore::from_bytes(&host.store().load_keystore(doc).unwrap().unwrap())
+            .unwrap()
+            .member_id
+    }
+
     #[test]
     fn provision_persists_the_keyring_natively_and_unlock_reads_it_not_from_the_webview() {
         let dir = temp_dir();
@@ -1723,6 +1778,8 @@ mod tests {
         let p = host.provision("doc-1", &tree_id, "acct-owner", &pass).unwrap();
         assert!(!p.recovery_code.is_empty(), "provision returns a recovery code to show the user");
         assert!(!p.did_key.is_empty(), "and the author did:key");
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host, "doc-1");
         // The keyring is persisted NATIVELY — in this model the webview never holds it.
         assert!(host.store().load_keyring("doc-1").unwrap().is_some(), "keyring persisted natively on provision");
         assert!(host.core("doc-1").is_some(), "the provisioned core is registered");
@@ -1731,12 +1788,12 @@ mod tests {
         // identity. (This is the security boundary: an XSS calling unlock can't substitute a stale/forged
         // keyring, because the host ignores any client-supplied anchor and reads its own; the replica id is
         // host-minted, so the webview can't pin a fork either.)
-        let u = host.unlock("doc-1", &tree_id, "acct-owner", &pass).unwrap();
+        let u = host.unlock("doc-1", &tree_id, &owner, &pass).unwrap();
         assert_eq!(u.did_key, p.did_key, "unlock re-derives the same identity from the native keyring");
 
         // A wrong passphrase is refused.
         assert!(matches!(
-            host.unlock("doc-1", &tree_id, "acct-owner", &Passphrase::new(b"wrong".to_vec())),
+            host.unlock("doc-1", &tree_id, &owner, &Passphrase::new(b"wrong".to_vec())),
             Err(HostError::Vault(_))
         ));
         // A tree the host has no keyring for can't be unlocked.
@@ -1762,13 +1819,15 @@ mod tests {
         let tree_id = [3u8; 16];
 
         host.provision("t", &tree_id, "acct-owner", &pass).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host, "t");
         host.assert_anchor("t", "pAlice", PERSON).unwrap();
         host.commit("t").unwrap();
         host.fold("t").unwrap();
         assert!(host.project("t").unwrap().contains("pAlice"), "the source session projects its own mint");
 
         // Re-open (the durable keyring is read natively, a fresh replica is host-minted) + bootstrap.
-        host.unlock("t", &tree_id, "acct-owner", &pass).unwrap();
+        host.unlock("t", &tree_id, &owner, &pass).unwrap();
         host.bootstrap("t").unwrap();
         assert!(
             host.project("t").unwrap().contains("pAlice"),
@@ -1789,11 +1848,16 @@ mod tests {
         let tree_id = [4u8; 16];
 
         host_a.provision("t", &tree_id, "owner", &pass).unwrap();
-        // Device B: same owner, the keyring distributed to B's native store (B unlocks it natively). Each host
-        // mints its own fresh replica id, so A's and B's cores are distinct peers.
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host_a, "t");
+        // Device B: same owner, the keyring AND the durable account keystore (OPE-543) distributed to B's
+        // native store (B unlocks the owner account + keyring natively). Each host mints its own fresh replica
+        // id, so A's and B's cores are distinct peers.
         let keyring = host_a.store().load_keyring("t").unwrap().unwrap();
+        let keystore = host_a.store().load_keystore("t").unwrap().unwrap();
         host_b.store().commit_keyring("t", &keyring, &[]).unwrap();
-        host_b.unlock("t", &tree_id, "owner", &pass).unwrap();
+        host_b.store().commit_keystore("t", &keystore).unwrap();
+        host_b.unlock("t", &tree_id, &owner, &pass).unwrap();
 
         // A mints, commits, and pushes to the shared remote (empty → all of A's objects are uploads).
         host_a.assert_anchor("t", "pAlice", PERSON).unwrap();
@@ -1813,28 +1877,32 @@ mod tests {
 
     #[test]
     fn recover_re_keys_natively_and_the_new_passphrase_unlocks() {
-        // Recovery loads the stored keyring + watermark from NATIVE custody (never a webview arg), re-keys under
-        // a new passphrase using the provision recovery code, and persists the fresh keyring — so the new
-        // passphrase unlocks and the old one no longer does.
+        // Recovery loads the stored keyring + the durable account keystore from NATIVE custody (never a webview
+        // arg), restores the SAME durable identity via the account recovery code, re-wraps the account keystore
+        // under a new passphrase, and persists it — so the new passphrase unlocks and the old one no longer does.
         let dir = temp_dir();
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
         let tree_id = [9u8; 16];
         let old = Passphrase::new(b"the old passphrase here".to_vec());
         let p = host.provision("t", &tree_id, "owner", &old).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host, "t");
 
         let new = Passphrase::new(b"a brand new passphrase".to_vec());
         let r = host
-            .recover("t", &tree_id, "owner", &RecoveryCode::new(p.recovery_code), &new)
+            .recover("t", &tree_id, &owner, &RecoveryCode::new(p.recovery_code), &new)
             .unwrap();
-        assert!(!r.recovery_code.is_empty(), "recovery rotates the recovery code");
-        assert!(!r.did_key.is_empty(), "and yields the (freshly minted) owner identity");
+        // OPE-543 durable identity: recovery is account-keystore-mediated — no per-tree recovery code, and the
+        // owner identity is RESTORED (same did), not freshly minted.
+        assert!(r.recovery_code.is_empty(), "recovery mints no per-tree recovery code (account-mediated)");
+        assert!(!r.did_key.is_empty(), "and yields the (restored) owner identity");
 
         assert!(
-            host.unlock("t", &tree_id, "owner", &new).is_ok(),
+            host.unlock("t", &tree_id, &owner, &new).is_ok(),
             "the new passphrase unlocks the re-keyed keyring from native custody"
         );
         assert!(
-            host.unlock("t", &tree_id, "owner", &old).is_err(),
+            host.unlock("t", &tree_id, &owner, &old).is_err(),
             "the old passphrase no longer unlocks"
         );
 
@@ -1843,24 +1911,28 @@ mod tests {
 
     #[test]
     fn change_passphrase_re_wraps_natively_and_only_the_new_passphrase_unlocks() {
-        // change-passphrase re-wraps the keyring under a new KEK (the DEK unchanged) and persists it natively —
-        // so the new passphrase unlocks and the old one no longer does, with no re-open of the running core.
+        // change-passphrase re-wraps the durable account keystore under a new passphrase (the tree DEK + anchor
+        // unchanged) and persists it natively — so the new passphrase unlocks and the old one no longer does,
+        // with no re-open of the running core.
         let dir = temp_dir();
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
         let tree_id = [12u8; 16];
         let a = Passphrase::new(b"the first passphrase here".to_vec());
         host.provision("t", &tree_id, "owner", &a).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host, "t");
 
         let b = Passphrase::new(b"the second passphrase now".to_vec());
-        let r = host.change_passphrase("t", &tree_id, "owner", &a, &b).unwrap();
-        assert!(!r.recovery_code.is_empty(), "change-passphrase rotates the recovery code");
+        let r = host.change_passphrase("t", &tree_id, &owner, &a, &b).unwrap();
+        // OPE-543 durable identity: a passphrase change is account-keystore-mediated — no per-tree recovery code.
+        assert!(r.recovery_code.is_empty(), "change-passphrase mints no per-tree recovery code (account-mediated)");
 
         assert!(
-            host.unlock("t", &tree_id, "owner", &b).is_ok(),
+            host.unlock("t", &tree_id, &owner, &b).is_ok(),
             "the new passphrase unlocks the re-wrapped keyring"
         );
         assert!(
-            host.unlock("t", &tree_id, "owner", &a).is_err(),
+            host.unlock("t", &tree_id, &owner, &a).is_err(),
             "the old passphrase no longer unlocks"
         );
 
@@ -1906,18 +1978,20 @@ mod tests {
         let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
         let tree_id = [5u8; 16];
         host.provision("t", &tree_id, "owner", &owner_pass).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host, "t");
 
         // A joiner mints their account OOB; the owner admits them.
         let joiner = host
             .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
             .unwrap();
         let member = MemberToAdd {
-            member_id: "bob".into(),
+            member_id: openom_keyring_api::derive_member_id(&joiner.author_public_key),
             role: "editor".into(),
             author_public_key: joiner.author_public_key,
             hpke_public_key: joiner.hpke_public_key,
         };
-        let added = host.add_member("t", &tree_id, "owner", &owner_pass, &member).unwrap();
+        let added = host.add_member("t", &tree_id, &owner, &owner_pass, &member).unwrap();
         assert!(!added.keyring.is_empty(), "a new keyring revision to publish");
         assert!(
             host.store().load_keyring("t").unwrap().unwrap() == added.keyring,
@@ -1944,24 +2018,27 @@ mod tests {
         let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
         let tree_id = [6u8; 16];
         host.provision("t", &tree_id, "owner", &owner_pass).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host, "t");
 
         // Share the tree, THEN mint (so the write is signed under the shared epoch, not the solo sealer).
         let joiner = host
             .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
             .unwrap();
+        let bob_id = openom_keyring_api::derive_member_id(&joiner.author_public_key);
         let bob = MemberToAdd {
-            member_id: "bob".into(),
+            member_id: bob_id.clone(),
             role: "editor".into(),
             author_public_key: joiner.author_public_key,
             hpke_public_key: joiner.hpke_public_key,
         };
-        let added = host.add_member("t", &tree_id, "owner", &owner_pass, &bob).unwrap();
+        let added = host.add_member("t", &tree_id, &owner, &owner_pass, &bob).unwrap();
         host.assert_anchor("t", "pAlice", PERSON).unwrap();
         host.commit("t").unwrap();
         host.fold("t").unwrap();
 
         // Remove bob: forward-secure rotation + owner re-open under the NEW epoch.
-        let removed = host.remove_member("t", &tree_id, "owner", &owner_pass, "bob").unwrap();
+        let removed = host.remove_member("t", &tree_id, &owner, &owner_pass, &bob_id).unwrap();
         assert!(!removed.keyring.is_empty(), "a rotated keyring revision to publish");
         assert!(removed.keyring != added.keyring, "the removal rotated the keyring to a fresh epoch");
         assert!(
@@ -1988,24 +2065,28 @@ mod tests {
         let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
         let tree_id = [7u8; 16];
         host.provision("t", &tree_id, "owner", &owner_pass).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&host, "t");
         let joiner = host
             .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
             .unwrap();
+        // OPE-543: a member id self-certifies its author key.
+        let bob_id = openom_keyring_api::derive_member_id(&joiner.author_public_key);
         let bob = MemberToAdd {
-            member_id: "bob".into(),
+            member_id: bob_id.clone(),
             role: "editor".into(),
             author_public_key: joiner.author_public_key,
             hpke_public_key: joiner.hpke_public_key,
         };
-        host.add_member("t", &tree_id, "owner", &owner_pass, &bob).unwrap();
+        host.add_member("t", &tree_id, &owner, &owner_pass, &bob).unwrap();
         host.assert_anchor("t", "pAlice", PERSON).unwrap();
         host.commit("t").unwrap();
         host.fold("t").unwrap();
 
         // Promote bob to co-owner, then demote back to editor — both change the keyring but NOT the epoch.
-        let promoted = host.change_role("t", &tree_id, "owner", &owner_pass, "bob", "co-owner").unwrap();
+        let promoted = host.change_role("t", &tree_id, &owner, &owner_pass, &bob_id, "co-owner").unwrap();
         assert!(!promoted.demote, "co-owner is a promote");
-        let demoted = host.change_role("t", &tree_id, "owner", &owner_pass, "bob", "editor").unwrap();
+        let demoted = host.change_role("t", &tree_id, &owner, &owner_pass, &bob_id, "editor").unwrap();
         assert!(demoted.demote, "a non-co-owner role is a demote");
         assert!(demoted.keyring != promoted.keyring, "each role change is a fresh keyring revision");
 
@@ -2033,14 +2114,17 @@ mod tests {
 
         // Bob mints his account on HIS device; the owner admits him as a Maintainer (can commit directly).
         let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        let bob_id = openom_keyring_api::derive_member_id(&bob_acct.author_public_key);
         owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
         let bob_member = MemberToAdd {
-            member_id: "acct-bob".into(),
+            member_id: bob_id.clone(),
             role: "maintainer".into(),
             author_public_key: bob_acct.author_public_key.clone(),
             hpke_public_key: bob_acct.hpke_public_key.clone(),
         };
-        let added = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &bob_member).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let added =
+            owner_host.add_member("t", &tree_id, &owner_mid(&owner_host, "t"), &owner_pass, &bob_member).unwrap();
 
         // The owner publishes the keyring history; bob pulls it as hops (genesis + shared) + the OOB pin (genesis
         // hash). The genesis body is in the owner's native retention (revision 1).
@@ -2057,7 +2141,7 @@ mod tests {
 
         // Bob JOINS on his device (verify walk vs the pin, unlock, establish native custody), then mints + pushes.
         bob_host
-            .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+            .join_as_member("t", &tree_id, &bob_id, &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
             .unwrap();
         bob_host.assert_anchor("t", "pBob", PERSON).unwrap();
         bob_host.commit("t").unwrap();
@@ -2073,10 +2157,10 @@ mod tests {
         );
 
         // Bob can re-open with unlock_as_member (custody-only inputs) + the re-join guard refuses a second join.
-        assert!(bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(), "re-unlock from custody");
+        assert!(bob_host.unlock_as_member("t", &tree_id, &bob_id, &bob_pass).is_ok(), "re-unlock from custody");
         assert!(
             bob_host
-                .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+                .join_as_member("t", &tree_id, &bob_id, &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
                 .is_err(),
             "re-joining an already-joined tree is refused"
         );
@@ -2097,9 +2181,10 @@ mod tests {
 
         // Bob mints his account; the owner (dag) admits him as a Maintainer.
         let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        let bob_id = openom_keyring_api::derive_member_id(&bob_acct.author_public_key);
         owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
         let bob_member = MemberToAdd {
-            member_id: "acct-bob".into(),
+            member_id: bob_id.clone(),
             role: "maintainer".into(),
             author_public_key: bob_acct.author_public_key.clone(),
             hpke_public_key: bob_acct.hpke_public_key.clone(),
@@ -2112,7 +2197,7 @@ mod tests {
         let served = openom_keyring_api::MembershipEnvelope::wrap(EngineKind::Dag, added.keyring.clone()).encode();
         let pin = owner_host.invite_pin("t").unwrap();
         bob_host
-            .join_dag_anchor("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &served, &pin)
+            .join_dag_anchor("t", &tree_id, &bob_id, &bob_pass, &bob_acct.kdf_params, &served, &pin)
             .unwrap();
         assert!(
             bob_host.store().load_keyring("t").unwrap().is_some(),
@@ -2132,10 +2217,10 @@ mod tests {
         );
 
         // Re-open from custody works; a second join is refused by the re-join guard.
-        assert!(bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(), "re-unlock from custody");
+        assert!(bob_host.unlock_as_member("t", &tree_id, &bob_id, &bob_pass).is_ok(), "re-unlock from custody");
         assert!(
             bob_host
-                .join_dag_anchor("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &served, &pin)
+                .join_dag_anchor("t", &tree_id, &bob_id, &bob_pass, &bob_acct.kdf_params, &served, &pin)
                 .is_err(),
             "re-joining an already-joined dag tree is refused"
         );
@@ -2155,14 +2240,17 @@ mod tests {
         let bob_pass = Passphrase::new(b"bob's own passphrase here".to_vec());
 
         let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        let bob_id = openom_keyring_api::derive_member_id(&bob_acct.author_public_key);
         owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
         let bob_member = MemberToAdd {
-            member_id: "acct-bob".into(),
+            member_id: bob_id.clone(),
             role: "maintainer".into(),
             author_public_key: bob_acct.author_public_key.clone(),
             hpke_public_key: bob_acct.hpke_public_key.clone(),
         };
-        let added = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &bob_member).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&owner_host, "t");
+        let added = owner_host.add_member("t", &tree_id, &owner, &owner_pass, &bob_member).unwrap();
         let genesis = owner_host
             .retained_revisions("t")
             .unwrap()
@@ -2174,22 +2262,22 @@ mod tests {
             openom_vault::sharing::frame_keyring_hops(&[genesis.clone(), added.keyring.clone()]);
         let pin = openom_vault::sharing::chain_keyring_pin(&genesis).unwrap();
         bob_host
-            .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+            .join_as_member("t", &tree_id, &bob_id, &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
             .unwrap();
         assert!(
-            bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(),
+            bob_host.unlock_as_member("t", &tree_id, &bob_id, &bob_pass).is_ok(),
             "bob unlocks while he is still a member"
         );
 
         // Owner removes bob (a forward-secure epoch rotation).
-        let removed = owner_host.remove_member("t", &tree_id, "acct-owner", &owner_pass, "acct-bob").unwrap();
+        let removed = owner_host.remove_member("t", &tree_id, &owner, &owner_pass, &bob_id).unwrap();
 
         // Bob accepts the rotated keyring into his custody (as a keyring sync would) and can no longer unlock:
         // his DEK wrap is gone from the fresh epoch, so the member unwrap fails (forward secrecy).
         let bob_wm = bob_host.store().watermark("t").unwrap();
         bob_host.store().commit_keyring("t", &removed.keyring, &bob_wm).unwrap();
         assert!(
-            bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_err(),
+            bob_host.unlock_as_member("t", &tree_id, &bob_id, &bob_pass).is_err(),
             "a removed member cannot unlock the rotated keyring (forward-secure)"
         );
 
@@ -2208,8 +2296,9 @@ mod tests {
         let bob = host
             .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
             .unwrap();
+        let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
         let member = MemberToAdd {
-            member_id: "acct-bob".into(),
+            member_id: bob_id,
             role: "editor".into(),
             author_public_key: bob.author_public_key,
             hpke_public_key: bob.hpke_public_key,
@@ -2217,7 +2306,8 @@ mod tests {
 
         // The per-doc core handle BEFORE the membership op...
         let before = host.core("t").unwrap();
-        host.add_member("t", &tree_id, "acct-owner", &owner_pass, &member).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        host.add_member("t", &tree_id, &owner_mid(&host, "t"), &owner_pass, &member).unwrap();
         let after = host.core("t").unwrap();
         // ...is the SAME Arc afterward: add_member replaced the inner AppCore IN PLACE under the held lock, never
         // inserted a fresh Arc — so a concurrent op that already cloned `before` is serialized against the swap
@@ -2241,14 +2331,17 @@ mod tests {
 
         // Owner + bob joined (bob's anchor = revision 2).
         let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        let bob_id = openom_keyring_api::derive_member_id(&bob_acct.author_public_key);
         owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
         let bob_member = MemberToAdd {
-            member_id: "acct-bob".into(),
+            member_id: bob_id.clone(),
             role: "maintainer".into(),
             author_public_key: bob_acct.author_public_key.clone(),
             hpke_public_key: bob_acct.hpke_public_key.clone(),
         };
-        let rev2 = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &bob_member).unwrap();
+        // OPE-543: the owner's on-tree id is the account keystore's SELF-CERTIFYING `member_id`, not the label.
+        let owner = owner_mid(&owner_host, "t");
+        let rev2 = owner_host.add_member("t", &tree_id, &owner, &owner_pass, &bob_member).unwrap();
         let genesis = owner_host
             .retained_revisions("t")
             .unwrap()
@@ -2260,20 +2353,21 @@ mod tests {
             openom_vault::sharing::frame_keyring_hops(&[genesis.clone(), rev2.keyring.clone()]);
         let pin = openom_vault::sharing::chain_keyring_pin(&genesis).unwrap();
         bob_host
-            .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+            .join_as_member("t", &tree_id, &bob_id, &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
             .unwrap();
 
         // Owner admits carol (revision 3); bob syncs the keyring (the successor hop).
         let carol = owner_host
             .provision_member(&Passphrase::new(b"carol's own passphrase".to_vec()))
             .unwrap();
+        let carol_id = openom_keyring_api::derive_member_id(&carol.author_public_key);
         let carol_member = MemberToAdd {
-            member_id: "acct-carol".into(),
+            member_id: carol_id,
             role: "editor".into(),
             author_public_key: carol.author_public_key,
             hpke_public_key: carol.hpke_public_key,
         };
-        let rev3 = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &carol_member).unwrap();
+        let rev3 = owner_host.add_member("t", &tree_id, &owner, &owner_pass, &carol_member).unwrap();
         let successor = openom_vault::sharing::frame_keyring_hops(std::slice::from_ref(&rev3.keyring));
         bob_host.sync_keyring("t", &tree_id, &successor).unwrap();
 
@@ -2287,7 +2381,7 @@ mod tests {
             "bob retained the new revision for the §B3 look-behind"
         );
         assert!(
-            bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(),
+            bob_host.unlock_as_member("t", &tree_id, &bob_id, &bob_pass).is_ok(),
             "bob still unlocks under the adopted keyring"
         );
 

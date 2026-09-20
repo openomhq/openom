@@ -15,11 +15,7 @@
 //! `openom-crypto`) are openom-coupled BY DESIGN and keep the `openom-` prefix; only the engine layer below
 //! (keyeo / openom-keyring-api / openom-keyring-{chain,dag}) is openom-free.
 
-use openom_crypto::{
-    default_kdf_params, derive_kek, derive_root, generate_recovery_code, generate_salt,
-    parse_recovery_code, recovery_kdf_params, Dek, HpkePrivate, Kek, RecoveryCode, RootKeys,
-    RrkSecret,
-};
+use openom_crypto::{Dek, HpkePrivate, Kek, RrkSecret};
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 // The keyring key-material layer the vault crypto is lifted onto (aliased to avoid the proto WrapMethod /
 // openom KeyId name clashes).
@@ -74,93 +70,44 @@ impl From<&RecoveryEscrow> for RecoveryKey {
     }
 }
 
-// ---- owner secrets + recovery escrow ----
+// ---- owner recovery escrow (OPE-543 durable identity) ----
 
-/// The owner's freshly-minted credential material (provision / passphrase change / recovery-rotation): the
-/// passphrase KEK + KDF (and derived identity/HPKE keys), plus a fresh recovery code + its KEK/KDF. Used to
-/// (re)wrap the recovery root key under the owner's two credentials.
-pub(crate) struct OwnerSecrets {
-    pub(crate) root: RootKeys,
-    pub(crate) pass_kdf: KeyeoKdfParams,
-    pub(crate) recovery_code: RecoveryCode,
-    pub(crate) recovery_kek: Kek,
-    pub(crate) recovery_kdf: KeyeoKdfParams,
+/// A placeholder KDF for a KEK wrap whose KEK is supplied DIRECTLY at open (never re-derived from the wrap's
+/// stored `kdf`) — the durable-account escrow wrap below, mirroring `account_keystore::inner_placeholder_kdf`
+/// and `open_rrk_secret`'s unused-`kdf` convention.
+fn placeholder_kdf() -> KeyeoKdfParams {
+    KeyeoKdfParams { salt: Vec::new(), memory_kib: 0, iterations: 0, parallelism: 0 }
 }
 
-pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<OwnerSecrets, VaultError> {
-    let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
-    let root = derive_root(new_passphrase, &pass_kdf)?;
-    let recovery_code = generate_recovery_code()?;
-    let entropy = parse_recovery_code(&recovery_code)?;
-    let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
-    let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
-    Ok(OwnerSecrets {
-        root,
-        pass_kdf,
-        recovery_code,
-        recovery_kek,
-        recovery_kdf,
-    })
-}
-
-/// Like [`new_owner_secrets`] but REUSING the existing passphrase KDF params (salt), so the derived root
-/// — the founder identity and passphrase KEK — is UNCHANGED. Only the recovery code (and its KEK/salt) is
-/// fresh. Used by `rotate_recovery`, which keeps the founder + passphrase and changes only the recovery
-/// root, so it must not re-found the founder identity the way a passphrase change does.
-pub(crate) fn owner_secrets_reusing_pass_kdf(
-    passphrase: &[u8],
-    pass_kdf: KeyeoKdfParams,
-) -> Result<OwnerSecrets, VaultError> {
-    let root = derive_root(passphrase, &pass_kdf)?;
-    let recovery_code = generate_recovery_code()?;
-    let entropy = parse_recovery_code(&recovery_code)?;
-    let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
-    let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
-    Ok(OwnerSecrets {
-        root,
-        pass_kdf,
-        recovery_code,
-        recovery_kek,
-        recovery_kdf,
-    })
-}
-
-/// Build the founder's [`RecoveryEscrow`]: the RRK private key wrapped under the new passphrase
-/// KEK and the new recovery-code KEK (the only two ways to reach it), bound to the tree-
-/// scoped rrk AAD.
-pub(crate) fn build_recovery_escrow(
+/// Build the owner's [`RecoveryEscrow`] for the DURABLE-IDENTITY chain (OPE-543): the per-tree recovery root
+/// key (RRK) secret wrapped under the owner's STABLE durable-account KEK (`account.root.kek`), which is
+/// unchanged across passphrase changes and restored verbatim by an account recovery — so the owner reaches
+/// every epoch's DEK via the RRK without a per-tree passphrase-derived credential. There is NO per-tree
+/// recovery-code wrap (recovery is account-keystore-mediated now; the tree carries no per-tree code). The RVK
+/// is still derived + pinned (wire/verify continuity), though no credential flow emits a reset that reads it.
+pub(crate) fn build_account_escrow(
     rrk_secret: &RrkSecret,
     rrk_public: &[u8],
     tree_id: &[u8],
     member_id: &str,
-    s: &OwnerSecrets,
+    account_kek: &Kek,
 ) -> Result<RecoveryEscrow, VaultError> {
     let group_id = KeyeoGroupId::new(tree_id.to_vec());
-    let pass = keyeo_kek_wrap(
+    // The RRK secret under the durable-account KEK. Stored in the `Passphrase` KEK slot (the slot the owner
+    // open path reads) — but the KEK is the account's, supplied directly at open, so this slot no longer
+    // holds a per-tree passphrase credential. The placeholder KDF is never re-derived from.
+    let wrap = keyeo_kek_wrap(
         rrk_secret.expose(),
         member_id.to_string(),
         KekKind::Passphrase,
-        &s.root.kek,
-        s.pass_kdf.clone(),
-        &group_id,
-    )?;
-    let rec = keyeo_kek_wrap(
-        rrk_secret.expose(),
-        member_id.to_string(),
-        KekKind::RecoveryCode,
-        &s.recovery_kek,
-        s.recovery_kdf.clone(),
+        account_kek,
+        placeholder_kdf(),
         &group_id,
     )?;
     Ok(RecoveryEscrow {
         public_key: rrk_public.to_vec(),
         member_id: member_id.to_string(),
-        // keyeo's native KEK wraps — the dag persists these directly; the chain marshals them to proto via
-        // `RecoveryKey::from`.
-        wraps: vec![pass, rec],
-        // The Ed25519 recovery verifying key, derived from the RRK secret via the shared
-        // openom_crypto::derive_rvk (so the chain and dag pin an identical RVK). Covered by the keyring
-        // signature; a future reset is verified for continuity + authorization against it.
+        wraps: vec![wrap],
         recovery_verifying_key: openom_crypto::derive_rvk(rrk_secret.expose())
             .verifying_key()
             .to_bytes()
@@ -303,46 +250,6 @@ pub(crate) fn epoch_deks(
             open_epoch_dek(ep, tree_id, founder_id, rrk_secret)
                 .ok()
                 .map(|dek| (ep.key_id.as_bytes().to_vec(), ep.ordinal, dek))
-        })
-        .collect()
-}
-
-/// Re-wrap every epoch's DEK from the OLD recovery root to a NEW one (the RRK-HPKE wrap only; each
-/// member's own HPKE wraps are untouched), returning the updated epochs. Used by `rotate_recovery`: mint
-/// a fresh RRK, then move the founder's cross-epoch access onto it so the old recovery secret no longer
-/// reaches any DEK.
-pub(crate) fn rewrap_epochs_to_new_rrk(
-    epochs: &[KeyeoEpoch<String>],
-    tree_id: &[u8],
-    founder_id: &str,
-    old_rrk: &RrkSecret,
-    new_rrk_public: &[u8],
-) -> Result<Vec<KeyeoEpoch<String>>, VaultError> {
-    epochs
-        .iter()
-        .map(|ep| {
-            let dek = open_epoch_dek(ep, tree_id, founder_id, old_rrk)?;
-            let new_wrap = rrk_wrap_keyeo(
-                new_rrk_public,
-                &dek,
-                tree_id,
-                founder_id,
-                ep.key_id.as_bytes(),
-            )?;
-            let mut wraps: Vec<KeyeoWrap<String>> = ep
-                .wraps
-                .iter()
-                .filter(|w| !matches!(w.method, KeyeoWrapMethod::RrkHpke { .. }))
-                .cloned()
-                .collect();
-            wraps.push(new_wrap);
-            Ok(KeyeoEpoch {
-                key_id: ep.key_id.clone(),
-                ordinal: ep.ordinal,
-                // The DEK is unchanged (only its RRK wrap moves), so the commitment carries over verbatim.
-                dek_commitment: ep.dek_commitment,
-                wraps,
-            })
         })
         .collect()
 }

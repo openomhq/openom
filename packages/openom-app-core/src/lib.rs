@@ -12,7 +12,7 @@ use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
-use openom_vault::{AppVault, Disposition, MembershipResolver};
+use openom_vault::{AccountKeystore, AppVault, Disposition, MembershipResolver};
 // Re-export so the native host (and other rlib consumers) can name the lifecycle API's error type.
 pub use openom_vault::VaultError;
 use sha2::{Digest, Sha256};
@@ -126,6 +126,11 @@ pub struct Provisioned<S: BlobStore> {
     pub core: AppCore<S>,
     pub keyring: Vec<u8>,
     pub recovery_code: String,
+    /// The persisted durable-account keystore blob (OPE-542/543) the host/JS layer stores at rest and hands
+    /// back to [`unlock`] on re-open. Non-empty for the dag (owner-as-member) engine; EMPTY for the chain,
+    /// which keeps its per-tree credential model and needs no account keystore. The Rust boundary only ferries
+    /// these opaque bytes — persistence is the platform layer's job.
+    pub keystore: Vec<u8>,
     pub did_key: String,
     pub watermark: Vec<u8>,
 }
@@ -189,12 +194,19 @@ pub fn provision<S: BlobStore>(
     let (tree, member, replica) =
         (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
     let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
-    let p = AppVault::from_kind(engine).provision(&ctx, passphrase)?;
+    // OPE-542/543 durable identity: BOTH engines' owner IS a durable account keystore the app owns (the chain
+    // reached symmetry in 2c). Create it here, provision from its `UnlockedAccount`, and hand back the persisted
+    // keystore blob + the account recovery code for the platform layer to store + show. The per-tree recovery
+    // code is empty on both engines now.
+    let (ks, account_code, unlocked) = AccountKeystore::create(passphrase.expose())?;
+    let keystore = ks.to_bytes()?;
+    let p = AppVault::from_kind(engine).provision(&ctx, passphrase, Some(unlocked))?;
     let did = p.did_key.into_string();
     Ok(Provisioned {
         core: AppCore::new(did.clone(), p.sealer, Arc::new(store), doc, replica_id),
         keyring: p.anchor,
-        recovery_code: p.recovery_code.into_string(),
+        recovery_code: account_code.into_string(),
+        keystore,
         did_key: did,
         watermark: p.watermark,
     })
@@ -216,12 +228,17 @@ pub fn unlock<S: BlobStore>(
     member_id: &str,
     replica_id: &[u8],
     anchor: &[u8],
+    keystore: &[u8],
     doc: impl Into<String>,
 ) -> Result<Unlocked<S>, VaultError> {
     let (tree, member, replica) =
         (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
     let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
-    let u = AppVault::from_kind(engine).unlock(&ctx, anchor, passphrase)?;
+    // OPE-542/543 durable identity: BOTH engines re-derive the owner's durable ACCOUNT identity from the
+    // persisted keystore blob + passphrase (the blob comes back from the platform layer that stored it at
+    // provision); the vault checks that identity IS the resolved owner.
+    let account = Some(AccountKeystore::from_bytes(keystore)?.unlock(passphrase.expose())?);
+    let u = AppVault::from_kind(engine).unlock(&ctx, anchor, passphrase, account)?;
     let did = u.did_key.into_string();
     Ok(Unlocked {
         core: AppCore::new(did.clone(), u.sealer, Arc::new(store), doc, replica_id),
@@ -240,6 +257,9 @@ pub struct Recovered<S: BlobStore> {
     pub core: AppCore<S>,
     pub keyring: Vec<u8>,
     pub recovery_code: String,
+    /// The re-wrapped account keystore blob to persist (OPE-542/543). Non-empty for the dag (durable identity:
+    /// recovery re-wraps the account under the new passphrase); EMPTY for the chain (no account keystore).
+    pub keystore: Vec<u8>,
     pub did_key: String,
     pub watermark: Vec<u8>,
     pub needs_reseal: bool,
@@ -264,18 +284,24 @@ pub fn recover<S: BlobStore>(
     member_id: &str,
     replica_id: &[u8],
     anchor: &[u8],
+    keystore: &[u8],
     floor: &[u8],
     doc: impl Into<String>,
 ) -> Result<Recovered<S>, VaultError> {
     let (tree, member, replica) =
         (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
     let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
-    let r = AppVault::from_kind(engine).recover(&ctx, anchor, recovery_code, new_passphrase, floor)?;
+    // OPE-542/543: the dag recovers via the ACCOUNT keystore blob (restoring the durable identity + re-wrapping
+    // under the new passphrase); the chain ignores `keystore` and recovers op-based. `r.keystore` is the new
+    // blob the platform layer persists (empty for the chain).
+    let r = AppVault::from_kind(engine)
+        .recover(&ctx, anchor, keystore, recovery_code, new_passphrase, floor)?;
     let did = r.did_key.into_string();
     Ok(Recovered {
         core: AppCore::new(did.clone(), r.sealer, Arc::new(store), doc, replica_id),
         keyring: r.anchor,
         recovery_code: r.recovery_code.into_string(),
+        keystore: r.keystore,
         did_key: did,
         watermark: r.watermark,
         needs_reseal: r.needs_reseal,
@@ -288,6 +314,9 @@ pub fn recover<S: BlobStore>(
 pub struct PassphraseChanged {
     pub keyring: Vec<u8>,
     pub recovery_code: String,
+    /// The re-wrapped account keystore blob to persist (OPE-542/543). Non-empty for the dag (the account
+    /// re-wrapped under the new passphrase); EMPTY for the chain.
+    pub keystore: Vec<u8>,
     pub watermark: Vec<u8>,
 }
 
@@ -306,16 +335,21 @@ pub fn change_passphrase(
     member_id: &str,
     replica_id: &[u8],
     anchor: &[u8],
+    keystore: &[u8],
     floor: &[u8],
 ) -> Result<PassphraseChanged, VaultError> {
     let (tree, member, replica) =
         (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
     let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    // OPE-542/543: the dag re-wraps the ACCOUNT keystore blob under the new passphrase (no on-tree op — the
+    // keyring anchor is unchanged); the chain ignores `keystore` and re-keys the keyring op-based. `re.keystore`
+    // is the new blob to persist (empty for the chain).
     let re = AppVault::from_kind(engine)
-        .change_passphrase(&ctx, anchor, old_passphrase, new_passphrase, floor)?;
+        .change_passphrase(&ctx, anchor, keystore, old_passphrase, new_passphrase, floor)?;
     Ok(PassphraseChanged {
         keyring: re.anchor,
         recovery_code: re.recovery_code.into_string(),
+        keystore: re.keystore,
         watermark: re.watermark,
     })
 }
@@ -413,7 +447,11 @@ mod lifecycle_tests {
         // Own entries fold on commit, so the subsumed frontier now covers this replica — proof the provisioned
         // core is fully wired (engine + sealer + local store), not just constructed.
         assert!(!p.core.subsumed_frontier().is_empty(), "the provisioned core folds its own committed mint");
-        let (did, keyring) = (p.did_key.clone(), p.keyring.clone());
+        let (did, keyring, keystore) = (p.did_key.clone(), p.keyring.clone(), p.keystore.clone());
+        // OPE-543: the owner's on-tree id is SELF-CERTIFYING (`derive_member_id(account key)`), read from the
+        // keystore's plaintext `member_id` — the owner-path DEK lookup on unlock must be keyed by it, not the
+        // "acct-owner" label (which the owner path ignores).
+        let owner_mid = openom_vault::AccountKeystore::from_bytes(&keystore).unwrap().member_id;
         drop(p); // release the FsBlob handle before re-opening the dir
 
         // unlock reconstructs the SAME identity from the keyring anchor over a fresh native store, and
@@ -421,7 +459,7 @@ mod lifecycle_tests {
         // host's persist step — the heads pointer — which is the native-host slice's job, like the wasm
         // worker's import+bootstrap; the e2e reload tests already prove that flow in the wasm topology.)
         let mut u = super::unlock(
-            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, "acct-owner", &replica_id, &keyring, "doc",
+            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, &owner_mid, &replica_id, &keyring, &keystore, "doc",
         )
         .unwrap();
         assert_eq!(u.did_key, did, "same identity across provision + unlock");
@@ -430,7 +468,7 @@ mod lifecycle_tests {
         assert!(
             super::unlock(
                 FsBlob::new(dir.clone()), EngineKind::Chain, &Passphrase::new(b"wrong".to_vec()),
-                &tree_id, "acct-owner", &replica_id, &keyring, "doc",
+                &tree_id, &owner_mid, &replica_id, &keyring, &keystore, "doc",
             )
             .is_err(),
             "a wrong passphrase is refused"

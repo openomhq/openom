@@ -449,9 +449,13 @@ mod tests {
     fn vk(seed: u8) -> [u8; 32] {
         sk(seed).verifying_key().to_bytes()
     }
-    fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
+    /// OPE-543: fixture member ids are the self-certifying `uuid8` of their own author key.
+    fn mid(seed: u8) -> String {
+        openom_keyring_api::derive_member_id(&vk(seed))
+    }
+    fn minit(role: KeyringRole, seed: u8) -> KeyringMemberInit {
         KeyringMemberInit {
-            id: id.to_string(),
+            id: mid(seed),
             role,
             author_public_key: vk(seed),
             hpke_public_key: [seed; 32],
@@ -460,9 +464,9 @@ mod tests {
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
         Keyeo::new(KeyringState::create(keyeo_dag::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
     }
-    fn add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
+    fn add(role: KeyringRole, seed: u8) -> KeyringAction {
         MembershipAction::Add {
-            member: member.to_string(),
+            member: mid(seed),
             role,
             author_public_key: vk(seed),
             hpke_public_key: [seed; 32],
@@ -482,7 +486,7 @@ mod tests {
 
     #[test]
     fn op_codec_roundtrips() {
-        let op = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        let op = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
         let back = decode_op(&encode_op(&op)).unwrap();
         assert_eq!(op.id, back.id);
         assert_eq!(op.parents, back.parents);
@@ -490,16 +494,16 @@ mod tests {
         assert_eq!(op.signature, back.signature);
         assert_eq!(op.author_public_key, back.author_public_key);
         // and it survives a Create (nested member list) + a Propose (recursive target)
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
-        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let gm = vec![minit(KeyringRole::OWNER, 1)];
+        let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         assert_eq!(decode_op(&encode_op(&g)).unwrap().id, g.id);
         let p = sign_op(
             [3; 32],
             vec![[1; 32]],
-            "founder",
+            mid(1),
             MembershipAction::Propose {
                 proposal_id: [7; 32],
-                target: Box::new(add("x", KeyringRole::EDITOR, 9)),
+                target: Box::new(add(KeyringRole::EDITOR, 9)),
             },
             &sk(1),
         );
@@ -508,9 +512,9 @@ mod tests {
         let rf = sign_op(
             [4; 32],
             vec![[1; 32]],
-            "founder",
+            mid(1),
             MembershipAction::ReFound {
-                member: "founder".into(),
+                member: mid(1),
                 new_author_public_key: vk(7),
                 new_hpke_public_key: [7u8; 32],
                 era: 3,
@@ -524,7 +528,7 @@ mod tests {
         let rot = sign_op(
             [5; 32],
             vec![[1; 32]],
-            "founder",
+            mid(1),
             MembershipAction::RotateRecoveryAuthority {
                 new_reset_authority: vk(8),
             },
@@ -540,21 +544,21 @@ mod tests {
     #[test]
     fn two_replicas_converge_over_blob() {
         let store = Arc::new(MemoryBlob::new());
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
+        let gm = vec![minit(KeyringRole::OWNER, 1)];
         let (mut ea, mut eb) = (engine(&gm), engine(&gm));
         let mut sa = KeyringBlobSync::new(store.clone());
         let mut sb = KeyringBlobSync::new(store.clone());
 
-        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
-        let ab = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
         ea.apply(ab.clone()).unwrap();
         sa.push(&ab).unwrap();
 
         sb.pull(&mut eb).unwrap();
         assert_eq!(members(&ea), members(&eb), "B converges to A over the blob store");
-        assert!(members(&eb).contains(&"bob".to_string()));
+        assert!(members(&eb).contains(&mid(2)));
     }
 
     #[test]
@@ -563,24 +567,24 @@ mod tests {
         // (both children of genesis) by DIFFERENT authors → a fork that merges (a node with two tips).
         let store = Arc::new(MemoryBlob::new());
         let gm = vec![
-            minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::CO_OWNER, 2),
-            minit("carol", KeyringRole::CO_OWNER, 3),
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+            minit(KeyringRole::CO_OWNER, 3),
         ];
         let (mut ea, mut eb) = (engine(&gm), engine(&gm));
         let mut sa = KeyringBlobSync::new(store.clone());
         let mut sb = KeyringBlobSync::new(store.clone());
 
-        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         for (e, s) in [(&mut ea, &mut sa), (&mut eb, &mut sb)] {
             e.apply(g.clone()).unwrap();
             s.push(&g).unwrap();
         }
 
-        let dave = sign_op([2; 32], vec![[1; 32]], "bob", add("dave", KeyringRole::EDITOR, 4), &sk(2));
+        let dave = sign_op([2; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 4), &sk(2));
         ea.apply(dave.clone()).unwrap();
         sa.push(&dave).unwrap();
-        let erin = sign_op([3; 32], vec![[1; 32]], "carol", add("erin", KeyringRole::EDITOR, 5), &sk(3));
+        let erin = sign_op([3; 32], vec![[1; 32]], mid(3), add(KeyringRole::EDITOR, 5), &sk(3));
         eb.apply(erin.clone()).unwrap();
         sb.push(&erin).unwrap();
 
@@ -588,7 +592,7 @@ mod tests {
         sb.pull(&mut eb).unwrap(); // B learns dave
         assert_eq!(members(&ea), members(&eb), "both replicas converge after the fork");
         let m = members(&ea);
-        assert!(m.contains(&"dave".to_string()) && m.contains(&"erin".to_string()));
+        assert!(m.contains(&mid(4)) && m.contains(&mid(5)));
     }
 
     #[test]
@@ -597,13 +601,13 @@ mod tests {
         // reports any already-applied op the store no longer serves, and — because pull only ever adds to
         // the engine — the local resolved state is unaffected by the rollback attempt.
         let store = Arc::new(MemoryBlob::new());
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
+        let gm = vec![minit(KeyringRole::OWNER, 1)];
         let (mut ea, mut eb) = (engine(&gm), engine(&gm));
         let mut sa = KeyringBlobSync::new(store.clone());
         let mut sb = KeyringBlobSync::new(store.clone());
 
-        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
-        let ab = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
+        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
         ea.apply(ab.clone()).unwrap();
@@ -612,14 +616,14 @@ mod tests {
         // B pulls both — a complete listing withholds nothing.
         let clean = sb.pull(&mut eb).unwrap();
         assert!(clean.withheld.is_empty(), "a complete listing withholds nothing");
-        assert!(members(&eb).contains(&"bob".to_string()));
+        assert!(members(&eb).contains(&mid(2)));
 
         // The store drops the genesis op — a rollback attempt.
         store.delete(&op_key(&g.id), Precondition::Any).unwrap();
         let rolled = sb.pull(&mut eb).unwrap();
         assert_eq!(rolled.withheld, vec![g.id], "the dropped op is flagged as withheld");
         assert!(
-            members(&eb).contains(&"bob".to_string()),
+            members(&eb).contains(&mid(2)),
             "the local resolved state is unaffected — monotonicity holds, this is detection not loss"
         );
     }
@@ -628,15 +632,15 @@ mod tests {
     fn converges_over_the_local_fs_backend() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(store_blob::FsBlob::new(dir.path()));
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
+        let gm = vec![minit(KeyringRole::OWNER, 1)];
         let (mut ea, mut eb) = (engine(&gm), engine(&gm));
         let mut sa = KeyringBlobSync::new(store.clone());
         let mut sb = KeyringBlobSync::new(store.clone());
 
-        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
-        let ab = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
         ea.apply(ab.clone()).unwrap();
         sa.push(&ab).unwrap();
 
@@ -647,16 +651,16 @@ mod tests {
     #[test]
     fn pull_counts_submitted_ops_and_errors_display() {
         let store = Arc::new(MemoryBlob::new());
-        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
+        let gm = vec![minit(KeyringRole::OWNER, 1)];
         let mut ea = engine(&gm);
         let mut eb = engine(&gm);
         let mut sa = KeyringBlobSync::new(store.clone());
         let mut sb = KeyringBlobSync::new(store.clone());
 
-        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
-        let ab = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
         ea.apply(ab.clone()).unwrap();
         sa.push(&ab).unwrap();
 

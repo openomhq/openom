@@ -21,10 +21,10 @@
 
 use did::DidKey;
 use openom_crypto::{
-    default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair,
-    generate_salt, parse_recovery_code, CryptoError, Dek, HpkeKeypair, HpkePrivate, Passphrase,
-    RecoveryCode, RootKeys, RrkSecret,
+    default_kdf_params, derive_root, generate_dek, generate_hpke_keypair, generate_salt,
+    CryptoError, Dek, HpkeKeypair, HpkePrivate, Passphrase, RecoveryCode, RrkSecret,
 };
+use openom_keyring_api::derive_member_id;
 use openom_keyring_chain::{
     keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey,
 };
@@ -44,10 +44,10 @@ use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 // definition); aliased here to the local names used below.
 use openom_roles::{MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER};
 
+use crate::account_keystore::{AccountKeystore, UnlockedAccount};
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
-    new_owner_secrets, open_rrk_secret, owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk,
-    rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf, validated_kdf, write_epoch_by_ordinal,
+    build_account_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
+    open_rrk_secret, rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal,
 };
 use crate::VaultError;
 use openom_sealer::SealerSet;
@@ -117,54 +117,74 @@ pub struct Unlocked {
     pub write_dek_hash: Vec<u8>,
 }
 
-/// Result of [`recover`]: a freshly re-provisioned keyring + a NEW recovery code (both to
-/// store/show), the sealer set, and the new `revision`.
+/// Result of [`recover`]: the (UNCHANGED) keyring anchor + the SAME durable identity restored, plus the
+/// account keystore re-wrapped under the new passphrase.
+///
+/// OPE-543 durable identity: recovery is ACCOUNT-keystore-mediated — it restores the SAME account identity
+/// the tree already trusts (no on-tree op, no new revision, no fresh owner key). `did_key` is therefore
+/// UNCHANGED and the `keyring` anchor is returned verbatim; the only new durable output is `keystore` (the
+/// account blob re-wrapped under `new_passphrase`) and the per-tree `recovery_code` is EMPTY.
 pub struct Recovered {
     pub keyring: Vec<u8>,
     pub recovery_code: RecoveryCode,
+    /// The account keystore blob re-wrapped under the new passphrase (OPE-542/543) — the sole new durable
+    /// output of a recovery.
+    pub keystore: Vec<u8>,
     pub sealer: SealerSet,
     pub revision: u32,
-    /// The NEW owner's stable author id — a `did:key` over the new public identity key (recovery
-    /// mints a fresh identity, so this differs from the pre-recovery did:key).
+    /// The owner's stable author id — UNCHANGED across recovery (the durable account identity is restored,
+    /// not re-minted).
     pub did_key: DidKey,
-    /// The (unchanged) write epoch's `key_id` + `H(DEK)` to re-watermark (recovery re-wraps the RRK,
-    /// epochs untouched, so the write epoch is the one that was pinned) (OPE-286).
+    /// The (unchanged) write epoch's `key_id` + `H(DEK)` to re-watermark.
     pub write_key_id: Vec<u8>,
     pub write_dek_hash: Vec<u8>,
 }
 
-/// Result of [`change_passphrase`]: the new keyring + a rotated recovery code + new revision.
-/// The DEK is unchanged, so the running sealer keeps working — no re-seal of the tree.
+/// Result of [`change_passphrase`]: the (UNCHANGED) keyring anchor + the account keystore re-wrapped under
+/// the new passphrase.
+///
+/// OPE-543 durable identity: a passphrase change is ACCOUNT-keystore-mediated — the durable identity the
+/// tree trusts is unchanged, so there is NO on-tree op and NO new revision. The running sealer keeps working
+/// (the DEKs are untouched). `keystore` is the account blob re-wrapped under the new passphrase; the per-tree
+/// `recovery_code` is EMPTY (a passphrase change does not rotate the account's recovery code).
 pub struct Rekeyed {
     pub keyring: Vec<u8>,
     pub recovery_code: RecoveryCode,
+    /// The account keystore blob re-wrapped under the new passphrase (OPE-542/543).
+    pub keystore: Vec<u8>,
     pub revision: u32,
-    /// The (unchanged) write epoch's `key_id` + `H(DEK)` to re-watermark (OPE-286).
+    /// The (unchanged) write epoch's `key_id` + `H(DEK)` to re-watermark.
     pub write_key_id: Vec<u8>,
     pub write_dek_hash: Vec<u8>,
 }
 
-/// Create a brand-new encrypted tree.
+/// Create a brand-new encrypted tree, owned by the durable ACCOUNT identity (OPE-543).
 ///
-/// a fresh DEK under epoch 0, a fresh **recovery root
-/// key** (RRK) escrowing that epoch (and every future one), the RRK private key wrapped
-/// under the owner's passphrase and a fresh recovery code, all in a keyring signed by the
-/// passphrase-derived identity (revision 1).
+/// A fresh DEK under epoch 0, a fresh per-tree **recovery root key** (RRK) escrowing that epoch (and every
+/// future one) — the RRK secret wrapped under the owner's STABLE durable-account KEK (`account.root.kek`),
+/// not a per-tree passphrase credential — all in a keyring signed by the ACCOUNT signing identity (revision
+/// 1). The owner reaches epochs via the RRK, so the keyring holds no per-epoch owner wrap.
 ///
-/// The owner reaches epochs via the RRK, so the
-/// keyring holds no per-epoch owner passphrase/recovery wrap.
+/// The owner's identity (author + HPKE keys) is the durable account, so it is stable across passphrase
+/// changes / devices, and there is NO per-tree recovery code (recovery is account-keystore-mediated); the
+/// returned `recovery_code` is EMPTY. The owner's on-tree `member_id` is `derive_member_id(account key)` —
+/// self-certifying, symmetric with the dag — so the caller's `member_id` argument is ignored for the owner
+/// (the account identity is the sole source of the owner id).
 ///
 /// # Errors
 /// Returns [`VaultError`] if key derivation or the initial sealing fails.
 pub fn provision(
-    passphrase: &Passphrase,
+    account: &UnlockedAccount,
     tree_id: &TreeId,
-    member_id: &MemberId,
+    _member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<Provisioned, VaultError> {
-    let passphrase = passphrase.expose();
     let tree_id = tree_id.as_bytes();
-    let member_id = member_id.as_str();
+    // OPE-543: the owner id is SELF-CERTIFYING — derived from the account key (symmetric with the dag), NOT
+    // the caller's label. The account keypair exists only here, so this is derive-and-use, not an assert
+    // (the caller can't know f(account key) before provision mints the account).
+    let member_id_owned = derive_member_id(&account.root.identity.verifying_key().to_bytes());
+    let member_id = member_id_owned.as_str();
     let replica_id = replica_id.as_bytes();
     let dek = generate_dek()?;
     let key_id = generate_salt()?.to_vec(); // 16 CSPRNG bytes as the epoch key id
@@ -174,7 +194,6 @@ pub fn provision(
         public: rrk_public,
     } = generate_hpke_keypair()?;
     let rrk_secret = RrkSecret::from(secret);
-    let secrets = new_owner_secrets(passphrase)?;
 
     let epoch0 = KeyeoEpoch {
         key_id: KeyeoKeyId::new(key_id.clone()),
@@ -188,14 +207,18 @@ pub fn provision(
             &key_id,
         )?],
     };
-    let recovery_key = RecoveryKey::from(&build_recovery_escrow(
+    // The RRK secret is escrowed under the DURABLE-ACCOUNT KEK (stable across passphrase changes, restored
+    // verbatim by an account recovery) — the owner's only way to reach the RRK. No per-tree recovery code.
+    let recovery_key = RecoveryKey::from(&build_account_escrow(
         &rrk_secret,
         &rrk_public,
         tree_id,
         member_id,
-        &secrets,
+        &account.root.kek,
     )?);
-    let author_public = secrets.root.identity.verifying_key().to_bytes();
+    // The owner IS the durable account: its author + HPKE keys come from `account.root`, so the identity is
+    // stable across passphrase changes / devices (OPE-542/543).
+    let author_public = account.root.identity.verifying_key().to_bytes();
     let did_key = did::DidKey::from_public_key(&author_public);
     let identity_pub = author_public.to_vec();
 
@@ -209,7 +232,7 @@ pub fn provision(
             member_id: member_id.to_string(),
             role: OWNER,
             author_public_key: identity_pub,
-            hpke_public_key: secrets.root.hpke_public.to_vec(),
+            hpke_public_key: account.root.hpke_public.to_vec(),
         }],
         signatures: Vec::new(),
         recovery_keys: vec![recovery_key],
@@ -217,7 +240,7 @@ pub fn provision(
         // Governance defaults to founder-or-unanimity (kind 0) at genesis; a later revision may set it.
         ..Default::default()
     };
-    sign_keyring(&mut keyring, &secrets.root.identity);
+    sign_keyring(&mut keyring, &account.root.identity);
 
     let dek_bytes = dek.into_inner();
     let write_dek_hash = dek_hash(&dek_bytes[..]);
@@ -230,7 +253,8 @@ pub fn provision(
     Ok(Provisioned {
         revision: keyring.revision,
         keyring: keyring.encode_to_vec(),
-        recovery_code: secrets.recovery_code,
+        // Recovery is account-keystore-mediated (OPE-543): no per-tree recovery code.
+        recovery_code: RecoveryCode::new(String::new()),
         sealer,
         did_key,
         write_key_id: key_id,
@@ -238,22 +262,22 @@ pub fn provision(
     })
 }
 
-/// Open an existing keyring with a passphrase and build a sealer set spanning every epoch
-/// the owner can reach (via the recovery root key).
+/// Open an existing keyring with the durable ACCOUNT identity (OPE-543) and build a sealer set spanning
+/// every epoch the owner can reach (via the recovery root key).
 ///
-/// Verifies the keyring with the caller's
-/// own derived identity (§4a V1).
+/// The account identity must BE the resolved OWNER member's author key (anti-substitution), and the keyring
+/// must be signed by a current authorized signer (§4a V1). The RRK is reached via the STABLE account KEK.
 ///
 /// # Errors
-/// Returns [`VaultError`] if the passphrase is wrong, the served keyring is malformed or below the watermark, or no epoch is reachable.
+/// Returns [`VaultError`] if the account isn't this tree's owner, the served keyring is malformed, or no
+/// epoch is reachable.
 pub fn unlock(
     keyring_bytes: &[u8],
-    passphrase: &Passphrase,
+    account: UnlockedAccount,
     tree_id: &TreeId,
     member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<Unlocked, VaultError> {
-    let passphrase = passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let replica_id = replica_id.as_bytes();
@@ -262,12 +286,12 @@ pub fn unlock(
         revision,
         rrk_secret,
         keyring,
-        identity,
         ..
-    } = open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
-    // The did:key is over the PUBLIC identity key — capture it before `identity` may move into the
-    // sealer (attributed epochs). encode borrows the verifying key, it doesn't consume `identity`.
-    let did_key = did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
+    } = open_with_account(keyring_bytes, &account, tree_id, member_id)?;
+    // The account identity now moves out (the `open_with_account` borrow has ended); the did:key is captured
+    // before `identity` may move into the sealer (attributed epochs).
+    let root = account.root;
+    let did_key = did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
     let epochs: Vec<(Vec<u8>, openom_crypto::Key32)> =
         epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)
             .into_iter()
@@ -296,7 +320,7 @@ pub fn unlock(
         // The chain encodes the member's watermarked keyring head (`revision`) as the entry's opaque
         // governing_ref; every entry this sealer signs stamps it (OPE-277 GoverningRef).
         let governing_ref = openom_keyring_chain::encode_governing_ref(revision);
-        sealer = sealer.with_author(identity, member_id.to_string(), governing_ref);
+        sealer = sealer.with_author(root.identity, member_id.to_string(), governing_ref);
     }
     Ok(Unlocked {
         sealer,
@@ -307,64 +331,30 @@ pub fn unlock(
     })
 }
 
-/// Authenticate the served epoch set for a recovery and pick the write epoch (OPE-286). First rejects a
-/// repeated `key_id` — a legitimate keyring never reuses one (16 CSPRNG bytes), and a forged same-`key_id`
-/// epoch with an attacker-known DEK would otherwise win `SealerSet`'s first-match routing. Then binds to the
-/// caller's `watermark` by key MATERIAL (`H(DEK)`), never the forgeable public label: a forged epoch hashes
-/// differently and is rejected, a relabel is moot, a truncation makes the pinned epoch absent. An empty
-/// watermark is the stateless-device bootstrap (lost/wiped device; no trusted witness) — the documented
-/// OOB-trust residual, taking the highest ordinal. Returns the write epoch's `(key_id, H(DEK))`.
+/// Recover owner access with the recovery code under `new_passphrase` — ACCOUNT-keystore-mediated (OPE-543
+/// durable identity).
+///
+/// The recovery code restores the SAME durable account identity the tree already trusts
+/// ([`AccountKeystore::unlock_with_recovery`]); we re-wrap the account blob under `new_passphrase` and open
+/// the tree by the NORMAL owner path with that restored identity. There is NO on-tree op: no re-founding, so
+/// the keyring anchor is UNCHANGED, the resolved owner is UNCHANGED, and `did_key` is preserved — recovery
+/// introduces no owner-succession surface and no rollback. Members who pinned the owner keep verifying (the
+/// owner key never changed).
+///
+/// The only new durable output is the re-wrapped account `keystore` blob; the per-tree `recovery_code` is
+/// EMPTY (the account's recovery code is not consumed/rotated by a recovery — the SAME code keeps working).
+/// `watermark` carries the caller's anti-rollback floor (the served keyring is untrusted).
 ///
 /// # Errors
-/// Returns [`VaultError`] if an epoch `key_id` repeats, no epochs are present, or the watermarked write
-/// epoch is absent from the served set.
-fn authenticate_write_epoch(
-    deks: &[(Vec<u8>, u64, Dek)],
-    watermark: &RecoverWatermark<'_>,
-) -> Result<(Vec<u8>, Vec<u8>), VaultError> {
-    let mut seen = std::collections::HashSet::new();
-    for (k, _, _) in deks {
-        if !seen.insert(k.clone()) {
-            return Err(VaultError::BadKeyring("duplicate epoch key_id".into()));
-        }
-    }
-    if watermark.write_key_id.is_empty() && watermark.dek_hash.is_empty() {
-        let (k, _, d) = deks
-            .iter()
-            .max_by_key(|(_, e, _)| *e)
-            .ok_or_else(|| VaultError::BadKeyring("no epochs".into()))?;
-        return Ok((k.clone(), dek_hash(d.expose())));
-    }
-    deks.iter()
-        .find(|(k, _, d)| {
-            k.as_slice() == watermark.write_key_id
-                && dek_hash(d.expose()).as_slice() == watermark.dek_hash
-        })
-        .map(|(k, _, d)| (k.clone(), dek_hash(d.expose())))
-        .ok_or_else(|| VaultError::WatermarkRollback {
-            detail: "the watermarked write epoch (key_id + DEK material) is absent from the served keyring"
-                .into(),
-        })
-}
-
-/// Recover with the recovery code and re-establish owner access under `new_passphrase`,
-/// **preserving** every member, epoch, and the signer set.
-///
-/// The code unwraps the recovery
-/// root key, which reaches every epoch — so this is a single O(1) re-wrap of the RRK under
-/// the new passphrase + a fresh recovery code, not a per-epoch walk. Verification is skipped
-/// (the old identity is unrecoverable) — the recovery wrap's AEAD tag, bound to the trusted
-/// `tree_id`, is the authentication.
-///
-/// No old signature is available, so the new keyring is signed only by the new owner
-/// identity: members who pinned the old founder must **re-verify out-of-band** and re-pin —
-/// the documented owner-succession boundary. `watermark` carries the caller's anti-rollback floor.
-///
-/// # Errors
-/// Returns [`VaultError`] if the recovery code is wrong, the served keyring is malformed or below the
-/// watermark, or no epoch can be re-wrapped.
+/// Returns [`VaultError`] if the recovery code is wrong, the served keyring is malformed / below the
+/// watermark, or the restored account is not this tree's owner.
+// The flat argument list (anchor + keystore + code + new-pass + the three ids + watermark) is the
+// lifecycle/host calling convention shared with `KeyringLifecycle::recover`, not a struct to bundle — the
+// same convention the app-core lifecycle veneer carries the `#[allow]` for.
+#[allow(clippy::too_many_arguments)]
 pub fn recover(
     keyring_bytes: &[u8],
+    keystore: &[u8],
     recovery_code: &RecoveryCode,
     new_passphrase: &Passphrase,
     tree_id: &TreeId,
@@ -373,262 +363,87 @@ pub fn recover(
     watermark: &RecoverWatermark<'_>,
 ) -> Result<Recovered, VaultError> {
     let min_revision = watermark.min_revision;
-    let new_passphrase = new_passphrase.expose();
-    let tree_id = tree_id.as_bytes();
-    let member_id = member_id.as_str();
-    let replica_id = replica_id.as_bytes();
-    let mut keyring = decode_keyring(keyring_bytes)?;
-    if keyring.tree_id != tree_id {
+    let keyring = decode_keyring(keyring_bytes)?;
+    if keyring.tree_id != tree_id.as_bytes() {
         return Err(VaultError::TreeMismatch);
     }
-    // Refuse a rollback BEFORE unwrapping (recovery has no signature to catch it).
+    // Refuse a rolled-back served keyring before doing any work (the anchor is not mutated; this guards the
+    // read). Unlike the pre-543 op-based recover, the served head is signature-verified by the restored
+    // durable identity inside `unlock` below — a forged keyring fails that check.
     if keyring.revision < min_revision {
         return Err(VaultError::RevisionRollback {
             have: min_revision,
             got: keyring.revision,
         });
     }
-    // Pull the founder's recovery escrow (RRK public + the keyeo KEK wraps) out so the keyring can be mutated.
-    let (rrk_public, escrow_wraps) = {
-        let rk = recovery_key_for(&keyring, member_id)?;
-        let wraps = rk
-            .escrow_wraps()
-            .map_err(|_| VaultError::BadKeyring("recovery key material malformed".into()))?;
-        (rk.public_key.clone(), wraps)
-    };
-    let (kdf, rec_nonce, rec_wrapped) = escrow_kek_wrap(&escrow_wraps, KekKind::RecoveryCode)?;
-    let entropy = parse_recovery_code(recovery_code)?; // checksum first — fail fast on a typo
-    let recovery_kek = derive_kek(entropy.as_slice(), &validated_kdf(kdf)?)?;
-    let rrk_secret = open_rrk_secret(
-        &recovery_kek,
-        rec_nonce,
-        rec_wrapped,
-        tree_id,
-        member_id,
-        KekKind::RecoveryCode,
-    )?;
 
-    let new_revision = min_revision
-        .max(keyring.revision)
-        .checked_add(1)
-        .ok_or(VaultError::RevisionOverflow)?;
-    let prev_hash = keyring_hash(&keyring).to_vec();
-    let secrets = new_owner_secrets(new_passphrase)?;
+    // Restore the durable account identity from the keystore via the recovery code (SAME member_id / keys),
+    // then re-wrap it under the new passphrase. Neither touches the tree.
+    let ks = AccountKeystore::from_bytes(keystore)?;
+    let unlocked = ks.unlock_with_recovery(recovery_code)?;
+    let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
 
-    // Re-wrap the RRK under the new passphrase + fresh recovery code (epochs untouched).
-    let new_rk = RecoveryKey::from(&build_recovery_escrow(
-        &rrk_secret,
-        &rrk_public,
-        tree_id,
-        member_id,
-        &secrets,
-    )?);
-    replace_recovery_key(&mut keyring, member_id, new_rk);
-    refounder(&mut keyring, member_id, &secrets.root);
-    keyring.revision = new_revision;
-    keyring.prev_keyring_hash = prev_hash;
-    keyring.signatures.clear();
-    sign_keyring(&mut keyring, &secrets.root.identity);
-    // The RVK co-signs the reset: verify_reset's gate requires a signature by the recovery verifying key
-    // pinned in the prior keyring (proving possession of the RRK secret). The RRK keypair is unchanged
-    // across a recovery (re-wrap, not rotate), so this RVK matches the prior one — continuity holds.
-    sign_keyring(
-        &mut keyring,
-        &openom_crypto::derive_rvk(rrk_secret.expose()),
-    );
-
-    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret);
-    let (write_key_id, write_dek_hash) = authenticate_write_epoch(&deks, watermark)?;
-    let epochs = deks
-        .into_iter()
-        .map(|(k, _e, d)| (k, d.into_inner()))
-        .collect();
-    let sealer = SealerSet::new(
-        TreeId::new(tree_id),
-        ReplicaId::new(replica_id),
-        epochs,
-        KeyId::new(write_key_id.clone()),
-    );
-    let did_key = did::DidKey::from_public_key(&secrets.root.identity.verifying_key().to_bytes());
+    // Open the tree with the restored identity by the ordinary owner path — the anchor is unchanged, so the
+    // resolved owner is exactly this identity (anti-substitution inside `unlock` enforces it).
+    let u = unlock(keyring_bytes, unlocked, tree_id, member_id, replica_id)?;
     Ok(Recovered {
-        keyring: keyring.encode_to_vec(),
-        recovery_code: secrets.recovery_code,
-        sealer,
-        revision: new_revision,
-        did_key,
-        write_key_id,
-        write_dek_hash,
+        keyring: keyring_bytes.to_vec(),
+        recovery_code: RecoveryCode::new(String::new()),
+        keystore: new_ks.to_bytes()?,
+        sealer: u.sealer,
+        revision: u.revision,
+        did_key: u.did_key,
+        write_key_id: u.write_key_id,
+        write_dek_hash: u.write_dek_hash,
     })
 }
 
-/// Change the passphrase: re-wrap the recovery root key under a new passphrase and a fresh
-/// recovery code — a single O(1) operation, since the owner reaches every epoch through the
-/// RRK.
+/// Change the passphrase — ACCOUNT-keystore-mediated (OPE-543 durable identity).
 ///
-/// Members' wraps and every epoch are untouched; the DEKs are unchanged.
-///
-/// On a **shared** tree the owner's identity changes (new passphrase → new key), so the new
-/// keyring is signed by **both** the old and new identity: a member who pinned the old
-/// founder key can still verify it (bridging the transition) while the new founder key it now
-/// names is what future revisions use. The member's client re-pins on seeing the change.
+/// The durable identity the tree trusts is unchanged, so this is purely an
+/// [`AccountKeystore::change_passphrase`] re-wrap of the account blob under the new passphrase. There is NO
+/// on-tree op: the keyring `anchor` and its revision are UNCHANGED and the running sealer keeps working (the
+/// DEKs are untouched). Returns the new keystore blob; the per-tree `recovery_code` is EMPTY (a passphrase
+/// change does not rotate the account's recovery code). `min_revision` is the anti-rollback floor.
 ///
 /// # Errors
-/// Returns [`VaultError`] if the current passphrase is wrong or the keyring is malformed.
+/// Returns [`VaultError`] if the current passphrase is wrong, the keystore is malformed, or the served
+/// keyring is below the floor / for a different tree.
 pub fn change_passphrase(
     keyring_bytes: &[u8],
+    keystore: &[u8],
     old_passphrase: &Passphrase,
     new_passphrase: &Passphrase,
     tree_id: &TreeId,
     member_id: &MemberId,
     min_revision: u32,
 ) -> Result<Rekeyed, VaultError> {
-    let old_passphrase = old_passphrase.expose();
-    let new_passphrase = new_passphrase.expose();
-    let tree_id = tree_id.as_bytes();
-    let member_id = member_id.as_str();
-    let Opened {
-        key_id: write_key_id,
-        rrk_secret,
-        revision,
-        prev_hash,
-        identity: old_identity,
-        mut keyring,
-        ..
-    } = open_with_passphrase(keyring_bytes, old_passphrase, tree_id, member_id)?;
-    let new_revision = min_revision
-        .max(revision)
-        .checked_add(1)
-        .ok_or(VaultError::RevisionOverflow)?;
-    let secrets = new_owner_secrets(new_passphrase)?;
+    let _ = member_id; // the owner id is not needed — the change lives entirely in the account keystore.
+    let keyring = decode_keyring(keyring_bytes)?;
+    if keyring.tree_id != tree_id.as_bytes() {
+        return Err(VaultError::TreeMismatch);
+    }
+    // Anti-rollback symmetry with the dag: refuse a rolled-back served anchor before the re-wrap.
+    if keyring.revision < min_revision {
+        return Err(VaultError::RevisionRollback {
+            have: min_revision,
+            got: keyring.revision,
+        });
+    }
 
-    let rrk_public = recovery_key_for(&keyring, member_id)?.public_key.clone();
-    let new_rk = RecoveryKey::from(&build_recovery_escrow(
-        &rrk_secret,
-        &rrk_public,
-        tree_id,
-        member_id,
-        &secrets,
-    )?);
-    replace_recovery_key(&mut keyring, member_id, new_rk);
-    refounder(&mut keyring, member_id, &secrets.root);
-    keyring.revision = new_revision;
-    keyring.prev_keyring_hash = prev_hash;
-    keyring.signatures.clear();
-    // Continuity: the OLD identity signs first (so members pinned to it accept this revision),
-    // then the new identity (so the owner and future revisions verify).
-    sign_keyring(&mut keyring, &old_identity);
-    sign_keyring(&mut keyring, &secrets.root.identity);
-    // Carry the (unchanged) write epoch's key MATERIAL forward in the watermark (epochs are untouched by a
-    // passphrase change), so a later recover keeps its pin (OPE-286).
-    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)
-        .iter()
-        .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
-        .map(|(_, _, d)| dek_hash(d.expose()))
-        .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
+    let ks = AccountKeystore::from_bytes(keystore)?;
+    let unlocked = ks.unlock(old_passphrase.expose())?; // a wrong current passphrase fails closed here
+    let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
+
     Ok(Rekeyed {
-        keyring: keyring.encode_to_vec(),
-        recovery_code: secrets.recovery_code,
-        revision: new_revision,
-        write_key_id,
-        write_dek_hash,
-    })
-}
-
-/// Rotate the recovery root: mint a FRESH RRK (hence a fresh RVK), re-wrap every epoch's DEK onto it,
-/// and re-issue the recovery code.
-///
-/// the new revision authorized by the OLD recovery authority signing it.
-///
-/// This is the only genuine way to revoke a prior recovery-key holder: re-wrapping alone leaves the RRK
-/// keypair, so anyone who ever unwrapped it keeps recovery power. The founder identity is unchanged (the
-/// passphrase doesn't change), so it's an ordinary transition that `verify_transition` accepts because the
-/// OLD RVK co-signs the RVK change. The old recovery code + any prior RRK copy stop reaching the DEKs.
-///
-/// # Errors
-/// Returns [`VaultError`] if the current recovery secret is wrong, the keyring is malformed, or re-wrapping the epochs fails.
-pub fn rotate_recovery(
-    keyring_bytes: &[u8],
-    passphrase: &Passphrase,
-    tree_id: &TreeId,
-    member_id: &MemberId,
-    min_revision: u32,
-) -> Result<Rekeyed, VaultError> {
-    let passphrase = passphrase.expose();
-    let tree_id = tree_id.as_bytes();
-    let member_id = member_id.as_str();
-    let Opened {
-        key_id: write_key_id,
-        rrk_secret: old_rrk,
-        revision,
-        prev_hash,
-        mut keyring,
-        ..
-    } = open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
-    let new_revision = min_revision
-        .max(revision)
-        .checked_add(1)
-        .ok_or(VaultError::RevisionOverflow)?;
-    // Commit the (unchanged) write epoch's key MATERIAL for the watermark, opened via the OLD RRK before the
-    // epochs are re-wrapped onto the new one (the DEKs themselves are untouched by a rotation) (OPE-286).
-    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &old_rrk)
-        .iter()
-        .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
-        .map(|(_, _, d)| dek_hash(d.expose()))
-        .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
-
-    // The OLD recovery authority signs the rotation (proof of possession of the current recovery secret).
-    let old_rvk = openom_crypto::derive_rvk(old_rrk.expose());
-
-    // Mint a fresh RRK; `secrets` carry the (unchanged, passphrase-derived) founder identity + KEK + a
-    // fresh recovery code to wrap the new RRK secret under.
-    let HpkeKeypair {
-        secret: new_secret,
-        public: new_rrk_public,
-    } = generate_hpke_keypair()?;
-    let new_rrk = RrkSecret::from(new_secret);
-    // Reuse the CURRENT passphrase KDF (salt) so the founder identity + passphrase KEK are unchanged —
-    // rotation keeps the founder, only the recovery root changes.
-    let current_pass_kdf = {
-        let rk = recovery_key_for(&keyring, member_id)?;
-        let wraps = rk
-            .escrow_wraps()
-            .map_err(|_| VaultError::BadKeyring("recovery key material malformed".into()))?;
-        let (kdf, _, _) = escrow_kek_wrap(&wraps, KekKind::Passphrase)?;
-        validate_kdf(kdf)?;
-        kdf.clone()
-    };
-    let secrets = owner_secrets_reusing_pass_kdf(passphrase, current_pass_kdf)?;
-
-    // Move the founder's cross-epoch access onto the new RRK, then swap in the new RecoveryKey (new RRK
-    // public + new RVK + freshly-wrapped secret).
-    let rewrapped = rewrap_epochs_to_new_rrk(
-        &keyring_epochs(&keyring)?,
-        tree_id,
-        member_id,
-        &old_rrk,
-        &new_rrk_public,
-    )?;
-    keyring.epochs = codec::encode_epochs(&rewrapped);
-    let new_rk = RecoveryKey::from(&build_recovery_escrow(
-        &new_rrk,
-        &new_rrk_public,
-        tree_id,
-        member_id,
-        &secrets,
-    )?);
-    replace_recovery_key(&mut keyring, member_id, new_rk);
-
-    keyring.revision = new_revision;
-    keyring.prev_keyring_hash = prev_hash;
-    keyring.signatures.clear();
-    sign_keyring(&mut keyring, &secrets.root.identity); // founder re-signs the ordinary transition
-    sign_keyring(&mut keyring, &old_rvk); // OLD RVK authorizes the recovery-root rotation
-    Ok(Rekeyed {
-        keyring: keyring.encode_to_vec(),
-        recovery_code: secrets.recovery_code,
-        revision: new_revision,
-        write_key_id,
-        write_dek_hash,
+        keyring: keyring_bytes.to_vec(),
+        recovery_code: RecoveryCode::new(String::new()),
+        keystore: new_ks.to_bytes()?,
+        // The tree anchor is unchanged, so its revision (and the caller's pinned watermark) carries forward
+        // verbatim — the lifecycle returns the floor unchanged rather than rebuilding a pin.
+        revision: keyring.revision,
+        write_key_id: Vec::new(),
+        write_dek_hash: Vec::new(),
     })
 }
 
@@ -709,6 +524,16 @@ impl<R> Joiner<R> {
         let hpke: [u8; 32] = hpke_public_key
             .try_into()
             .map_err(|_| VaultError::BadKeyring("hpke public key must be 32 bytes".into()))?;
+        // Self-cert admission (OPE-543): a member id MUST be `derive_member_id(author_public_key)`, so the id
+        // binds the key it is admitted under — a joiner can't be registered under an id that does not certify
+        // their own author key. The chain engine carries ids as opaque labels (it imposes no engine-level
+        // self-cert rule), but the CLIENT constructs only self-certifying joiners on either engine, matching
+        // the dag's admission gate and keeping the two engines' member models aligned.
+        if member_id.as_str() != derive_member_id(&author) {
+            return Err(VaultError::BadKeyring(
+                "member id does not bind its author key (self-cert admission)".into(),
+            ));
+        }
         Ok(Self {
             member_id: member_id.as_str().to_string(),
             role,
@@ -758,13 +583,12 @@ pub struct RecoverWatermark<'a> {
 /// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or sealing the joiner's wraps fails.
 pub fn add_member(
     keyring_bytes: &[u8],
-    owner_passphrase: &Passphrase,
+    owner: &UnlockedAccount,
     tree_id: &TreeId,
     owner_member_id: &MemberId,
     min_revision: u32,
     joiner: &Joiner<MemberRole>,
 ) -> Result<MemberAdded, VaultError> {
-    let owner_passphrase = owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let owner_member_id = owner_member_id.as_str();
     let new_member_id = joiner.member_id.as_str();
@@ -773,10 +597,9 @@ pub fn add_member(
         rrk_secret,
         revision,
         prev_hash,
-        identity,
         keyring,
         ..
-    } = open_with_passphrase(keyring_bytes, owner_passphrase, tree_id, owner_member_id)?;
+    } = open_with_account(keyring_bytes, owner, tree_id, owner_member_id)?;
 
     if new_member_id == owner_member_id
         || keyring.members.iter().any(|m| m.member_id == new_member_id)
@@ -800,7 +623,7 @@ pub fn add_member(
         keyring,
         tree_id,
         &deks,
-        &identity,
+        &owner.root.identity,
         prev_hash,
         new_revision,
         joiner,
@@ -1008,14 +831,13 @@ pub struct MemberRemoved {
 /// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or the forward-secret reseal fails.
 pub fn remove_member(
     keyring_bytes: &[u8],
-    owner_passphrase: &Passphrase,
+    owner: &UnlockedAccount,
     tree_id: &TreeId,
     owner_member_id: &MemberId,
     min_revision: u32,
     remove_member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<MemberRemoved, VaultError> {
-    let owner_passphrase = owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let owner_member_id = owner_member_id.as_str();
     let remove_member_id = remove_member_id.as_str();
@@ -1023,11 +845,10 @@ pub fn remove_member(
     let Opened {
         revision,
         prev_hash,
-        identity,
         rrk_secret,
         keyring,
         ..
-    } = open_with_passphrase(keyring_bytes, owner_passphrase, tree_id, owner_member_id)?;
+    } = open_with_account(keyring_bytes, owner, tree_id, owner_member_id)?;
 
     if remove_member_id == owner_member_id {
         return Err(VaultError::CannotRemoveOwner);
@@ -1048,7 +869,7 @@ pub fn remove_member(
         keyring,
         tree_id,
         remove_member_id,
-        &identity,
+        &owner.root.identity,
         prev_hash,
         new_revision,
     )?;
@@ -1178,29 +999,22 @@ pub struct CoOwnerChanged {
 /// Returns [`VaultError`] if the author isn't authorized or the keyring is malformed.
 pub fn add_co_owner(
     keyring_bytes: &[u8],
-    founder_passphrase: &Passphrase,
+    founder: &UnlockedAccount,
     tree_id: &TreeId,
     founder_member_id: &MemberId,
     min_revision: u32,
     target_member_id: &MemberId,
 ) -> Result<CoOwnerChanged, VaultError> {
-    let founder_passphrase = founder_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let founder_member_id = founder_member_id.as_str();
     let target_member_id = target_member_id.as_str();
     let Opened {
         revision,
         prev_hash,
-        identity,
         rrk_secret,
         mut keyring,
         ..
-    } = open_with_passphrase(
-        keyring_bytes,
-        founder_passphrase,
-        tree_id,
-        founder_member_id,
-    )?;
+    } = open_with_account(keyring_bytes, founder, tree_id, founder_member_id)?;
 
     // Already a signer (this also rejects re-adding the founder) — a member at CO_OWNER or stronger.
     if keyring
@@ -1241,7 +1055,7 @@ pub fn add_co_owner(
     keyring.revision = new_revision;
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
-    sign_keyring(&mut keyring, &identity); // founder signs — authorizes the signer-set change
+    sign_keyring(&mut keyring, &founder.root.identity); // founder signs — authorizes the signer-set change
     // Pin the UNCHANGED write epoch at the new revision (OPE-286) — a promote re-wraps no keys.
     let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, founder_member_id, &rrk_secret);
     let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
@@ -1265,14 +1079,13 @@ pub fn add_co_owner(
 /// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or the reseal fails.
 pub fn remove_co_owner(
     keyring_bytes: &[u8],
-    founder_passphrase: &Passphrase,
+    founder: &UnlockedAccount,
     tree_id: &TreeId,
     founder_member_id: &MemberId,
     min_revision: u32,
     target_member_id: &MemberId,
     new_role: MemberRole,
 ) -> Result<CoOwnerChanged, VaultError> {
-    let founder_passphrase = founder_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let founder_member_id = founder_member_id.as_str();
     let target_member_id = target_member_id.as_str();
@@ -1287,16 +1100,10 @@ pub fn remove_co_owner(
     let Opened {
         revision,
         prev_hash,
-        identity,
         rrk_secret,
         mut keyring,
         ..
-    } = open_with_passphrase(
-        keyring_bytes,
-        founder_passphrase,
-        tree_id,
-        founder_member_id,
-    )?;
+    } = open_with_account(keyring_bytes, founder, tree_id, founder_member_id)?;
 
     if target_member_id == founder_member_id {
         return Err(VaultError::CannotRemoveOwner);
@@ -1325,7 +1132,7 @@ pub fn remove_co_owner(
     keyring.revision = new_revision;
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
-    sign_keyring(&mut keyring, &identity); // founder signs
+    sign_keyring(&mut keyring, &founder.root.identity); // founder signs
     // Pin the UNCHANGED write epoch at the new revision (OPE-286) — a demote re-wraps no keys.
     let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, founder_member_id, &rrk_secret);
     let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
@@ -1346,56 +1153,57 @@ struct Opened {
     /// SHA-256 of this (opened) keyring's signing bytes — what a re-signed successor
     /// records as its `prev_keyring_hash` to chain the revision history.
     prev_hash: Vec<u8>,
-    /// The opener's derived signing identity — to re-sign a mutated keyring (e.g. adding a
-    /// member). This is the founder key already in the signer set.
-    identity: SigningKey,
-    /// The recovery root private key (unwrapped via the passphrase) — reaches every epoch's
-    /// DEK, and is re-wrapped in place by `change_passphrase`.
+    /// The recovery root private key (unwrapped via the account KEK) — reaches every epoch's DEK.
     rrk_secret: RrkSecret,
     /// The decoded prior keyring, so a mutating flow preserves its signers/members/epochs.
     keyring: Keyring,
 }
 
-/// Decode + verify + unwrap the founder's recovery root key via the passphrase, returning
-/// the latest-epoch DEK, the RRK secret (which reaches every epoch), and coordinates.
-fn open_with_passphrase(
+/// Decode + verify the owner keyring and unwrap the recovery root key via the durable ACCOUNT KEK (OPE-543),
+/// returning the write-epoch `key_id`, the RRK secret (which reaches every epoch), and coordinates.
+///
+/// The caller re-signs any mutation with `account.root.identity` (the owner IS the durable account, so its
+/// signing key is threaded in, not re-derived here). Anti-substitution: the account identity must BE the
+/// resolved OWNER `member_id`'s registered author key — a wrong account (or a swapped owner) fails closed.
+fn open_with_account(
     keyring_bytes: &[u8],
-    passphrase: &[u8],
+    account: &UnlockedAccount,
     tree_id: &[u8],
-    member_id: &str,
+    _member_id: &str,
 ) -> Result<Opened, VaultError> {
     let keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
         return Err(VaultError::TreeMismatch);
     }
-    // The owner reaches DEKs through the recovery root key: decode the escrow's keyeo KEK wraps and open via
-    // the passphrase one. `escrow_wraps` is owned (not borrowing the keyring), so the anti-substitution +
-    // signature checks below can still read the keyring while the wrap refs are live.
+    // Anti-substitution + SELF-CERT (OPE-543): resolve the owner independently of the caller's label — the
+    // account signing key must BE the resolved OWNER's registered author key AND the owner's on-tree id must
+    // equal `derive_member_id(account key)`, so a server-swapped owner entry (mismatched id or key) fails
+    // closed. The keyring must then be signed by SOME current authorized signer — a co-owner may have signed
+    // the latest any-of change — so verify any-of over the current set (hardened by the deferred chain-walk).
+    let account_pub = account.root.identity.verifying_key().to_bytes().to_vec();
+    let expected_owner_id = derive_member_id(&account_pub);
+    let is_owner = keyring
+        .members
+        .iter()
+        .any(|m| m.role == OWNER && m.member_id == expected_owner_id && m.author_public_key == account_pub);
+    if !is_owner {
+        return Err(CryptoError::Signature.into());
+    }
+    // Use the self-certifying owner id (not the caller's label) for the RRK escrow lookup + AAD below.
+    let member_id = expected_owner_id.as_str();
+    verify_keyring_any(&keyring, &authorized_verify_keys(&keyring))
+        .map_err(|_| CryptoError::Signature)?;
+    // The owner reaches DEKs through the recovery root key, escrowed under the STABLE account KEK. `nonce` /
+    // `wrapped` are owned (not borrowing the keyring). The wrap's stored KDF is a placeholder — the KEK is
+    // the account's, supplied directly, never re-derived from the wrap.
     let escrow_wraps = {
         let rk = recovery_key_for(&keyring, member_id)?;
         rk.escrow_wraps()
             .map_err(|_| VaultError::BadKeyring("recovery key material malformed".into()))?
     };
-    let (kdf, nonce, wrapped) = escrow_kek_wrap(&escrow_wraps, KekKind::Passphrase)?;
-    let root = derive_root(passphrase, &validated_kdf(kdf)?)?;
-    // Our own derived identity must be the founder entry (a wrong passphrase yields a wrong
-    // key; the server can't swap the founder). The keyring must then be signed by SOME current
-    // authorized signer — a co-owner may have signed the latest ordinary (any-of) change, so
-    // requiring the founder's own signature would refuse a co-owner's legitimate edit. Trusting
-    // the document's current signer set is hardened by the deferred client chain-walk that
-    // refuses an unendorsed signer-set change.
-    let founder_pub = root.identity.verifying_key().to_bytes().to_vec();
-    let is_founder = keyring
-        .members
-        .iter()
-        .any(|m| m.role == OWNER && m.member_id == member_id && m.author_public_key == founder_pub);
-    if !is_founder {
-        return Err(CryptoError::Signature.into());
-    }
-    verify_keyring_any(&keyring, &authorized_verify_keys(&keyring))
-        .map_err(|_| CryptoError::Signature)?;
+    let (_kdf, nonce, wrapped) = escrow_kek_wrap(&escrow_wraps, KekKind::Passphrase)?;
     let rrk_secret = open_rrk_secret(
-        &root.kek,
+        &account.root.kek,
         nonce,
         wrapped,
         tree_id,
@@ -1417,7 +1225,6 @@ fn open_with_passphrase(
         key_id,
         revision,
         prev_hash,
-        identity: root.identity,
         rrk_secret,
         keyring,
     })
@@ -1666,51 +1473,56 @@ fn recovery_key_for<'a>(
         .ok_or(VaultError::MissingWrap)
 }
 
-/// Replace the founder's recovery key entry in place (used by `change_passphrase` / recover).
-fn replace_recovery_key(keyring: &mut Keyring, member_id: &str, new: RecoveryKey) {
-    for r in &mut keyring.recovery_keys {
-        if r.member_id == member_id {
-            *r = new;
-            return;
-        }
-    }
-    keyring.recovery_keys.push(new);
-}
-
-/// After the owner's key changes, point the owner's member entry at the new identity/HPKE keys, so future
-/// verification and rotations use them. The founder signer is derived from this member entry (OPE-309), so
-/// updating the member author key re-keys the signer too — no separate roster to update.
-fn refounder(keyring: &mut Keyring, member_id: &str, new: &RootKeys) {
-    let new_pub = new.identity.verifying_key().to_bytes().to_vec();
-    for m in &mut keyring.members {
-        if m.member_id == member_id {
-            m.author_public_key.clone_from(&new_pub);
-            m.hpke_public_key = new.hpke_public.to_vec();
-        }
-    }
-}
-
 const _: () = assert!(KEY_ID_LEN == 16);
+
 
 #[cfg(test)]
 mod tests {
     use super::{
         add_co_owner, add_member, add_member_as_co_owner, adopt_member_epochs, change_passphrase,
         provision, provision_member, recover, remove_co_owner, remove_member,
-        remove_member_as_co_owner, rotate_recovery, unlock, unlock_as_member, Joiner, MemberAuth,
-        RecoverWatermark,
+        remove_member_as_co_owner, unlock, unlock_as_member, Joiner, MemberAuth, RecoverWatermark,
     };
-    use crate::VaultError;
-    use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
+    use crate::{AccountKeystore, UnlockedAccount, VaultError};
+    use openom_crypto::{derive_root, generate_recovery_code, Passphrase, RecoveryCode};
+    use openom_keyring_api::derive_member_id;
     use openom_keyring_chain::wire::{Keyring, Member};
-    use openom_keyring_chain::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
+    use openom_keyring_chain::{sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
     use openom_protocol::v1::MemberRole;
     use openom_protocol::Message;
     use openom_sealer::{EntryKind, SealContext, SealerSet};
 
-    /// The founder's verify key, as a member would pin it out-of-band from an invite — the OWNER-role
-    /// member's author key (the signer set is derived from members, OPE-309).
+    const TREE: &[u8] = b"tree-uuid-16byte";
+    const MEMBER: &str = "acct-1";
+
+    /// Mint an owner's durable ACCOUNT keystore (OPE-543 durable identity) from a passphrase, plus its
+    /// one-time account recovery code. The derived identity is random-but-stable across unlock, so one
+    /// keystore is the tree's single owner across provision / unlock / membership ops.
+    fn make_owner(pass: &Passphrase) -> (AccountKeystore, RecoveryCode) {
+        let (ks, code, _u) = AccountKeystore::create(pass.expose()).unwrap();
+        (ks, code)
+    }
+    /// A fresh `UnlockedAccount` for the owner (each vault call that signs consumes one).
+    fn acct(ks: &AccountKeystore, pass: &Passphrase) -> UnlockedAccount {
+        ks.unlock(pass.expose()).unwrap()
+    }
+    /// The owner's SELF-CERTIFYING on-tree `member_id` (OPE-543): `derive_member_id(account author key)`.
+    /// `provision` derives the owner id from the account key (ignoring the caller's label), so this is the id
+    /// the keyring records and the id every owner-path DEK/escrow lookup is keyed by — tests assert against it
+    /// and pass it where the real owner id is needed.
+    fn owner_id(ks: &AccountKeystore, pass: &Passphrase) -> MemberId {
+        MemberId::new(derive_member_id(
+            &ks.unlock(pass.expose()).unwrap().root.identity.verifying_key().to_bytes(),
+        ))
+    }
+    /// The self-certifying joiner id for a member's author key — the client constructs only self-certifying
+    /// joiners (OPE-543 `Joiner::from_bytes` admission).
+    fn jid(author_public_key: &[u8]) -> MemberId {
+        MemberId::new(derive_member_id(author_public_key))
+    }
+
+    /// The founder's verify key, as a member would pin it out-of-band — the OWNER-role member's author key.
     fn founder_key(keyring_bytes: &[u8]) -> VerifyingKey {
         let k = Keyring::decode(keyring_bytes).unwrap();
         let founder = k
@@ -1722,2437 +1534,762 @@ mod tests {
         VerifyingKey::from_bytes(&bytes).unwrap()
     }
 
-    /// A verify key from 32 raw bytes (e.g. a member's author key, learned as a co-owner key).
     fn vk(bytes: &[u8]) -> VerifyingKey {
         VerifyingKey::from_bytes(&bytes.try_into().unwrap()).unwrap()
     }
 
-    const TREE: &[u8] = b"tree-uuid-16byte";
-    const MEMBER: &str = "acct-1";
-
     fn seal_open(sealer: &SealerSet, plaintext: &[u8]) -> Vec<u8> {
-        let out = sealer
+        sealer
             .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), plaintext)
-            .unwrap();
-        out.envelope
+            .unwrap()
+            .envelope
     }
 
     fn first_shared(keyring_bytes: &[u8]) -> u32 {
-        Keyring::decode(keyring_bytes)
-            .unwrap()
-            .first_shared_revision
+        Keyring::decode(keyring_bytes).unwrap().first_shared_revision
     }
 
-    #[test]
-    fn first_shared_revision_is_set_once_carried_forward_and_never_cleared() {
-        let pass = Passphrase::new(b"owner pass");
-        let owner = provision(
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-        // Genesis (solo): never shared.
-        assert_eq!(first_shared(&owner.keyring), 0);
-
-        // First share — admit member 2 (rev 2): the marker is set to THIS revision.
-        let m2 = provision_member(&Passphrase::new(b"m2 pass")).unwrap();
-        let add1 = add_member(
-            &owner.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            1,
-            &Joiner::from_bytes(
-                &MemberId::new("acct-2"),
-                MemberRole::Editor,
-                &m2.author_public_key,
-                &m2.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(add1.revision, 2);
-        assert_eq!(first_shared(&add1.keyring), 2, "set on the first share");
-
-        // Second share — admit member 3 (rev 3): the marker does NOT move.
-        let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
-        let add2 = add_member(
-            &add1.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            2,
-            &Joiner::from_bytes(
-                &MemberId::new("acct-3"),
-                MemberRole::Editor,
-                &m3.author_public_key,
-                &m3.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            first_shared(&add2.keyring),
-            2,
-            "a later add leaves it unchanged"
-        );
-
-        // Remove member 3 (rev 4): removal never clears it.
-        let rem1 = remove_member(
-            &add2.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            3,
-            &MemberId::new("acct-3"),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-        assert_eq!(first_shared(&rem1.keyring), 2, "removal keeps the marker");
-
-        // Remove member 2 too — back to SOLO — the marker still stands (the un-share edge).
-        let rem2 = remove_member(
-            &rem1.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            4,
-            &MemberId::new("acct-2"),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-        let k = Keyring::decode(rem2.keyring.as_slice()).unwrap();
-        assert_eq!(k.members.len(), 1, "solo again");
-        assert_eq!(
-            k.first_shared_revision, 2,
-            "un-shared-back-to-solo still carries the marker"
-        );
-    }
-
-    #[test]
-    fn writer_signs_iff_the_tree_has_been_shared() {
-        use openom_protocol::v1::Envelope;
-        let pass = Passphrase::new(b"owner pass");
-        let owner = provision(
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-
-        // Solo (never shared): the sealer attaches no author → entries are unattributed.
-        let u_solo = unlock(
-            &owner.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-b"),
-        )
-        .unwrap();
-        let solo = Envelope::decode(seal_open(&u_solo.sealer, b"solo edit").as_slice())
-            .unwrap()
-            .header
-            .unwrap();
-        assert!(
-            solo.author_signature.is_empty(),
-            "a never-shared tree writes unattributed"
-        );
-
-        // First share — admit an editor.
-        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
-        let add = add_member(
-            &owner.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            1,
-            &Joiner::from_bytes(
-                &MemberId::new("acct-m"),
-                MemberRole::Editor,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        // Owner unlock on the shared keyring: now signs.
-        let u_owner = unlock(
-            &add.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-c"),
-        )
-        .unwrap();
-        let owner_h = Envelope::decode(seal_open(&u_owner.sealer, b"owner edit").as_slice())
-            .unwrap()
-            .header
-            .unwrap();
-        assert!(
-            !owner_h.author_signature.is_empty(),
-            "shared tree: owner signs"
-        );
-        assert_eq!(owner_h.author_member_id, MEMBER);
-
-        // Member unlock: signs as the member.
-        let founder = founder_key(&add.keyring);
-        let (u_member, _) = unlock_as_member(
-            &add.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"m pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new("acct-m"),
-                trusted_signers: &[founder],
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-m"),
-            0,
-        )
-        .unwrap();
-        let member_h = Envelope::decode(seal_open(&u_member.sealer, b"member edit").as_slice())
-            .unwrap()
-            .header
-            .unwrap();
-        assert!(
-            !member_h.author_signature.is_empty(),
-            "shared tree: member signs"
-        );
-        assert_eq!(member_h.author_member_id, "acct-m");
-    }
-
-    #[test]
-    fn first_shared_revision_is_covered_by_the_signature() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-        let founder = founder_key(&owner.keyring);
-        let mut k = Keyring::decode(owner.keyring.as_slice()).unwrap();
-        verify_keyring(&k, &founder).unwrap(); // the genesis verifies as-signed
-        k.first_shared_revision = 7; // tamper the marker
-        assert!(
-            verify_keyring(&k, &founder).is_err(),
-            "the marker is in the signed payload commitment"
-        );
+    fn no_watermark() -> RecoverWatermark<'static> {
+        RecoverWatermark { min_revision: 0, write_key_id: &[], dek_hash: &[] }
     }
 
     #[test]
     fn provision_then_unlock_on_another_device_opens_the_same_data() {
+        let pass = Passphrase::new(b"correct horse");
+        let (ks, _code) = make_owner(&pass);
+        let me = owner_id(&ks, &pass);
         let p = provision(
-            &Passphrase::new(b"correct horse"),
+            &acct(&ks, &pass),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
+            &me,
             &ReplicaId::new(b"replica-A"),
         )
         .unwrap();
-        let sealed = seal_open(&p.sealer, b"the family tree"); // device A seals
+        assert!(p.recovery_code.expose().is_empty(), "no per-tree recovery code under durable identity");
+        let sealed = seal_open(&p.sealer, b"the family tree");
 
-        // Device B: unlock from the keyring bytes alone, a fresh replica.
         let u = unlock(
             &p.keyring,
-            &Passphrase::new(b"correct horse"),
+            acct(&ks, &pass),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
+            &me,
             &ReplicaId::new(b"replica-B"),
         )
         .unwrap();
         assert_eq!(u.revision, 1);
-        assert_eq!(
-            u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
-            b"the family tree"
-        );
+        assert_eq!(u.did_key, p.did_key, "the durable account identity is stable");
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"the family tree");
     }
 
     #[test]
-    fn rotate_recovery_mints_a_new_authority_authorized_by_the_old() {
-        use openom_keyring_chain::{verify_transition, KeyringAnchor};
-        use openom_protocol::Message;
-        let pass = Passphrase::new(b"correct horse");
-        let p = provision(
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"replica-A"),
-        )
-        .unwrap();
-        let prior = Keyring::decode(p.keyring.as_slice()).unwrap();
-        let anchor = KeyringAnchor::from_keyring(&prior);
-        assert!(
-            !anchor.recovery_verifying_key.is_empty(),
-            "provision pins an RVK"
-        );
-
-        // Rotate the recovery root.
-        let rot = rotate_recovery(
-            &p.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-        )
-        .unwrap();
-        let rotated = Keyring::decode(rot.keyring.as_slice()).unwrap();
-
-        // It's a valid transition, authorized by the OLD recovery authority, and the pinned RVK changed.
-        let new_anchor = verify_transition(&anchor, &rotated).unwrap();
-        assert_ne!(
-            new_anchor.recovery_verifying_key, anchor.recovery_verifying_key,
-            "the recovery authority (RVK) rotated"
-        );
-        // The founder still unlocks the rotated keyring — the epochs were re-wrapped to the new RRK.
-        let u = unlock(
-            &rot.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"replica-B"),
-        )
-        .unwrap();
-        assert_eq!(u.revision, 2);
-
-        // Revocation, proven empirically: the PRE-rotation recovery code no longer reaches the recovery
-        // root (its RRK is gone, and every epoch is re-wrapped to the new one) — so recover with the old
-        // code fails, while the NEW code works.
-        assert!(
-            recover(
-                &rot.keyring,
-                &p.recovery_code,
-                &Passphrase::new(b"whatever"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"replica-C"),
-                &RecoverWatermark {
-                    min_revision: 0,
-                    write_key_id: &[],
-                    dek_hash: &[]
-                }
-            )
-            .is_err(),
-            "the pre-rotation recovery code is revoked"
-        );
-        assert!(
-            recover(
-                &rot.keyring,
-                &rot.recovery_code,
-                &Passphrase::new(b"whatever"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"replica-D"),
-                &RecoverWatermark {
-                    min_revision: 0,
-                    write_key_id: &[],
-                    dek_hash: &[]
-                }
-            )
-            .is_ok(),
-            "the freshly-issued recovery code works"
-        );
-    }
-
-    #[test]
-    fn did_key_is_the_founder_key_and_stable_across_unlock() {
-        let p = provision(
-            &Passphrase::new(b"correct horse"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"replica-A"),
-        )
-        .unwrap();
-        // The did:key is the founder's PUBLIC identity key, encoded — not any secret.
-        let founder = founder_key(&p.keyring).to_bytes();
-        assert_eq!(p.did_key.as_str(), did::encode_ed25519(&founder));
-        assert!(p.did_key.as_str().starts_with("did:key:z6Mk"));
-
-        // Stable across a re-unlock on another device (same passphrase → same identity → same did:key),
-        // unlike the per-context replica id.
-        let u = unlock(
-            &p.keyring,
-            &Passphrase::new(b"correct horse"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"replica-B"),
-        )
-        .unwrap();
-        assert_eq!(u.did_key, p.did_key);
-    }
-
-    #[test]
-    fn recovery_mints_a_fresh_did_key() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        let r = recover(
-            &p.keyring,
-            &p.recovery_code,
-            &Passphrase::new(b"new"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r2"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[],
-            },
-        )
-        .unwrap();
-        assert_ne!(
-            r.did_key, p.did_key,
-            "recovery derives a new identity → new did:key"
-        );
-        assert_eq!(
-            r.did_key.as_str(),
-            did::encode_ed25519(&founder_key(&r.keyring).to_bytes())
-        );
-    }
-
-    #[test]
-    fn keyring_lifecycle_rides_the_blob_transport() {
-        // The full chain-keyring lifecycle over the Blob seam (OPE-265): the vault is a pure
-        // bytes -> bytes lifecycle, so every op's output publishes through keyring/head. Two replicas,
-        // one dumb local-FS backend.
-        use store_blob::{BlobStore, FsBlob, Precondition};
-        use openom_keyring_chain::blob_sync::{KeyringChainBlobSync, PullError};
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(FsBlob::new(dir.path()));
-        let mut a = KeyringChainBlobSync::new(store.clone());
-        let mut b = KeyringChainBlobSync::new(store.clone());
-
-        // 1. A provisions the genesis keyring and publishes it.
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"a"),
-        )
-        .unwrap();
-        a.publish(&p.keyring).unwrap();
-        assert_eq!(a.revision(), Some(1));
-
-        // 2. B, a fresh device, bootstraps trust from the head (verify_reset on the genesis).
-        let got = b.bootstrap().unwrap().expect("head present");
-        assert_eq!(Keyring::decode(got.as_slice()).unwrap().revision, 1);
-        assert_eq!(b.revision(), Some(1));
-
-        // 3. A changes passphrase (an ordinary transition — same identity), publishes; B walks it.
-        let cp = change_passphrase(
-            &p.keyring,
-            &Passphrase::new(b"old"),
-            &Passphrase::new(b"newer"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-        )
-        .unwrap();
-        a.publish(&cp.keyring).unwrap();
-        match b.pull() {
-            Ok(Some(_)) => {} // a transition, walked
-            Err(PullError::ResetPending) => b.accept_reset().map(|_| ()).unwrap(), // (a reset, if ever)
-            other => panic!("unexpected pull result: {other:?}"),
-        }
-        assert_eq!(b.revision(), Some(cp.revision));
-
-        // 4. A recovers (a re-founding RESET, new identity) with the rotated code; B pull surfaces
-        //    ResetPending — the out-of-band ceremony — then B confirms via accept_reset.
-        let r = recover(
-            &cp.keyring,
-            &cp.recovery_code,
-            &Passphrase::new(b"recovered"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"b"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[],
-            },
-        )
-        .unwrap();
-        a.publish(&r.keyring).unwrap();
-        assert!(
-            matches!(b.pull(), Err(PullError::ResetPending)),
-            "recovery is a reset, not a transition"
-        );
-        b.accept_reset().unwrap();
-        assert_eq!(b.revision(), Some(r.revision));
-
-        // 5. Rollback: the store serves an OLD keyring at the head. B detects and rejects it.
-        store
-            .put("keyring/head", &p.keyring, Precondition::Any)
-            .unwrap();
-        assert!(
-            matches!(b.pull(), Err(PullError::Rollback { .. })),
-            "an older head must be rejected as a rollback"
-        );
-    }
-
-    #[test]
-    fn wrong_passphrase_is_rejected() {
-        let p = provision(
-            &Passphrase::new(b"right"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
+    fn unlock_with_the_wrong_account_is_rejected() {
+        let pass = Passphrase::new(b"right");
+        let (ks, _c) = make_owner(&pass);
+        let p = provision(&acct(&ks, &pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).unwrap();
+        let other_pass = Passphrase::new(b"someone else");
+        let (other_ks, _c2) = make_owner(&other_pass);
         assert!(unlock(
             &p.keyring,
-            &Passphrase::new(b"wrong"),
+            acct(&other_ks, &other_pass),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
+            &ReplicaId::new(b"r"),
         )
         .is_err());
     }
 
     #[test]
     fn a_keyring_for_another_tree_is_refused() {
-        let p = provision(
-            &Passphrase::new(b"pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
+        let pass = Passphrase::new(b"pass");
+        let (ks, _c) = make_owner(&pass);
+        let p = provision(&acct(&ks, &pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).unwrap();
         assert!(matches!(
-            unlock(
-                &p.keyring,
-                &Passphrase::new(b"pass"),
-                &TreeId::new(b"other-tree-16byt"),
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"r")
-            ),
+            unlock(&p.keyring, acct(&ks, &pass), &TreeId::new(b"other-tree-16byt"), &MemberId::new(MEMBER), &ReplicaId::new(b"r")),
             Err(VaultError::TreeMismatch)
         ));
     }
 
     #[test]
     fn a_tampered_keyring_fails_verification() {
-        let p = provision(
-            &Passphrase::new(b"pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
+        let pass = Passphrase::new(b"pass");
+        let (ks, _c) = make_owner(&pass);
+        let p = provision(&acct(&ks, &pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).unwrap();
         let mut k = Keyring::decode(p.keyring.as_slice()).unwrap();
-        // The epoch DEK wraps ride in the signed key-material blob now; tampering a byte of it breaks the
-        // payload commitment, so unlock's signature check rejects it.
         k.epochs[0] ^= 0xFF;
         let bytes = k.encode_to_vec();
-        assert!(unlock(
-            &bytes,
-            &Passphrase::new(b"pass"),
+        assert!(unlock(&bytes, acct(&ks, &pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).is_err());
+    }
+
+    #[test]
+    fn provisioned_keyring_is_a_genesis_single_owner() {
+        let pass = Passphrase::new(b"pass");
+        let (ks, _c) = make_owner(&pass);
+        let me = owner_id(&ks, &pass);
+        let p = provision(&acct(&ks, &pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).unwrap();
+        let k = Keyring::decode(p.keyring.as_slice()).unwrap();
+        assert_eq!(k.layout_version, 1);
+        assert_eq!(k.revision, 1);
+        assert!(k.prev_keyring_hash.is_empty());
+        assert_eq!(k.members.len(), 1);
+        assert_eq!(k.members[0].role, MemberRole::Owner as i32);
+        assert_eq!(k.members[0].member_id, me.as_str());
+        assert_eq!(k.signatures.len(), 1);
+        assert_eq!(k.signatures[0].signer_public_key, k.members[0].author_public_key);
+    }
+
+    #[test]
+    fn did_key_is_the_account_identity_and_stable_across_unlock() {
+        let pass = Passphrase::new(b"correct horse");
+        let (ks, _c) = make_owner(&pass);
+        let me = owner_id(&ks, &pass);
+        let p = provision(&acct(&ks, &pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"replica-A")).unwrap();
+        let founder = founder_key(&p.keyring).to_bytes();
+        assert_eq!(p.did_key.as_str(), did::encode_ed25519(&founder));
+        assert!(p.did_key.as_str().starts_with("did:key:z6Mk"));
+        let u = unlock(&p.keyring, acct(&ks, &pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"replica-B")).unwrap();
+        assert_eq!(u.did_key, p.did_key);
+    }
+
+    #[test]
+    fn change_passphrase_rewraps_the_account_without_touching_the_tree() {
+        let old = Passphrase::new(b"old");
+        let (ks, _c) = make_owner(&old);
+        let me = owner_id(&ks, &old);
+        let p = provision(&acct(&ks, &old), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).unwrap();
+        let ks_bytes = ks.to_bytes().unwrap();
+        let re = change_passphrase(
+            &p.keyring,
+            &ks_bytes,
+            &Passphrase::new(b"old"),
+            &Passphrase::new(b"new"),
+            &TreeId::new(TREE),
+            &me,
+            0,
+        )
+        .unwrap();
+        assert_eq!(re.keyring, p.keyring, "the tree anchor is unchanged");
+        assert_eq!(re.revision, 1);
+        assert!(re.recovery_code.expose().is_empty());
+        let new_ks = AccountKeystore::from_bytes(&re.keystore).unwrap();
+        assert!(new_ks.unlock(b"new").is_ok());
+        assert!(new_ks.unlock(b"old").is_err());
+        let u = unlock(&re.keyring, new_ks.unlock(b"new").unwrap(), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).unwrap();
+        assert_eq!(u.did_key, p.did_key);
+    }
+
+    #[test]
+    fn change_passphrase_with_the_wrong_old_passphrase_fails() {
+        let old = Passphrase::new(b"old");
+        let (ks, _c) = make_owner(&old);
+        let p = provision(&acct(&ks, &old), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).unwrap();
+        let ks_bytes = ks.to_bytes().unwrap();
+        assert!(change_passphrase(
+            &p.keyring,
+            &ks_bytes,
+            &Passphrase::new(b"wrong"),
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
+            0,
         )
         .is_err());
     }
 
     #[test]
-    fn recover_then_unlock_with_the_new_passphrase() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
+    fn recover_restores_the_same_identity_and_opens_the_data() {
+        let old = Passphrase::new(b"old");
+        let (ks, code) = make_owner(&old);
+        let me = owner_id(&ks, &old);
+        let p = provision(&acct(&ks, &old), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).unwrap();
         let sealed = seal_open(&p.sealer, b"data");
+        let ks_bytes = ks.to_bytes().unwrap();
 
-        let r = recover(
+        let rec = recover(
             &p.keyring,
-            &p.recovery_code,
+            &ks_bytes,
+            &code,
             &Passphrase::new(b"new"),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
+            &me,
             &ReplicaId::new(b"r2"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[],
-            },
+            &no_watermark(),
         )
         .unwrap();
-        assert_eq!(r.revision, 2);
-        // Same DEK — the recovered sealer opens data sealed before recovery.
-        assert_eq!(
-            r.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
-            b"data"
-        );
-        assert!(unlock(
-            &r.keyring,
-            &Passphrase::new(b"new"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_ok());
-        assert!(unlock(
-            &r.keyring,
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_err());
+        assert_eq!(rec.did_key, p.did_key, "recovery restores the SAME durable identity");
+        assert_eq!(rec.keyring, p.keyring, "no on-tree op — the anchor is unchanged");
+        assert!(rec.recovery_code.expose().is_empty());
+        assert_eq!(rec.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"data");
+        let new_ks = AccountKeystore::from_bytes(&rec.keystore).unwrap();
+        assert!(new_ks.unlock(b"new").is_ok());
+        assert!(new_ks.unlock(b"old").is_err());
+        assert!(new_ks.unlock_with_recovery(&code).is_ok());
     }
 
     #[test]
     fn recover_with_the_wrong_code_fails() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        let wrong = generate_recovery_code().unwrap(); // valid format, wrong entropy
+        let old = Passphrase::new(b"old");
+        let (ks, _code) = make_owner(&old);
+        let p = provision(&acct(&ks, &old), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).unwrap();
+        let ks_bytes = ks.to_bytes().unwrap();
+        let wrong = generate_recovery_code().unwrap();
         assert!(recover(
             &p.keyring,
+            &ks_bytes,
             &wrong,
             &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[]
-            }
+            &no_watermark(),
         )
         .is_err());
     }
 
     #[test]
     fn recover_refuses_a_revision_below_the_watermark() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap(); // revision 1
+        let old = Passphrase::new(b"old");
+        let (ks, code) = make_owner(&old);
+        let p = provision(&acct(&ks, &old), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).unwrap();
+        let ks_bytes = ks.to_bytes().unwrap();
         assert!(matches!(
             recover(
                 &p.keyring,
-                &p.recovery_code,
+                &ks_bytes,
+                &code,
                 &Passphrase::new(b"new"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r"),
-                &RecoverWatermark {
-                    min_revision: 5,
-                    write_key_id: &[],
-                    dek_hash: &[]
-                }
+                &RecoverWatermark { min_revision: 5, write_key_id: &[], dek_hash: &[] },
             ),
             Err(VaultError::RevisionRollback { .. })
         ));
     }
 
-    /// OPE-286: recover authenticates the (unverified, attacker-servable) epoch SET against the caller's
-    /// watermark, which commits to key MATERIAL — the write epoch's `H(DEK)` — not the forgeable public
-    /// `key_id` label. So an epoch whose DEK doesn't hash to the committed value is refused (the injection /
-    /// re-key-under-the-label attack), a truncated pinned epoch is refused, and a duplicate `key_id` is
-    /// refused; a correct watermark recovers, and an empty watermark falls back to stateless bootstrap.
     #[test]
-    fn recover_pins_the_write_epoch_to_dek_material() {
-        let pass = Passphrase::new(b"owner pass");
-        let p = provision(
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r0"),
-        )
-        .unwrap();
-        let sealed = seal_open(&p.sealer, b"heirloom");
-        let u = unlock(
-            &p.keyring,
-            &pass,
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r1"),
-        )
-        .unwrap();
-        // provision + unlock agree on the write-epoch commitment (16-byte key_id + 32-byte H(DEK)).
-        assert_eq!(u.write_key_id, p.write_key_id);
-        assert_eq!(u.write_dek_hash, p.write_dek_hash);
-        assert_eq!(u.write_key_id.len(), 16);
-        assert_eq!(u.write_dek_hash.len(), 32);
-
-        let rec = |kr: &[u8], kid: &[u8], hash: &[u8]| {
-            recover(
-                kr,
-                &p.recovery_code,
-                &Passphrase::new(b"new"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"rr"),
-                &RecoverWatermark {
-                    min_revision: 0,
-                    write_key_id: kid,
-                    dek_hash: hash,
-                },
-            )
-        };
-
-        // (1) Correct watermark → recovers, and the recovered sealer opens pre-recovery data.
-        let ok = rec(&p.keyring, &u.write_key_id, &u.write_dek_hash).unwrap();
-        assert_eq!(
-            ok.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
-            b"heirloom"
-        );
-
-        // (2) INJECTION: the served write epoch's DEK doesn't hash to the committed value → refused. (The
-        // check is symmetric to an attacker forging a DEK under the pinned key_id — the served DEK's hash
-        // won't match either way; here we express it as a watermark committing a different H(DEK).)
-        assert!(
-            matches!(
-                rec(&p.keyring, &u.write_key_id, &[0xFFu8; 32]),
-                Err(VaultError::WatermarkRollback { .. })
-            ),
-            "an epoch whose DEK doesn't match the committed hash is refused",
-        );
-
-        // (3) TRUNCATION: the pinned key_id is absent from the served keyring → refused.
-        assert!(
-            matches!(
-                rec(&p.keyring, &[0u8; 16], &u.write_dek_hash),
-                Err(VaultError::WatermarkRollback { .. })
-            ),
-            "an absent pinned write epoch is refused",
-        );
-
-        // (4) DUPLICATE key_id in the served keyring → refused (SealerSet routes by first match, so a
-        // same-key_id attacker epoch could otherwise be picked).
-        let mut dup = Keyring::decode(p.keyring.as_slice()).unwrap();
-        let mut epochs = dup.key_material().unwrap();
-        let e0 = epochs[0].clone();
-        epochs.push(e0);
-        dup.epochs = keyeo_crypto::codec::encode_epochs(&epochs);
-        assert!(
-            matches!(
-                rec(&dup.encode_to_vec(), &u.write_key_id, &u.write_dek_hash),
-                Err(VaultError::BadKeyring(_))
-            ),
-            "a duplicate epoch key_id is refused",
-        );
-
-        // (5) No watermark (stateless device): the documented unauthenticated-bootstrap fallback recovers.
-        let boot = rec(&p.keyring, &[], &[]).unwrap();
-        assert_eq!(
-            boot.sealer
-                .open_entry(EntryKind::Snapshot, &sealed)
-                .unwrap(),
-            b"heirloom"
-        );
-    }
-
-    #[test]
-    fn recover_guards_against_revision_overflow() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        let mut k = Keyring::decode(p.keyring.as_slice()).unwrap();
-        k.revision = u32::MAX; // a poisoned served revision (recovery skips the signature)
-        let bytes = k.encode_to_vec();
-        assert!(matches!(
-            recover(
-                &bytes,
-                &p.recovery_code,
-                &Passphrase::new(b"new"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"r"),
-                &RecoverWatermark {
-                    min_revision: 0,
-                    write_key_id: &[],
-                    dek_hash: &[]
-                }
-            ),
-            Err(VaultError::RevisionOverflow)
-        ));
-    }
-
-    #[test]
-    fn change_passphrase_bumps_revision_and_rotates_the_recovery_code() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        let re = change_passphrase(
-            &p.keyring,
-            &Passphrase::new(b"old"),
-            &Passphrase::new(b"new"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-        )
-        .unwrap();
-        assert_eq!(re.revision, 2);
-        assert_ne!(re.recovery_code.expose(), p.recovery_code.expose());
-
-        assert!(unlock(
-            &re.keyring,
-            &Passphrase::new(b"new"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_ok());
-        assert!(unlock(
-            &re.keyring,
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
+    fn joiner_from_bytes_enforces_self_cert() {
+        let m = provision_member(&Passphrase::new(b"m")).unwrap();
+        assert!(Joiner::<MemberRole>::from_bytes(
+            &MemberId::new("acct-not-derived"),
+            MemberRole::Editor,
+            &m.author_public_key,
+            &m.hpke_public_key,
         )
         .is_err());
-        // The OLD recovery code no longer opens the tree; the NEW one does.
-        assert!(recover(
-            &re.keyring,
-            &p.recovery_code,
-            &Passphrase::new(b"x"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[]
-            }
-        )
-        .is_err());
-        assert!(recover(
-            &re.keyring,
-            &re.recovery_code,
-            &Passphrase::new(b"x"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[]
-            }
+        assert!(Joiner::<MemberRole>::from_bytes(
+            &jid(&m.author_public_key),
+            MemberRole::Editor,
+            &m.author_public_key,
+            &m.hpke_public_key,
         )
         .is_ok());
     }
-
-    #[test]
-    fn change_passphrase_with_the_wrong_old_passphrase_fails() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        assert!(change_passphrase(
-            &p.keyring,
-            &Passphrase::new(b"wrong"),
-            &Passphrase::new(b"new"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn absurd_kdf_params_are_rejected_before_running_argon2id() {
-        let p = provision(
-            &Passphrase::new(b"pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        let mut k = Keyring::decode(p.keyring.as_slice()).unwrap();
-        // The owner's KDF params live in the recovery key's passphrase KEK wrap (a keyeo Kek wrap) now.
-        // `validated_kdf` rejects the absurd window BEFORE the signature check, so the specific
-        // BadKdfParams reason still surfaces.
-        let mut wraps = k.recovery_keys[0].escrow_wraps().unwrap();
-        for w in &mut wraps {
-            if let keyeo_crypto::WrapMethod::Kek { kdf, .. } = &mut w.method {
-                kdf.memory_kib = 4_000_000; // ~4 GiB
-            }
-        }
-        k.recovery_keys[0].wraps = keyeo_crypto::codec::encode_wraps(&wraps);
-        let bytes = k.encode_to_vec();
-        assert!(matches!(
-            unlock(
-                &bytes,
-                &Passphrase::new(b"pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"r")
-            ),
-            Err(VaultError::BadKdfParams)
-        ));
-    }
-
-    #[test]
-    fn provisioned_keyring_is_a_genesis_single_owner() {
-        let p = provision(
-            &Passphrase::new(b"pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        let k = Keyring::decode(p.keyring.as_slice()).unwrap();
-        assert_eq!(k.layout_version, 1);
-        assert_eq!(k.revision, 1);
-        assert!(
-            k.prev_keyring_hash.is_empty(),
-            "genesis has no prior revision to chain onto"
-        );
-        // The signer set is derived from members: exactly one member, the OWNER-role founder.
-        assert_eq!(k.members.len(), 1);
-        assert_eq!(k.members[0].role, MemberRole::Owner as i32);
-        assert_eq!(k.members[0].member_id, MEMBER);
-        assert_eq!(k.signatures.len(), 1);
-        // The lone signature is by the founder key (the OWNER member's author key).
-        assert_eq!(
-            k.signatures[0].signer_public_key,
-            k.members[0].author_public_key
-        );
-    }
-
-    #[test]
-    fn change_passphrase_chains_onto_the_prior_revision() {
-        let p = provision(
-            &Passphrase::new(b"old"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        let prior = Keyring::decode(p.keyring.as_slice()).unwrap();
-        let re = change_passphrase(
-            &p.keyring,
-            &Passphrase::new(b"old"),
-            &Passphrase::new(b"new"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-        )
-        .unwrap();
-        let next = Keyring::decode(re.keyring.as_slice()).unwrap();
-        assert_eq!(
-            next.prev_keyring_hash,
-            keyring_hash(&prior).to_vec(),
-            "the re-signed keyring must chain onto the one it replaced"
-        );
-    }
-
-    const MEMBER2: &str = "acct-2";
 
     #[test]
     fn owner_adds_a_member_who_unlocks_and_reads_the_tree() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-        let sealed = seal_open(&owner.sealer, b"our shared ancestry"); // owner writes
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
+        let sealed = seal_open(&owner.sealer, b"our shared ancestry");
 
-        // The joining member provisions their own identity and shares the public keys OOB.
         let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
+        let mid = jid(&m.author_public_key);
         let added = add_member(
             &owner.keyring,
-            &Passphrase::new(b"owner pass"),
+            &acct(&ks, &owner_pass),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
+            &me,
             0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
+            &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
         .unwrap();
         assert_eq!(added.revision, 2);
-
-        // The keyring now carries the member, with an HPKE wrap and their pinned keys.
         let k = Keyring::decode(added.keyring.as_slice()).unwrap();
-        assert!(k
-            .members
-            .iter()
-            .any(|mm| mm.member_id == MEMBER2 && mm.role == MemberRole::Editor as i32));
-        let epochs = k.key_material().unwrap();
-        assert!(epochs[0].wraps.iter().any(|w| w.recipient == MEMBER2
-            && matches!(w.method, keyeo_crypto::WrapMethod::MemberHpke { .. })));
+        assert!(k.members.iter().any(|mm| mm.member_id == mid.as_str() && mm.role == MemberRole::Editor as i32));
 
-        // The member unlocks against the pinned founder key and reads the owner's data.
         let pinned = founder_key(&owner.keyring);
         let (u, _) = unlock_as_member(
             &added.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"member pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[pinned],
-            },
+            &MemberAuth { passphrase: &Passphrase::new(b"member pass"), kdf: &m.kdf_params, member_id: &mid, trusted_signers: &[pinned] },
             &TreeId::new(TREE),
             &ReplicaId::new(b"r-mem"),
             0,
         )
         .unwrap();
         assert_eq!(u.revision, 2);
-        assert_eq!(
-            u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
-            b"our shared ancestry"
-        );
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"our shared ancestry");
     }
 
     #[test]
     fn a_member_unlock_needs_the_pinned_signer_and_right_passphrase() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
         let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
+        let mid = jid(&m.author_public_key);
         let added = add_member(
             &owner.keyring,
-            &Passphrase::new(b"owner pass"),
+            &acct(&ks, &owner_pass),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
+            &me,
             0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Viewer,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
+            &Joiner::from_bytes(&mid, MemberRole::Viewer, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
         .unwrap();
 
-        // Wrong pinned key (an attacker-substituted signer) → rejected before any unwrap.
-        let wrong = provision(
-            &Passphrase::new(b"someone else"),
-            &TreeId::new(b"other-tree-16byt"),
-            &MemberId::new("x"),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
+        let wpass = Passphrase::new(b"someone else");
+        let (wks, _wc) = make_owner(&wpass);
+        let wrong = provision(&acct(&wks, &wpass), &TreeId::new(b"other-tree-16byt"), &MemberId::new("x"), &ReplicaId::new(b"r")).unwrap();
         let wrong_key = founder_key(&wrong.keyring);
         assert!(unlock_as_member(
             &added.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"member pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[wrong_key]
-            },
+            &MemberAuth { passphrase: &Passphrase::new(b"member pass"), kdf: &m.kdf_params, member_id: &mid, trusted_signers: &[wrong_key] },
             &TreeId::new(TREE),
             &ReplicaId::new(b"r"),
-            0
+            0,
         )
         .is_err());
 
-        // Right pinned key, wrong passphrase → HPKE unwrap fails.
         let pinned = founder_key(&owner.keyring);
         assert!(unlock_as_member(
             &added.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"WRONG"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[pinned]
-            },
+            &MemberAuth { passphrase: &Passphrase::new(b"WRONG"), kdf: &m.kdf_params, member_id: &mid, trusted_signers: &[pinned] },
             &TreeId::new(TREE),
             &ReplicaId::new(b"r"),
-            0
+            0,
         )
         .is_err());
     }
 
     #[test]
     fn adding_the_same_member_twice_is_rejected() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
         let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
+        let mid = jid(&m.author_public_key);
         let added = add_member(
             &owner.keyring,
-            &Passphrase::new(b"owner pass"),
+            &acct(&ks, &owner_pass),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
+            &me,
             0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
+            &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
         .unwrap();
         assert!(matches!(
             add_member(
                 &added.keyring,
-                &Passphrase::new(b"owner pass"),
+                &acct(&ks, &owner_pass),
                 &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
+                &me,
                 0,
-                &Joiner::from_bytes(
-                    &MemberId::new(MEMBER2),
-                    MemberRole::Editor,
-                    &m.author_public_key,
-                    &m.hpke_public_key
-                )
-                .unwrap()
-            ),
-            Err(VaultError::MemberExists)
-        ));
-        // ...and the owner can't be re-added under their own id either.
-        assert!(matches!(
-            add_member(
-                &owner.keyring,
-                &Passphrase::new(b"owner pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                0,
-                &Joiner::from_bytes(
-                    &MemberId::new(MEMBER),
-                    MemberRole::Editor,
-                    &m.author_public_key,
-                    &m.hpke_public_key
-                )
-                .unwrap()
+                &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
             ),
             Err(VaultError::MemberExists)
         ));
     }
 
     #[test]
-    fn add_member_needs_the_owners_passphrase() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
+    fn add_member_with_the_wrong_owner_account_fails() {
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
         let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
+        let mid = jid(&m.author_public_key);
+        let wpass = Passphrase::new(b"WRONG owner");
+        let (wks, _wc) = make_owner(&wpass);
         assert!(add_member(
             &owner.keyring,
-            &Passphrase::new(b"WRONG"),
+            &acct(&wks, &wpass),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &m.author_public_key,
-                &m.hpke_public_key
-            )
-            .unwrap()
+            &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
         .is_err());
     }
 
-    const MEMBER3: &str = "acct-3";
-
     #[test]
     fn removing_a_member_re_keys_and_denies_them_new_content() {
-        // Owner with two members, A (to be removed) and B (stays).
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
         let a = provision_member(&Passphrase::new(b"a pass")).unwrap();
         let b = provision_member(&Passphrase::new(b"b pass")).unwrap();
-        let k1 = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &a.author_public_key,
-                &a.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let k2 = add_member(
-            &k1.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER3),
-                MemberRole::Viewer,
-                &b.author_public_key,
-                &b.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(k2.revision, 3);
+        let a_id = jid(&a.author_public_key);
+        let b_id = jid(&b.author_public_key);
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&a_id, MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&b_id, MemberRole::Viewer, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
 
-        // Remove A → a re-key (new epoch), revision 4. The recovery code does NOT rotate
-        // (the RRK escrows the new epoch), so it isn't returned here.
-        let removed = remove_member(
-            &k2.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-            &ReplicaId::new(b"r-owner2"),
-        )
-        .unwrap();
-        assert_eq!(removed.revision, 4);
-
-        // The owner seals NEW content under the new epoch.
+        let removed = remove_member(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &a_id, &ReplicaId::new(b"r-owner2")).unwrap();
         let new_sealed = seal_open(&removed.sealer, b"post-removal secret");
 
-        // Forward secrecy: the removed member has no wrap in the new epoch and cannot unlock.
         assert!(matches!(
-            unlock_as_member(
-                &removed.keyring,
-                &MemberAuth {
-                    passphrase: &Passphrase::new(b"a pass"),
-                    kdf: &a.kdf_params,
-                    member_id: &MemberId::new(MEMBER2),
-                    trusted_signers: &[pinned]
-                },
-                &TreeId::new(TREE),
-                &ReplicaId::new(b"r"),
-                0
-            ),
+            unlock_as_member(&removed.keyring, &MemberAuth { passphrase: &Passphrase::new(b"a pass"), kdf: &a.kdf_params, member_id: &a_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r"), 0),
             Err(VaultError::MissingWrap)
         ));
 
-        // B (remaining) unlocks the new epoch and reads the owner's post-removal content.
-        let (bu, _) = unlock_as_member(
-            &removed.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"b pass"),
-                kdf: &b.kdf_params,
-                member_id: &MemberId::new(MEMBER3),
-                trusted_signers: &[pinned],
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-b"),
-            0,
-        )
-        .unwrap();
-        assert_eq!(
-            bu.sealer
-                .open_entry(EntryKind::Snapshot, &new_sealed)
-                .unwrap(),
-            b"post-removal secret"
-        );
+        let (bu, _) = unlock_as_member(&removed.keyring, &MemberAuth { passphrase: &Passphrase::new(b"b pass"), kdf: &b.kdf_params, member_id: &b_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-b"), 0).unwrap();
+        assert_eq!(bu.sealer.open_entry(EntryKind::Snapshot, &new_sealed).unwrap(), b"post-removal secret");
 
-        // The owner still unlocks with their passphrase (identity/KEK preserved across re-key).
-        assert!(unlock(
-            &removed.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_ok());
+        assert!(unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).is_ok());
     }
 
     #[test]
     fn a_remaining_member_adopts_the_rotated_epoch_without_a_passphrase() {
-        // OPE-393: after a removal rotates the write epoch, a REMAINING member re-derives the new epoch DEK
-        // from the synced keyring with its RETAINED HPKE secret (no passphrase) and can then open post-rotation
-        // content — the member's counterpart to the owner's passphrase re-unlock.
-        let owner = provision(&Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
         let a = provision_member(&Passphrase::new(b"a pass")).unwrap();
         let b = provision_member(&Passphrase::new(b"b pass")).unwrap();
-        let k1 = add_member(&owner.keyring, &Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&MemberId::new(MEMBER2), MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
-        let k2 = add_member(&k1.keyring, &Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&MemberId::new(MEMBER3), MemberRole::Editor, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
+        let a_id = jid(&a.author_public_key);
+        let b_id = jid(&b.author_public_key);
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&a_id, MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&b_id, MemberRole::Editor, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
 
-        // B unlocks on the PRE-removal keyring — capturing its HPKE secret (the tuple's second value). A too,
-        // so we can prove the removed member's adopt fails closed.
-        let (a_pass, b_pass) = (Passphrase::new(b"a pass"), Passphrase::new(b"b pass"));
-        let (b_id, a_id) = (MemberId::new(MEMBER3), MemberId::new(MEMBER2));
-        let (bu, b_hpke) = unlock_as_member(
-            &k2.keyring,
-            &MemberAuth { passphrase: &b_pass, kdf: &b.kdf_params, member_id: &b_id, trusted_signers: &[pinned] },
-            &TreeId::new(TREE), &ReplicaId::new(b"r-b"), 0,
-        )
-        .unwrap();
-        let (_, a_hpke) = unlock_as_member(
-            &k2.keyring,
-            &MemberAuth { passphrase: &a_pass, kdf: &a.kdf_params, member_id: &a_id, trusted_signers: &[pinned] },
-            &TreeId::new(TREE), &ReplicaId::new(b"r-a"), 0,
-        )
-        .unwrap();
+        let (bu, b_hpke) = unlock_as_member(&k2.keyring, &MemberAuth { passphrase: &Passphrase::new(b"b pass"), kdf: &b.kdf_params, member_id: &b_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-b"), 0).unwrap();
+        let (_, a_hpke) = unlock_as_member(&k2.keyring, &MemberAuth { passphrase: &Passphrase::new(b"a pass"), kdf: &a.kdf_params, member_id: &a_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-a"), 0).unwrap();
 
-        // Owner removes A → new epoch; seals content under it. B's PRE-removal sealer can't open it yet.
-        let removed = remove_member(&k2.keyring, &Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &MemberId::new(MEMBER2), &ReplicaId::new(b"r-owner2")).unwrap();
+        let removed = remove_member(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &a_id, &ReplicaId::new(b"r-owner2")).unwrap();
         let new_sealed = seal_open(&removed.sealer, b"post-removal secret");
-        assert!(bu.sealer.open_entry(EntryKind::Snapshot, &new_sealed).is_err(), "B's old-epoch sealer can't open new-epoch content");
+        assert!(bu.sealer.open_entry(EntryKind::Snapshot, &new_sealed).is_err());
 
-        // B ADOPTS the rotated keyring with its retained HPKE secret (no passphrase) and splices the new epoch.
-        let adopted = adopt_member_epochs(&removed.keyring, &b_hpke, TREE, MEMBER3).unwrap();
-        assert!(adopted.epochs.iter().any(|(k, _)| k.as_slice() == adopted.write_key_id.as_slice()), "the new write epoch is reachable");
+        let adopted = adopt_member_epochs(&removed.keyring, &b_hpke, TREE, b_id.as_str()).unwrap();
         let mut sealer = bu.sealer;
         sealer.adopt_epochs(adopted.epochs, adopted.write_key_id, adopted.governing_ref);
-        assert_eq!(sealer.open_entry(EntryKind::Snapshot, &new_sealed).unwrap(), b"post-removal secret", "B now opens post-rotation content");
+        assert_eq!(sealer.open_entry(EntryKind::Snapshot, &new_sealed).unwrap(), b"post-removal secret");
 
-        // A REMOVED member reaches no epoch → MissingWrap (the app-core caller turns this into a soft no-op).
-        assert!(matches!(adopt_member_epochs(&removed.keyring, &a_hpke, TREE, MEMBER2), Err(VaultError::MissingWrap)));
-    }
-
-    #[test]
-    fn change_passphrase_on_a_shared_tree_keeps_the_member_and_bridges_trust() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
-        let shared = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let sealed = {
-            let owner_sealer = unlock(
-                &shared.keyring,
-                &Passphrase::new(b"owner pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"r"),
-            )
-            .unwrap()
-            .sealer;
-            seal_open(&owner_sealer, b"family notes")
-        };
-        let old_founder = founder_key(&shared.keyring);
-
-        // The owner changes their passphrase on the SHARED tree — no longer refused.
-        let re = change_passphrase(
-            &shared.keyring,
-            &Passphrase::new(b"owner pass"),
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-        )
-        .unwrap();
-
-        // The owner opens with the new passphrase, not the old.
-        assert!(unlock(
-            &re.keyring,
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_ok());
-        assert!(unlock(
-            &re.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_err());
-
-        // Continuity: the member still verifies against the key they pinned BEFORE the change
-        // (the old founder co-signed the transition), and reads the owner's content.
-        let (via_old, _) = unlock_as_member(
-            &re.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"member pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[old_founder],
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-m"),
-            0,
-        )
-        .unwrap();
-        assert_eq!(
-            via_old
-                .sealer
-                .open_entry(EntryKind::Snapshot, &sealed)
-                .unwrap(),
-            b"family notes"
-        );
-        // And also against the new founder key, once re-pinned.
-        let new_founder = founder_key(&re.keyring);
-        assert!(unlock_as_member(
-            &re.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"member pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[new_founder]
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-m2"),
-            0
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn recover_on_a_shared_tree_keeps_members_but_forces_reverify() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
-        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
-        let shared = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Viewer,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let old_founder = founder_key(&shared.keyring);
-
-        // The owner recovers (lost passphrase) — members are preserved, not wiped.
-        let rec = recover(
-            &shared.keyring,
-            &owner.recovery_code,
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o2"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[],
-            },
-        )
-        .unwrap();
-        assert!(unlock(
-            &rec.keyring,
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_ok());
-
-        // Recovery can't co-sign with the old identity, so the member's OLD pin no longer
-        // verifies — they must re-verify out-of-band and re-pin the new founder key.
-        assert!(unlock_as_member(
-            &rec.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"member pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[old_founder]
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-m"),
-            0
-        )
-        .is_err());
-        let new_founder = founder_key(&rec.keyring);
-        assert!(unlock_as_member(
-            &rec.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"member pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[new_founder]
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-m2"),
-            0
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn recovery_survives_removals_and_change_passphrase_after_recover() {
-        // A removal makes a second epoch. The recovery code does NOT rotate on a removal
-        // (the RRK escrows the new epoch), so the ORIGINAL code still recovers afterward.
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
-        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
-        let k1 = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let removed = remove_member(
-            &k1.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-            &ReplicaId::new(b"r-o2"),
-        )
-        .unwrap();
-
-        let rec = recover(
-            &removed.keyring,
-            &owner.recovery_code,
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o3"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[],
-            },
-        )
-        .unwrap();
-        assert!(unlock(
-            &rec.keyring,
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_ok());
-
-        // change_passphrase after a recover on a multi-epoch tree must not brick.
-        let ch = change_passphrase(
-            &rec.keyring,
-            &Passphrase::new(b"new pass"),
-            &Passphrase::new(b"newer pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-        )
-        .unwrap();
-        assert!(unlock(
-            &ch.keyring,
-            &Passphrase::new(b"newer pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r")
-        )
-        .is_ok());
+        assert!(matches!(adopt_member_epochs(&removed.keyring, &a_hpke, TREE, a_id.as_str()), Err(VaultError::MissingWrap)));
     }
 
     #[test]
     fn owner_reads_across_epochs_after_a_rotation() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
-        let old = seal_open(&owner.sealer, b"old epoch content"); // epoch 0
-
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
+        let old = seal_open(&owner.sealer, b"old epoch content");
         let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
-        let k1 = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let removed = remove_member(
-            &k1.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-            &ReplicaId::new(b"r-o2"),
-        )
-        .unwrap();
-        let new = seal_open(&removed.sealer, b"new epoch content"); // epoch 1
-
-        // The owner unlocks a set spanning BOTH epochs and reads old and new content.
-        let u = unlock(
-            &removed.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r"),
-        )
-        .unwrap();
-        assert_eq!(
-            u.sealer.open_entry(EntryKind::Snapshot, &old).unwrap(),
-            b"old epoch content"
-        );
-        assert_eq!(
-            u.sealer.open_entry(EntryKind::Snapshot, &new).unwrap(),
-            b"new epoch content"
-        );
+        let mid = jid(&m.author_public_key);
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
+        let removed = remove_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &mid, &ReplicaId::new(b"r-o2")).unwrap();
+        let new = seal_open(&removed.sealer, b"new epoch content");
+        let u = unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).unwrap();
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &old).unwrap(), b"old epoch content");
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &new).unwrap(), b"new epoch content");
     }
 
     #[test]
     fn a_member_added_later_reads_the_pre_join_history() {
-        // Content sealed before the member joins is readable by them (all-epoch wraps +
-        // multi-epoch read), which is the family-archive behavior we chose.
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let pre = seal_open(&owner.sealer, b"pre-join photo");
         let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
-        let added = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Viewer,
-                &m.author_public_key,
-                &m.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let mid = jid(&m.author_public_key);
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&mid, MemberRole::Viewer, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
-        let (u, _) = unlock_as_member(
-            &added.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"m pass"),
-                kdf: &m.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[pinned],
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-m"),
-            0,
-        )
-        .unwrap();
-        assert_eq!(
-            u.sealer.open_entry(EntryKind::Snapshot, &pre).unwrap(),
-            b"pre-join photo"
-        );
+        let (u, _) = unlock_as_member(&added.keyring, &MemberAuth { passphrase: &Passphrase::new(b"m pass"), kdf: &m.kdf_params, member_id: &mid, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-m"), 0).unwrap();
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &pre).unwrap(), b"pre-join photo");
     }
 
     #[test]
     fn founder_promotes_and_demotes_a_co_owner() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
-        let added = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &co.author_public_key,
-                &co.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let co_id = jid(&co.author_public_key);
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
 
-        // Promote to co-owner: added to the signer set, member role bumped, founder-signed.
-        let promoted = add_co_owner(
-            &added.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-        )
-        .unwrap();
+        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
         let k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
-        // Promotion raises the member's role to CO_OWNER — which IS the signer set now (derived from
-        // members) — keeping their author key.
-        assert!(k.members.iter().any(|m| m.member_id == MEMBER2
-            && m.role == MemberRole::CoOwner as i32
-            && m.author_public_key == co.author_public_key));
-        let founder = founder_key(&owner.keyring);
-        verify_keyring(&k, &founder).unwrap(); // the signer-set change is founder-authorized
+        assert!(k.members.iter().any(|m| m.member_id == co_id.as_str() && m.role == MemberRole::CoOwner as i32 && m.author_public_key == co.author_public_key));
+        verify_keyring(&k, &founder_key(&owner.keyring)).unwrap();
 
-        // Adding an already-signer, or a non-member, is rejected.
         assert!(matches!(
-            add_co_owner(
-                &promoted.keyring,
-                &Passphrase::new(b"owner pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                0,
-                &MemberId::new(MEMBER2)
-            ),
+            add_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id),
             Err(VaultError::MemberExists)
         ));
         assert!(matches!(
-            add_co_owner(
-                &promoted.keyring,
-                &Passphrase::new(b"owner pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                0,
-                &MemberId::new("nobody")
-            ),
+            add_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &MemberId::new("nobody")),
             Err(VaultError::MemberNotFound)
         ));
 
-        // Demote back to viewer: removed from signers, role changed.
-        let demoted = remove_co_owner(
-            &promoted.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-            MemberRole::Viewer,
-        )
-        .unwrap();
+        let demoted = remove_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id, MemberRole::Viewer).unwrap();
         let k2 = Keyring::decode(demoted.keyring.as_slice()).unwrap();
-        // Demotion drops the member below CO_OWNER, so they are no longer in the derived signer set.
-        assert!(!k2.members.iter().any(|m| m.member_id == MEMBER2
-            && (m.role == MemberRole::Owner as i32 || m.role == MemberRole::CoOwner as i32)));
-        assert!(k2
-            .members
-            .iter()
-            .any(|m| m.member_id == MEMBER2 && m.role == MemberRole::Viewer as i32));
-        // Demoting a non-co-owner is rejected.
+        assert!(!k2.members.iter().any(|m| m.member_id == co_id.as_str() && (m.role == MemberRole::Owner as i32 || m.role == MemberRole::CoOwner as i32)));
+        assert!(k2.members.iter().any(|m| m.member_id == co_id.as_str() && m.role == MemberRole::Viewer as i32));
         assert!(matches!(
-            remove_co_owner(
-                &demoted.keyring,
-                &Passphrase::new(b"owner pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                0,
-                &MemberId::new(MEMBER2),
-                MemberRole::Viewer
-            ),
+            remove_co_owner(&demoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id, MemberRole::Viewer),
             Err(VaultError::MemberNotFound)
         ));
     }
 
     #[test]
     fn a_co_owner_adds_a_member_who_reads_the_tree() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let sealed = seal_open(&owner.sealer, b"tree content");
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
-        let k1 = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &co.author_public_key,
-                &co.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let promoted = add_co_owner(
-            &k1.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-        )
-        .unwrap();
+        let co_id = jid(&co.author_public_key);
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
         let pinned = founder_key(&owner.keyring);
 
-        // The CO-OWNER (signing with their own identity, reaching DEKs via their own wraps)
-        // adds a new member.
         let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
+        let m3_id = jid(&m3.author_public_key);
         let added = add_member_as_co_owner(
             &promoted.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"co pass"),
-                kdf: &co.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[pinned],
-            },
+            &MemberAuth { passphrase: &Passphrase::new(b"co pass"), kdf: &co.kdf_params, member_id: &co_id, trusted_signers: &[pinned] },
             &TreeId::new(TREE),
             0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER3),
-                MemberRole::Viewer,
-                &m3.author_public_key,
-                &m3.hpke_public_key,
-            )
-            .unwrap(),
+            &Joiner::from_bytes(&m3_id, MemberRole::Viewer, &m3.author_public_key, &m3.hpke_public_key).unwrap(),
         )
         .unwrap();
 
-        // The added member unlocks (trusting the founder AND the co-owner who added them — a
-        // co-owner signed this revision) and reads content sealed before they joined.
         let co_vk = vk(&co.author_public_key);
-        let (u, _) = unlock_as_member(
-            &added.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"m3 pass"),
-                kdf: &m3.kdf_params,
-                member_id: &MemberId::new(MEMBER3),
-                trusted_signers: &[pinned, co_vk],
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-m3"),
-            0,
-        )
-        .unwrap();
-        assert_eq!(
-            u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
-            b"tree content"
-        );
+        let (u, _) = unlock_as_member(&added.keyring, &MemberAuth { passphrase: &Passphrase::new(b"m3 pass"), kdf: &m3.kdf_params, member_id: &m3_id, trusted_signers: &[pinned, co_vk] }, &TreeId::new(TREE), &ReplicaId::new(b"r-m3"), 0).unwrap();
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"tree content");
     }
 
     #[test]
     fn a_co_owner_removes_a_member_forward_securely() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let victim = provision_member(&Passphrase::new(b"v pass")).unwrap();
-        let k1 = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &co.author_public_key,
-                &co.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let k2 = add_member(
-            &k1.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER3),
-                MemberRole::Editor,
-                &victim.author_public_key,
-                &victim.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let promoted = add_co_owner(
-            &k2.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-        )
-        .unwrap();
+        let co_id = jid(&co.author_public_key);
+        let victim_id = jid(&victim.author_public_key);
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&victim_id, MemberRole::Editor, &victim.author_public_key, &victim.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
         let pinned = founder_key(&owner.keyring);
 
-        // The co-owner removes MEMBER3 (an ordinary member) and seals under the new epoch.
         let removed = remove_member_as_co_owner(
             &promoted.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"co pass"),
-                kdf: &co.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[pinned],
-            },
+            &MemberAuth { passphrase: &Passphrase::new(b"co pass"), kdf: &co.kdf_params, member_id: &co_id, trusted_signers: &[pinned] },
             &TreeId::new(TREE),
             0,
-            &MemberId::new(MEMBER3),
+            &victim_id,
             &ReplicaId::new(b"r-co"),
         )
         .unwrap();
         let new = seal_open(&removed.sealer, b"post-removal");
-        // Even trusting the co-owner, the removed member has no wrap → locked out (forward
-        // secrecy). The founder still reaches the co-owner's new content via the RRK.
         let co_vk = vk(&co.author_public_key);
         assert!(matches!(
-            unlock_as_member(
-                &removed.keyring,
-                &MemberAuth {
-                    passphrase: &Passphrase::new(b"v pass"),
-                    kdf: &victim.kdf_params,
-                    member_id: &MemberId::new(MEMBER3),
-                    trusted_signers: &[pinned, co_vk]
-                },
-                &TreeId::new(TREE),
-                &ReplicaId::new(b"r"),
-                0
-            ),
+            unlock_as_member(&removed.keyring, &MemberAuth { passphrase: &Passphrase::new(b"v pass"), kdf: &victim.kdf_params, member_id: &victim_id, trusted_signers: &[pinned, co_vk] }, &TreeId::new(TREE), &ReplicaId::new(b"r"), 0),
             Err(VaultError::MissingWrap)
         ));
-        let ou = unlock(
-            &removed.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o2"),
-        )
-        .unwrap();
-        assert_eq!(
-            ou.sealer.open_entry(EntryKind::Snapshot, &new).unwrap(),
-            b"post-removal"
-        );
+        let ou = unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o2")).unwrap();
+        assert_eq!(ou.sealer.open_entry(EntryKind::Snapshot, &new).unwrap(), b"post-removal");
     }
 
     #[test]
     fn an_ordinary_member_cannot_administer() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let ed = provision_member(&Passphrase::new(b"ed pass")).unwrap();
-        let k1 = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &ed.author_public_key,
-                &ed.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let ed_id = jid(&ed.author_public_key);
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&ed_id, MemberRole::Editor, &ed.author_public_key, &ed.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
         let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
-        // MEMBER2 is only an Editor, not a co-owner → NotAuthorized for both ops.
+        let m3_id = jid(&m3.author_public_key);
         assert!(matches!(
-            add_member_as_co_owner(
-                &k1.keyring,
-                &MemberAuth {
-                    passphrase: &Passphrase::new(b"ed pass"),
-                    kdf: &ed.kdf_params,
-                    member_id: &MemberId::new(MEMBER2),
-                    trusted_signers: &[pinned]
-                },
-                &TreeId::new(TREE),
-                0,
-                &Joiner::from_bytes(
-                    &MemberId::new(MEMBER3),
-                    MemberRole::Viewer,
-                    &m3.author_public_key,
-                    &m3.hpke_public_key
-                )
-                .unwrap()
-            ),
+            add_member_as_co_owner(&k1.keyring, &MemberAuth { passphrase: &Passphrase::new(b"ed pass"), kdf: &ed.kdf_params, member_id: &ed_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), 0, &Joiner::from_bytes(&m3_id, MemberRole::Viewer, &m3.author_public_key, &m3.hpke_public_key).unwrap()),
             Err(VaultError::NotAuthorized)
         ));
         assert!(matches!(
-            remove_member_as_co_owner(
-                &k1.keyring,
-                &MemberAuth {
-                    passphrase: &Passphrase::new(b"ed pass"),
-                    kdf: &ed.kdf_params,
-                    member_id: &MemberId::new(MEMBER2),
-                    trusted_signers: &[pinned]
-                },
-                &TreeId::new(TREE),
-                0,
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"r")
-            ),
+            remove_member_as_co_owner(&k1.keyring, &MemberAuth { passphrase: &Passphrase::new(b"ed pass"), kdf: &ed.kdf_params, member_id: &ed_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), 0, &MemberId::new(MEMBER), &ReplicaId::new(b"r")),
             Err(VaultError::NotAuthorized)
         ));
     }
 
     #[test]
     fn a_co_owner_cannot_remove_a_signer() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co1 = provision_member(&Passphrase::new(b"co1 pass")).unwrap();
         let co2 = provision_member(&Passphrase::new(b"co2 pass")).unwrap();
-        let k1 = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &co1.author_public_key,
-                &co1.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let k2 = add_member(
-            &k1.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER3),
-                MemberRole::Editor,
-                &co2.author_public_key,
-                &co2.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let p1 = add_co_owner(
-            &k2.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-        )
-        .unwrap();
-        let p2 = add_co_owner(
-            &p1.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER3),
-        )
-        .unwrap();
+        let co1_id = jid(&co1.author_public_key);
+        let co2_id = jid(&co2.author_public_key);
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co1_id, MemberRole::Editor, &co1.author_public_key, &co1.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co2_id, MemberRole::Editor, &co2.author_public_key, &co2.hpke_public_key).unwrap()).unwrap();
+        let p1 = add_co_owner(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co1_id).unwrap();
+        let p2 = add_co_owner(&p1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co2_id).unwrap();
         let pinned = founder_key(&owner.keyring);
-        // A co-owner may remove ordinary members only — not another co-owner, not the founder.
         assert!(matches!(
-            remove_member_as_co_owner(
-                &p2.keyring,
-                &MemberAuth {
-                    passphrase: &Passphrase::new(b"co1 pass"),
-                    kdf: &co1.kdf_params,
-                    member_id: &MemberId::new(MEMBER2),
-                    trusted_signers: &[pinned]
-                },
-                &TreeId::new(TREE),
-                0,
-                &MemberId::new(MEMBER3),
-                &ReplicaId::new(b"r")
-            ),
-            Err(VaultError::NotAuthorized)
-        ));
-        assert!(matches!(
-            remove_member_as_co_owner(
-                &p2.keyring,
-                &MemberAuth {
-                    passphrase: &Passphrase::new(b"co1 pass"),
-                    kdf: &co1.kdf_params,
-                    member_id: &MemberId::new(MEMBER2),
-                    trusted_signers: &[pinned]
-                },
-                &TreeId::new(TREE),
-                0,
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"r")
-            ),
+            remove_member_as_co_owner(&p2.keyring, &MemberAuth { passphrase: &Passphrase::new(b"co1 pass"), kdf: &co1.kdf_params, member_id: &co1_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), 0, &co2_id, &ReplicaId::new(b"r")),
             Err(VaultError::NotAuthorized)
         ));
     }
 
     #[test]
     fn add_member_rejects_a_signer_role() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-o")).unwrap();
         let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
-        assert!(add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::CoOwner,
-                &m.author_public_key,
-                &m.hpke_public_key
-            )
-            .unwrap()
-        )
-        .is_err());
-        assert!(add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Owner,
-                &m.author_public_key,
-                &m.hpke_public_key
-            )
-            .unwrap()
-        )
-        .is_err());
+        let mid = jid(&m.author_public_key);
+        assert!(add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&mid, MemberRole::CoOwner, &m.author_public_key, &m.hpke_public_key).unwrap()).is_err());
+        assert!(add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&mid, MemberRole::Owner, &m.author_public_key, &m.hpke_public_key).unwrap()).is_err());
     }
 
     #[test]
     fn a_signer_set_change_not_signed_by_the_founder_is_rejected() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
-        let added = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &co.author_public_key,
-                &co.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let promoted = add_co_owner(
-            &added.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-        )
-        .unwrap();
+        let co_id = jid(&co.author_public_key);
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
         let founder = founder_key(&owner.keyring);
 
-        // A rogue co-owner appends a signer (a CO_OWNER-role member — the signer set is derived from
-        // members) and signs ONLY with their own identity.
         let co_identity = derive_root(b"co pass", &co.kdf_params).unwrap().identity;
         let mut k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
-        k.members.push(Member {
-            member_id: "acct-rogue".into(),
-            role: MemberRole::CoOwner as i32,
-            author_public_key: vec![9u8; 32],
-            hpke_public_key: vec![9u8; 32],
-        });
+        k.members.push(Member { member_id: "acct-rogue".into(), role: MemberRole::CoOwner as i32, author_public_key: vec![9u8; 32], hpke_public_key: vec![9u8; 32] });
         k.revision += 1;
         k.signatures.clear();
         sign_keyring(&mut k, &co_identity);
-
-        // The founder-gate: a signer-set change must carry the founder's signature — it does
-        // not, so the change is rejected even though the co-owner (a valid any-of signer for
-        // ORDINARY revisions) did sign it.
         assert!(verify_keyring(&k, &founder).is_err());
         verify_keyring(&k, &co_identity.verifying_key()).unwrap();
     }
 
     #[test]
     fn the_owner_cannot_be_removed_and_a_non_member_is_rejected() {
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-owner"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
         assert!(matches!(
-            remove_member(
-                &owner.keyring,
-                &Passphrase::new(b"owner pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                0,
-                &MemberId::new(MEMBER),
-                &ReplicaId::new(b"r")
-            ),
+            remove_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &MemberId::new(MEMBER), &ReplicaId::new(b"r")),
             Err(VaultError::CannotRemoveOwner)
         ));
         assert!(matches!(
-            remove_member(
-                &owner.keyring,
-                &Passphrase::new(b"owner pass"),
-                &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
-                0,
-                &MemberId::new("nobody"),
-                &ReplicaId::new(b"r")
-            ),
+            remove_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &MemberId::new("nobody"), &ReplicaId::new(b"r")),
             Err(VaultError::MemberNotFound)
         ));
     }
 
     #[test]
     fn recover_preserves_a_co_owner_signer_and_their_access() {
-        // Regression for design.sharing §2.5 bug 2: recover() must SPLICE only the founder's own
-        // slot, never rebuild the keyring — a rebuild would wipe the other co-owners. Provision,
-        // add a member, promote them to co-owner, then recover the founder and assert the co-owner
-        // survives both structurally (still in the signer set) and functionally (still reads).
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, code) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
-        let added = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &co.author_public_key,
-                &co.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let promoted = add_co_owner(
-            &added.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-        )
-        .unwrap();
+        let co_id = jid(&co.author_public_key);
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
+        let pinned = founder_key(&owner.keyring);
+        let ks_bytes = ks.to_bytes().unwrap();
 
-        let rec = recover(
-            &promoted.keyring,
-            &owner.recovery_code,
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o2"),
-            &RecoverWatermark {
-                min_revision: 0,
-                write_key_id: &[],
-                dek_hash: &[],
-            },
-        )
-        .unwrap();
+        let rec = recover(&promoted.keyring, &ks_bytes, &code, &Passphrase::new(b"new pass"), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o2"), &no_watermark()).unwrap();
         let k = Keyring::decode(rec.keyring.as_slice()).unwrap();
-
-        // The co-owner (a CO_OWNER-role member — the signer set is derived from members) survived
-        // recovery, unchanged.
-        assert!(
-            k.members.iter().any(|m| m.member_id == MEMBER2
-                && m.role == MemberRole::CoOwner as i32
-                && m.author_public_key == co.author_public_key),
-            "recover must not drop a co-owner from the signer set"
-        );
-        // …and they still read the tree — re-pinning the new founder, per the succession boundary
-        // (recover can't co-sign with the old identity, so old pins no longer verify).
-        let new_founder = founder_key(&rec.keyring);
-        assert!(unlock_as_member(
-            &rec.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"co pass"),
-                kdf: &co.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[new_founder]
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-co"),
-            0
-        )
-        .is_ok());
+        assert!(k.members.iter().any(|m| m.member_id == co_id.as_str() && m.role == MemberRole::CoOwner as i32 && m.author_public_key == co.author_public_key));
+        assert!(unlock_as_member(&rec.keyring, &MemberAuth { passphrase: &Passphrase::new(b"co pass"), kdf: &co.kdf_params, member_id: &co_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-co"), 0).is_ok());
     }
 
     #[test]
-    fn change_passphrase_preserves_a_co_owner_and_bridges_their_trust() {
-        // Regression for design.sharing §2.5 bug 1: the OLD founder must co-sign the change (not a
-        // self-signed new key that a member can't distinguish from a forgery), and co-owners are
-        // left intact. Assert the co-owner's signer entry survives and, because the old founder
-        // co-signed, the co-owner still verifies against the key it pinned before the change.
-        let owner = provision(
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            &ReplicaId::new(b"r-o"),
-        )
-        .unwrap();
+    fn change_passphrase_leaves_the_tree_and_its_members_untouched() {
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
-        let added = add_member(
-            &owner.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &Joiner::from_bytes(
-                &MemberId::new(MEMBER2),
-                MemberRole::Editor,
-                &co.author_public_key,
-                &co.hpke_public_key,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let promoted = add_co_owner(
-            &added.keyring,
-            &Passphrase::new(b"owner pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-            &MemberId::new(MEMBER2),
-        )
-        .unwrap();
-        let old_founder = founder_key(&promoted.keyring);
+        let co_id = jid(&co.author_public_key);
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let pinned = founder_key(&owner.keyring);
+        let ks_bytes = ks.to_bytes().unwrap();
 
-        let re = change_passphrase(
-            &promoted.keyring,
-            &Passphrase::new(b"owner pass"),
-            &Passphrase::new(b"new pass"),
-            &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
-            0,
-        )
-        .unwrap();
-        let k = Keyring::decode(re.keyring.as_slice()).unwrap();
+        let re = change_passphrase(&added.keyring, &ks_bytes, &Passphrase::new(b"owner pass"), &Passphrase::new(b"new pass"), &TreeId::new(TREE), &me, 0).unwrap();
+        assert_eq!(re.keyring, added.keyring);
+        assert!(unlock_as_member(&re.keyring, &MemberAuth { passphrase: &Passphrase::new(b"co pass"), kdf: &co.kdf_params, member_id: &co_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-co"), 0).is_ok());
+    }
 
-        assert!(
-            k.members.iter().any(|m| m.member_id == MEMBER2
-                && m.role == MemberRole::CoOwner as i32
-                && m.author_public_key == co.author_public_key),
-            "change_passphrase must leave co-owners untouched"
-        );
-        // The old founder co-signed, so the co-owner still verifies against its pre-change pin.
-        assert!(unlock_as_member(
-            &re.keyring,
-            &MemberAuth {
-                passphrase: &Passphrase::new(b"co pass"),
-                kdf: &co.kdf_params,
-                member_id: &MemberId::new(MEMBER2),
-                trusted_signers: &[old_founder]
-            },
-            &TreeId::new(TREE),
-            &ReplicaId::new(b"r-co"),
-            0
-        )
-        .is_ok());
+    #[test]
+    fn first_shared_revision_is_set_once_carried_forward_and_never_cleared() {
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
+        assert_eq!(first_shared(&owner.keyring), 0);
+
+        let m2 = provision_member(&Passphrase::new(b"m2 pass")).unwrap();
+        let m2_id = jid(&m2.author_public_key);
+        let add1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 1, &Joiner::from_bytes(&m2_id, MemberRole::Editor, &m2.author_public_key, &m2.hpke_public_key).unwrap()).unwrap();
+        assert_eq!(add1.revision, 2);
+        assert_eq!(first_shared(&add1.keyring), 2);
+
+        let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
+        let m3_id = jid(&m3.author_public_key);
+        let add2 = add_member(&add1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 2, &Joiner::from_bytes(&m3_id, MemberRole::Editor, &m3.author_public_key, &m3.hpke_public_key).unwrap()).unwrap();
+        assert_eq!(first_shared(&add2.keyring), 2);
+
+        let rem1 = remove_member(&add2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 3, &m3_id, &ReplicaId::new(b"r-owner")).unwrap();
+        assert_eq!(first_shared(&rem1.keyring), 2);
+        let rem2 = remove_member(&rem1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 4, &m2_id, &ReplicaId::new(b"r-owner")).unwrap();
+        let k = Keyring::decode(rem2.keyring.as_slice()).unwrap();
+        assert_eq!(k.members.len(), 1);
+        assert_eq!(k.first_shared_revision, 2);
+    }
+
+    #[test]
+    fn writer_signs_iff_the_tree_has_been_shared() {
+        use openom_protocol::v1::Envelope;
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
+
+        let u_solo = unlock(&owner.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-b")).unwrap();
+        let solo = Envelope::decode(seal_open(&u_solo.sealer, b"solo edit").as_slice()).unwrap().header.unwrap();
+        assert!(solo.author_signature.is_empty(), "a never-shared tree writes unattributed");
+
+        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
+        let mid = jid(&m.author_public_key);
+        let add = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 1, &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
+
+        let u_owner = unlock(&add.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-c")).unwrap();
+        let owner_h = Envelope::decode(seal_open(&u_owner.sealer, b"owner edit").as_slice()).unwrap().header.unwrap();
+        assert!(!owner_h.author_signature.is_empty(), "shared tree: owner signs");
+        assert_eq!(owner_h.author_member_id, me.as_str());
+
+        let founder = founder_key(&add.keyring);
+        let (u_member, _) = unlock_as_member(&add.keyring, &MemberAuth { passphrase: &Passphrase::new(b"m pass"), kdf: &m.kdf_params, member_id: &mid, trusted_signers: &[founder] }, &TreeId::new(TREE), &ReplicaId::new(b"r-m"), 0).unwrap();
+        let member_h = Envelope::decode(seal_open(&u_member.sealer, b"member edit").as_slice()).unwrap().header.unwrap();
+        assert!(!member_h.author_signature.is_empty(), "shared tree: member signs");
+        assert_eq!(member_h.author_member_id, mid.as_str());
+    }
+
+    #[test]
+    fn first_shared_revision_is_covered_by_the_signature() {
+        let owner_pass = Passphrase::new(b"owner pass");
+        let (ks, _c) = make_owner(&owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
+        let founder = founder_key(&owner.keyring);
+        let mut k = Keyring::decode(owner.keyring.as_slice()).unwrap();
+        verify_keyring(&k, &founder).unwrap();
+        k.first_shared_revision = 7;
+        assert!(verify_keyring(&k, &founder).is_err());
     }
 }

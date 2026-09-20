@@ -6,11 +6,17 @@
 //! `MembershipAction` + `apply`s it (did the target member change?) — and assert they AGREE, except at
 //! the two documented v1 divergences (self-removal widen; unanimity is v2), which are asserted as
 //! *expected* divergences so the oracle stays honest.
+//!
+//! OPE-543: a member id is the self-certifying `uuid8` of its author key, so every id is derived from its
+//! seed via [`mid`] (both engines carry the same id — the chain treats it as an opaque label). Recovery is
+//! no longer an on-tree op for openom (a `ReFound` is unauthorized at the openom layer), so the recovery
+//! differential rows are retired; the generic recovery machinery is proven in keyeo-dag's `reset_defense`.
 
 use keyeo_dag::{Keyeo, MemberInit, MembershipAction, StrongRemove};
-use openom_keyring_chain::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
+use openom_keyring_chain::{keyring_hash, sign_keyring, verify_transition, KeyringAnchor};
 use openom_keyring_dag::{
-    recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
+    derive_member_id, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole,
+    KeyringState,
 };
 use openom_protocol::v1::MemberRole;
 use openom_keyring_chain::wire::{Keyring, Member};
@@ -20,24 +26,6 @@ use keyeo_crypto::{
 };
 use openom_roles::{MEMBER_CO_OWNER, MEMBER_OWNER};
 use edsign::SigningKey;
-
-/// Decode a chain keyring's epochs (the fixtures build them well-formed).
-fn epochs_of(k: &Keyring) -> Vec<KeyeoEpoch<String>> {
-    k.key_material().unwrap()
-}
-fn set_epochs(k: &mut Keyring, epochs: &[KeyeoEpoch<String>]) {
-    k.epochs = codec::encode_epochs(epochs);
-}
-fn push_wrap(k: &mut Keyring, w: KeyeoWrap<String>) {
-    let mut eps = epochs_of(k);
-    eps[0].wraps.push(w);
-    set_epochs(k, &eps);
-}
-fn retain_wraps(k: &mut Keyring, keep: impl Fn(&KeyeoWrap<String>) -> bool) {
-    let mut eps = epochs_of(k);
-    eps[0].wraps.retain(|w| keep(w));
-    set_epochs(k, &eps);
-}
 
 const TREE: &[u8] = b"tree-uuid-16byte";
 const RRK_HPKE: i32 = KeyeoWrapMethod::TAG_RRK_HPKE;
@@ -54,19 +42,22 @@ fn pubv(k: &SigningKey) -> Vec<u8> {
 fn pk32(k: &SigningKey) -> [u8; 32] {
     k.verifying_key().to_bytes()
 }
+/// The self-certifying member id for a seed's author key.
+fn mid(seed: u8) -> String {
+    derive_member_id(&pk32(&sk(seed)))
+}
 
 // ── one cast description, projected into both systems ──
 struct Cast {
     seed: u8,
-    id: &'static str,
     /// Proto `MemberRole` value (drives both the chain member role and the keyeo `KeyringRole`). The chain
     /// signer set is DERIVED from this (a member at `CO_OWNER` or stronger is a signer, OPE-309), so there is
     /// no separate signer-role axis.
     member_role: i32,
 }
 
-fn keyed_member(k: &SigningKey, id: &str, role: i32) -> Member {
-    Member { member_id: id.into(), role, author_public_key: pubv(k), hpke_public_key: vec![9; 32] }
+fn keyed_member(seed: u8, role: i32) -> Member {
+    Member { member_id: mid(seed), role, author_public_key: pubv(&sk(seed)), hpke_public_key: vec![9; 32] }
 }
 fn wrap(id: &str, method: i32) -> KeyeoWrap<String> {
     let encapped = EncappedKey::from_bytes([0u8; 32]);
@@ -84,9 +75,8 @@ fn chain_genesis(cast: &[Cast]) -> Keyring {
     let mut members = Vec::new();
     let mut wraps = Vec::new();
     for (i, c) in cast.iter().enumerate() {
-        let k = sk(c.seed);
-        members.push(keyed_member(&k, c.id, c.member_role));
-        wraps.push(wrap(c.id, if i == 0 { RRK_HPKE } else { HPKE }));
+        members.push(keyed_member(c.seed, c.member_role));
+        wraps.push(wrap(&mid(c.seed), if i == 0 { RRK_HPKE } else { HPKE }));
     }
     let mut g = Keyring {
         tree_id: TREE.to_vec(),
@@ -121,7 +111,7 @@ fn keyeo_engine(cast: &[Cast]) -> KeyringEngine {
     let inits: Vec<KeyringMemberInit> = cast
         .iter()
         .map(|c| MemberInit {
-            id: c.id.to_string(),
+            id: mid(c.seed),
             role: KeyringRole(i16::try_from(c.member_role).unwrap()),
             author_public_key: pk32(&sk(c.seed)),
             hpke_public_key: [c.seed; 32],
@@ -130,40 +120,30 @@ fn keyeo_engine(cast: &[Cast]) -> KeyringEngine {
     Keyeo::new(KeyringState::create(keyeo_dag::GroupId::unscoped(), &inits), KeyringAccess, StrongRemove)
 }
 
-fn keyeo_has(k: &KeyringEngine, id: &str) -> bool {
-    k.state().active_members().iter().any(|(m, _)| m == id)
+fn keyeo_has(k: &KeyringEngine, seed: u8) -> bool {
+    let id = mid(seed);
+    k.state().active_members().iter().any(|(m, _)| *m == id)
 }
 
-/// keyeo engine for a cast WITH a pinned recovery authority (RVK) — the recovery differential needs it.
-fn keyeo_engine_with_rvk(cast: &[Cast], rvk_pub: [u8; 32]) -> KeyringEngine {
-    let inits: Vec<KeyringMemberInit> = cast
-        .iter()
-        .map(|c| MemberInit {
-            id: c.id.to_string(),
-            role: KeyringRole(i16::try_from(c.member_role).unwrap()),
-            author_public_key: pk32(&sk(c.seed)),
-            hpke_public_key: [c.seed; 32],
-        })
-        .collect();
-    Keyeo::new(
-        KeyringState::create(keyeo_dag::GroupId::unscoped(), &inits).with_reset_authority(Some(rvk_pub)),
-        KeyringAccess,
-        StrongRemove,
-    )
-}
-
-fn keyeo_owner_key(k: &KeyringEngine) -> [u8; 32] {
-    k.state().members.get("owner").unwrap().author_public_key
+/// The keyeo `Add` action for a seed at a role (the member id self-certifies against seed's key).
+fn dag_add(seed: u8, role: KeyringRole) -> MembershipAction<String, KeyringRole, openom_keyring_dag::Ed25519> {
+    MembershipAction::Add {
+        member: mid(seed),
+        role,
+        author_public_key: pk32(&sk(seed)),
+        hpke_public_key: [seed; 32],
+        member_proof: None,
+    }
 }
 
 fn founder() -> Cast {
-    Cast { seed: 1, id: "owner", member_role: MEMBER_OWNER }
+    Cast { seed: 1, member_role: MEMBER_OWNER }
 }
-fn co_owner(seed: u8, id: &'static str) -> Cast {
-    Cast { seed, id, member_role: MEMBER_CO_OWNER }
+fn co_owner(seed: u8) -> Cast {
+    Cast { seed, member_role: MEMBER_CO_OWNER }
 }
-fn plain(seed: u8, id: &'static str, role: i32) -> Cast {
-    Cast { seed, id, member_role: role }
+fn plain(seed: u8, role: i32) -> Cast {
+    Cast { seed, member_role: role }
 }
 
 // ────────────────────────────── AGREEMENT cases ──────────────────────────────
@@ -178,104 +158,68 @@ fn founder_adds_a_co_owner_agrees() {
         &g,
         |k| {
             // A CO_OWNER-role member IS a signer (derived from members) — no separate roster push.
-            k.members.push(keyed_member(&sk(5), "erin", MEMBER_CO_OWNER));
-            push_wrap(k, wrap("erin", HPKE));
+            k.members.push(keyed_member(5, MEMBER_CO_OWNER));
+            push_wrap(k, wrap(&mid(5), HPKE));
         },
         &[1], // founder signs
     );
     let chain_ok = verify_transition(&anchor, &cand).is_ok();
 
     let mut k = keyeo_engine(&cast);
-    k.apply(sign_op(
-        [2u8; 32],
-        vec![],
-        "owner",
-        MembershipAction::Add {
-            member: "erin".into(),
-            role: KeyringRole::CO_OWNER,
-            author_public_key: pk32(&sk(5)),
-            hpke_public_key: [5; 32],
-            member_proof: None,
-        },
-        &sk(1),
-    ))
-    .unwrap();
+    k.apply(sign_op([2u8; 32], vec![], mid(1), dag_add(5, KeyringRole::CO_OWNER), &sk(1)))
+        .unwrap();
 
     assert!(chain_ok, "chain.rs accepts a founder-signed co-owner add");
-    assert!(keyeo_has(&k, "erin"), "keyeo adds the co-owner");
+    assert!(keyeo_has(&k, 5), "keyeo adds the co-owner");
 }
 
 #[test]
 fn a_co_owner_adds_an_ordinary_member_agrees() {
     // Ordinary change (signer set unchanged) signed by a co-owner: both accept.
-    let cast = [founder(), co_owner(2, "bob")];
+    let cast = [founder(), co_owner(2)];
     let g = chain_genesis(&cast);
     let anchor = KeyringAnchor::from_keyring(&g);
     let cand = chain_next(
         &g,
         |k| {
-            k.members.push(keyed_member(&sk(3), "carol", EDITOR));
-            push_wrap(k, wrap("carol", HPKE));
+            k.members.push(keyed_member(3, EDITOR));
+            push_wrap(k, wrap(&mid(3), HPKE));
         },
         &[2], // co-owner bob signs
     );
     let chain_ok = verify_transition(&anchor, &cand).is_ok();
 
     let mut k = keyeo_engine(&cast);
-    k.apply(sign_op(
-        [2u8; 32],
-        vec![],
-        "bob",
-        MembershipAction::Add {
-            member: "carol".into(),
-            role: KeyringRole::EDITOR,
-            author_public_key: pk32(&sk(3)),
-            hpke_public_key: [3; 32],
-            member_proof: None,
-        },
-        &sk(2),
-    ))
-    .unwrap();
+    k.apply(sign_op([2u8; 32], vec![], mid(2), dag_add(3, KeyringRole::EDITOR), &sk(2)))
+        .unwrap();
 
     assert!(chain_ok, "chain.rs accepts a co-owner-signed ordinary add");
-    assert!(keyeo_has(&k, "carol"), "keyeo adds the ordinary member");
+    assert!(keyeo_has(&k, 3), "keyeo adds the ordinary member");
 }
 
 #[test]
 fn a_non_signer_cannot_write_agrees() {
     // dave is a keyed Maintainer member but NOT a signer. His attempt to add a member is rejected by
     // chain.rs (UnendorsedOrdinaryChange) and is a no-op in keyeo (unauthorized). Both: carol absent.
-    let cast = [founder(), plain(4, "dave", MAINTAINER)];
+    let cast = [founder(), plain(4, MAINTAINER)];
     let g = chain_genesis(&cast);
     let anchor = KeyringAnchor::from_keyring(&g);
     let cand = chain_next(
         &g,
         |k| {
-            k.members.push(keyed_member(&sk(3), "carol", EDITOR));
-            push_wrap(k, wrap("carol", HPKE));
+            k.members.push(keyed_member(3, EDITOR));
+            push_wrap(k, wrap(&mid(3), HPKE));
         },
         &[4], // dave (a non-signer) signs
     );
     let chain_ok = verify_transition(&anchor, &cand).is_ok();
 
     let mut k = keyeo_engine(&cast);
-    k.apply(sign_op(
-        [2u8; 32],
-        vec![],
-        "dave",
-        MembershipAction::Add {
-            member: "carol".into(),
-            role: KeyringRole::EDITOR,
-            author_public_key: pk32(&sk(3)),
-            hpke_public_key: [3; 32],
-            member_proof: None,
-        },
-        &sk(4),
-    ))
-    .unwrap();
+    k.apply(sign_op([2u8; 32], vec![], mid(4), dag_add(3, KeyringRole::EDITOR), &sk(4)))
+        .unwrap();
 
     assert!(!chain_ok, "chain.rs rejects a non-signer's change");
-    assert!(!keyeo_has(&k, "carol"), "keyeo: a non-signer's add has no effect");
+    assert!(!keyeo_has(&k, 3), "keyeo: a non-signer's add has no effect");
 }
 
 #[test]
@@ -289,110 +233,19 @@ fn founder_cannot_self_remove_agrees() {
         &g,
         |k| {
             // Removing the owner member removes the derived founder signer too.
-            k.members.retain(|m| m.member_id != "owner");
-            retain_wraps(k, |w| w.recipient != "owner");
+            k.members.retain(|m| m.member_id != mid(1));
+            retain_wraps(k, |w| w.recipient != mid(1));
         },
         &[1],
     );
     let chain_ok = verify_transition(&anchor, &cand).is_ok();
 
     let mut k = keyeo_engine(&cast);
-    k.apply(sign_op([2u8; 32], vec![], "owner", MembershipAction::Remove { member: "owner".into() }, &sk(1)))
+    k.apply(sign_op([2u8; 32], vec![], mid(1), MembershipAction::Remove { member: mid(1) }, &sk(1)))
         .unwrap();
 
     assert!(!chain_ok, "chain.rs rejects removing the sole founder");
-    assert!(keyeo_has(&k, "owner"), "keyeo: the Owner cannot self-remove");
-}
-
-// ────────────────────────────── RECOVERY (OPE-269) ──────────────────────────────
-
-#[test]
-fn recovery_re_establishes_the_owner_in_both_and_preserves_membership() {
-    // OUTCOME parity: a recovery re-founds the Owner under a fresh key while keeping every other member.
-    // chain.rs does it with verify_reset (a self-signed re-founding keyring); keyeo with an RVK-signed
-    // ReFound (a minimal delta). Different mechanisms, same result — the Q5 convergence claim.
-    let new_owner = 7u8; // the recovered Owner's fresh identity
-
-    // chain.rs: a reset keyring whose Owner is re-keyed to `new_owner`, self-signed by that new key.
-    let reset_cast = [
-        Cast { seed: new_owner, id: "owner", member_role: MEMBER_OWNER },
-        co_owner(2, "bob"),
-    ];
-    let reset = chain_genesis(&reset_cast); // chain_genesis self-signs with cast[0] = the new Owner key
-    let chain_anchor = verify_reset(None, &reset).expect("chain.rs accepts a self-signed re-founding");
-    assert_eq!(chain_anchor.revision, 1);
-    let chain_owner_key = reset
-        .members
-        .iter()
-        .find(|m| m.member_id == "owner")
-        .unwrap()
-        .author_public_key
-        .clone();
-    assert_eq!(chain_owner_key, pubv(&sk(new_owner)), "chain: Owner re-keyed");
-    assert!(reset.members.iter().any(|m| m.member_id == "bob"), "chain: bob preserved");
-
-    // keyeo: the same recovery as an RVK-signed ReFound over the original cast.
-    let rvk = recovery::derive_rvk(&[42u8; 32]);
-    let mut k = keyeo_engine_with_rvk(&[founder(), co_owner(2, "bob")], rvk.verifying_key().to_bytes());
-    k.apply(sign_op(
-        [9u8; 32],
-        vec![],
-        "owner",
-        MembershipAction::ReFound {
-            member: "owner".into(),
-            new_author_public_key: pk32(&sk(new_owner)),
-            new_hpke_public_key: [new_owner; 32],
-            era: 1,
-        },
-        &rvk,
-    ))
-    .unwrap();
-
-    // Parity of outcome: both re-key the Owner to the same fresh identity and keep bob.
-    assert_eq!(keyeo_owner_key(&k), pk32(&sk(new_owner)), "keyeo: Owner re-keyed to the same identity");
-    assert_eq!(keyeo_owner_key(&k).to_vec(), chain_owner_key, "the recovered Owner key agrees across both");
-    assert!(keyeo_has(&k, "bob"), "keyeo: bob preserved");
-}
-
-#[test]
-fn keyeo_reset_requires_the_recovery_authority_where_chain_accepts_a_self_signed_reset() {
-    // The Q5 INTENTIONAL divergence, made concrete. The identical self-signed re-founding shape that
-    // chain.rs verify_reset ACCEPTS (its trust rests on an out-of-band ceremony) is REJECTED by keyeo
-    // unless it carries the pinned recovery authority (RVK) — keyeo's gate is strictly stronger, which is
-    // why, when the chain is retired, verify_reset's callers migrate to the RVK-gated path.
-    let new_owner = 7u8;
-
-    // chain.rs accepts a reset self-signed by the new Owner key (no RVK anywhere).
-    let reset_cast = [
-        Cast { seed: new_owner, id: "owner", member_role: MEMBER_OWNER },
-    ];
-    assert!(
-        verify_reset(None, &chain_genesis(&reset_cast)).is_ok(),
-        "chain.rs accepts a self-signed reset with no recovery-authority binding"
-    );
-
-    // keyeo: the same shape — a ReFound self-signed by the new Owner key (sk(7)), NOT the RVK — is
-    // admitted but carries no authority, so the Owner is unchanged.
-    let rvk = recovery::derive_rvk(&[42u8; 32]);
-    let mut k = keyeo_engine_with_rvk(&[founder()], rvk.verifying_key().to_bytes());
-    k.apply(sign_op(
-        [9u8; 32],
-        vec![],
-        "owner",
-        MembershipAction::ReFound {
-            member: "owner".into(),
-            new_author_public_key: pk32(&sk(new_owner)),
-            new_hpke_public_key: [new_owner; 32],
-            era: 1,
-        },
-        &sk(new_owner), // self-signed by the new key, NOT the RVK
-    ))
-    .unwrap();
-    assert_eq!(
-        keyeo_owner_key(&k),
-        pk32(&sk(1)),
-        "keyeo: a reset not signed by the pinned recovery authority has no effect (strictly stronger)"
-    );
+    assert!(keyeo_has(&k, 1), "keyeo: the Owner cannot self-remove");
 }
 
 // ────────────────────────────── DOCUMENTED DIVERGENCE ──────────────────────────────
@@ -402,24 +255,43 @@ fn ordinary_self_removal_is_the_documented_v1_widen() {
     // An ordinary member self-removing: chain.rs treats it as an ordinary change needing a SIGNER's
     // endorsement (the member's own key isn't a signer) → REJECT. keyeo v1 deliberately WIDENS this:
     // any non-Owner may self-remove (BYO/offline). Asserted as an EXPECTED divergence (decision B.2).
-    let cast = [founder(), plain(6, "ed", EDITOR)];
+    let cast = [founder(), plain(6, EDITOR)];
     let g = chain_genesis(&cast);
     let anchor = KeyringAnchor::from_keyring(&g);
     let cand = chain_next(
         &g,
         |k| {
-            k.members.retain(|m| m.member_id != "ed");
-            retain_wraps(k, |w| w.recipient != "ed");
+            k.members.retain(|m| m.member_id != mid(6));
+            retain_wraps(k, |w| w.recipient != mid(6));
         },
         &[6], // ed signs their own removal — but ed is not a signer
     );
     let chain_rejects = verify_transition(&anchor, &cand).is_err();
 
     let mut k = keyeo_engine(&cast);
-    k.apply(sign_op([2u8; 32], vec![], "ed", MembershipAction::Remove { member: "ed".into() }, &sk(6)))
+    k.apply(sign_op([2u8; 32], vec![], mid(6), MembershipAction::Remove { member: mid(6) }, &sk(6)))
         .unwrap();
-    let keyeo_removed = !keyeo_has(&k, "ed");
+    let keyeo_removed = !keyeo_has(&k, 6);
 
     assert!(chain_rejects, "chain.rs requires a signer to endorse an ordinary member's removal");
     assert!(keyeo_removed, "keyeo v1 widens self-removal to any non-Owner");
+}
+
+// ── chain epoch-wrap helpers (used by the mutations above) ──
+
+fn epochs_of(k: &Keyring) -> Vec<KeyeoEpoch<String>> {
+    k.key_material().unwrap()
+}
+fn set_epochs(k: &mut Keyring, epochs: &[KeyeoEpoch<String>]) {
+    k.epochs = codec::encode_epochs(epochs);
+}
+fn push_wrap(k: &mut Keyring, w: KeyeoWrap<String>) {
+    let mut eps = epochs_of(k);
+    eps[0].wraps.push(w);
+    set_epochs(k, &eps);
+}
+fn retain_wraps(k: &mut Keyring, keep: impl Fn(&KeyeoWrap<String>) -> bool) {
+    let mut eps = epochs_of(k);
+    eps[0].wraps.retain(|w| keep(w));
+    set_epochs(k, &eps);
 }
