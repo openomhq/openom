@@ -20,6 +20,7 @@ import init, {
   removeMember as wasmRemoveMember,
   changeRole as wasmChangeRole,
   provisionMember as wasmProvisionMember,
+  deriveMemberId,
   verifyKeyringWalk as wasmVerifyKeyringWalk,
   unlockAsMember as wasmUnlockAsMember,
   wrapChainKeyringUpdate as wasmWrapKeyringUpdate,
@@ -488,7 +489,12 @@ const api = {
       const core = new Core(res.takeHandle(), docId, true, treeId, engine);
       await hydrate(core); // fresh store → a no-op bootstrap
       cores.set(docId, core);
+      // The owner's SELF-CERTIFYING on-tree member id (OPE-543): provision derives it from the account key
+      // (the caller's `memberId` label is ignored for the owner) — read it off the genesis keyring, whose
+      // single member IS the owner. Callers use it wherever an owner id is asserted (e.g. the members UI).
+      const ownerMemberId = JSON.parse(wasmKeyringSummary(engine, res.keyring)).members[0]?.memberId ?? null;
       return {
+        memberId: ownerMemberId,
         recoveryCode: res.recoveryCode,
         didKey: res.didKey,
         needsReseal: res.needsReseal,
@@ -955,9 +961,12 @@ const api = {
       throw new Error('a signer was removed since mint — cancel and re-invite');
     }
     if (!(await verifyInviteClaim(record, claim))) throw new Error('invite claim MAC mismatch — rejected');
+    // SELF-CERT admission (OPE-543): the joiner's on-tree id is DERIVED from their claimed author key — never
+    // taken from the claim — mirroring the native host. The engines re-check the binding (`Joiner::from_bytes`),
+    // so a mismatched id can never be registered.
     await api.addMember(docId, {
       passphrase, treeId, ownerMemberId,
-      newMemberId: claim.memberId, role: record.role,
+      newMemberId: deriveMemberId(claim.authorPublicKey), role: record.role,
       memberAuthorPublic: claim.authorPublicKey, memberHpkePublic: claim.hpkePublicKey, engine: record.engine,
     });
     await deleteMintRecord(inviteId);
@@ -965,13 +974,18 @@ const api = {
 
   /**
    * Mint a joining member's account identity from their passphrase (the first member-flow step, before the
-   * owner admits them). Returns { kdfParams, authorPublicKey, hpkePublicKey } — the caller persists kdfParams
-   * and hands the two public keys to the owner out-of-band. The secrets stay in the worker.
+   * owner admits them). Returns { memberId, kdfParams, authorPublicKey, hpkePublicKey } — the caller persists
+   * kdfParams, hands the two public keys to the owner out-of-band, and uses `memberId` (the SELF-CERTIFYING
+   * id derived from the author key, OPE-543) for the claim + the later `joinAsMember`. The secrets stay in
+   * the worker.
    */
   async provisionMember(passphrase) {
     await ensureInit();
     const m = wasmProvisionMember(passphrase);
-    return { kdfParams: m.kdfParams, authorPublicKey: m.authorPublicKey, hpkePublicKey: m.hpkePublicKey };
+    return {
+      memberId: deriveMemberId(m.authorPublicKey),
+      kdfParams: m.kdfParams, authorPublicKey: m.authorPublicKey, hpkePublicKey: m.hpkePublicKey,
+    };
   },
 
   /**

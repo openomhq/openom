@@ -151,8 +151,9 @@ test('app-core: an owner shares a tree and a member joins + verifies through the
   expect(r.access, 'membership summary was pushed to /access').not.toBeNull();
   expect(r.access.generation).toBeGreaterThanOrEqual(1);
   expect(r.access.basis.length).toBeGreaterThan(0);
+  // OPE-543 self-cert ids: /access carries exactly the DERIVED owner + member ids (never caller labels).
   const ids = r.access.members.map((m: any) => m.memberId).sort();
-  expect(ids).toEqual(['acct-member', 'acct-owner']);
+  expect(ids).toEqual([r.ownerMemberId, r.memberMemberId].sort());
   expect(r.access.members.every((m: any) => typeof m.role === 'number')).toBe(true);
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
@@ -251,8 +252,8 @@ test('app-core: an owner removes a member through the worker — rotate, re-unlo
   // advisory view (the owner remains), and the generation advanced past the add.
   expect(r.accessAfterRemoval, 'rotated membership was pushed to /access').not.toBeNull();
   const idsAfter = r.accessAfterRemoval.members.map((m: any) => m.memberId);
-  expect(idsAfter).toContain('acct-owner');
-  expect(idsAfter).not.toContain('acct-member');
+  expect(idsAfter).toContain(r.ownerMemberId);
+  expect(idsAfter).not.toContain(r.memberMemberId);
   expect(r.accessAfterRemoval.generation).toBeGreaterThanOrEqual(2); // add (gen 1) then remove (gen 2+)
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
@@ -361,7 +362,7 @@ test('app-core: opt-in soft removal — a demoted member\'s trailing edit is que
 
   // OPE-426: the demoted member's trailing edit was DROPPED into the pending-review queue (not silently lost,
   // not merged) — attributed to the member.
-  expect(r.pendingAuthors).toContain('acct-member');
+  expect(r.pendingAuthors).toContain(r.memberMemberId);
   expect(r.liveBeforeApprove).not.toContain('pLate'); // dropped, so not projected before review
   // The admin APPROVED it: it folds live, and survives a cold reload (recovered from the pin).
   expect(r.approvedAny).toBe(true);

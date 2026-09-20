@@ -109,7 +109,9 @@ function makeJoinerWorker(server, ownerWorker) {
   return {
     async provisionMember() {
       ownerWorker.provisions.count += 1;
-      return { kdfParams: new Uint8Array(8).fill(7), authorPublicKey: new Uint8Array(32).fill(0x22), hpkePublicKey: new Uint8Array(32).fill(0x33) };
+      // `memberId` is the worker's SELF-CERTIFYING id (OPE-543, derived from the author key in the real
+      // worker); the double returns a fixed one — the derivation itself is covered by the e2e suite.
+      return { memberId: JOINER_ID, kdfParams: new Uint8Array(8).fill(7), authorPublicKey: new Uint8Array(32).fill(0x22), hpkePublicKey: new Uint8Array(32).fill(0x33) };
     },
     async joinAsMember({ docId }) {
       if (server.keyringOf(docId).length === 0) throw Object.assign(new Error('no keyring history to verify'), { name: 'JoinError' });

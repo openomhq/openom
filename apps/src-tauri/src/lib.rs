@@ -157,6 +157,14 @@ async fn core_provision_member(
     .map_err(join_err)?
 }
 
+/// The SELF-CERTIFYING member id (OPE-543): `derive_member_id(author_public_key)` — the native mirror of the
+/// wasm `deriveMemberId`, over the SAME crate fn, so the JS seam never re-implements the derivation (max-Rust).
+/// Pure + stateless (SHA-256 → UUIDv8), so no host state and no `spawn_blocking`.
+#[tauri::command]
+fn core_derive_member_id(author_public_key: Vec<u8>) -> String {
+    openom_keyring_api::derive_member_id(&author_public_key)
+}
+
 /// Admit an OOB-verified member to a shared tree (owner action): the host produces the new keyring revision,
 /// re-opens the owner core in place on the shared keyring, and persists it natively. Returns the opaque keyring
 /// revision the webview PUBLISHES (keyring first, then the advisory summary). Argon2id (re-open), so
@@ -709,6 +717,7 @@ pub fn run() {
             core_recover,
             core_change_passphrase,
             core_provision_member,
+            core_derive_member_id,
             core_add_member,
             core_remove_member,
             core_change_role,

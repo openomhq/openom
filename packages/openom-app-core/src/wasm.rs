@@ -902,6 +902,17 @@ pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
     })
 }
 
+/// The SELF-CERTIFYING member id (OPE-543): `member_id = derive_member_id(author_public_key)`, a UUIDv8 over
+/// SHA-256(author key). Exposed so the JS seam NEVER re-implements the derivation (max-Rust): the worker calls
+/// it on a freshly-minted member key (the joiner's own id) and on a joiner's CLAIMED key at admission (never
+/// trusting the claim's id) — the byte-for-byte source the engines and `/register` enforce. The native seam
+/// has the equivalent Tauri `core_derive_member_id` over the same crate fn.
+#[wasm_bindgen(js_name = deriveMemberId)]
+#[must_use]
+pub fn derive_member_id(author_public_key: &[u8]) -> String {
+    openom_keyring_api::derive_member_id(author_public_key)
+}
+
 /// The result of an owner membership change (add/remove) — the new keyring/anchor to persist + its watermark.
 /// No handle: the owner's running core keeps its DEK and just re-reads membership via
 /// [`setMembership`](AppCoreHandle::set_membership) after the caller persists the new keyring.

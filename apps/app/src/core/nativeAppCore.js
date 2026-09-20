@@ -326,7 +326,13 @@ export function createNativeAppCore() {
     // --- membership / sharing (owner + member) ---
     provisionMember: async (passphrase) => {
       const m = await call('core_provision_member', { passphrase });
-      return { kdfParams: u8(m.kdfParams), authorPublicKey: u8(m.authorPublicKey), hpkePublicKey: u8(m.hpkePublicKey) };
+      const authorPublicKey = u8(m.authorPublicKey);
+      // SELF-CERT identity (OPE-543): the on-tree id derives from the author key IN RUST (core_derive_member_id)
+      // — same single-source derivation as the worker's wasm `deriveMemberId`, never re-implemented in JS.
+      return {
+        memberId: await call('core_derive_member_id', { authorPublicKey }),
+        kdfParams: u8(m.kdfParams), authorPublicKey, hpkePublicKey: u8(m.hpkePublicKey),
+      };
     },
     // Owner: mint a v3 share invite. The host supplies the engine pin (core_invite_material); the mint-time signer
     // fingerprint (the admit-gate baseline) comes from the engine-agnostic keyring summary; `invite.mint` (pure JS)
@@ -355,9 +361,11 @@ export function createNativeAppCore() {
         throw makeError('internal', { cause: 'a signer was removed since mint — cancel and re-invite' });
       }
       if (!(await verifyInviteClaim(record, claim))) throw makeError('internal', { cause: 'invite claim MAC mismatch — rejected' });
+      // SELF-CERT admission (OPE-543): derive the joiner's on-tree id from their claimed author key IN RUST —
+      // never trust the claim's id (the host re-derives it too; identical single source as the worker).
       await api.addMember(docId, {
         passphrase, treeId, ownerMemberId,
-        newMemberId: claim.memberId, role: record.role,
+        newMemberId: await call('core_derive_member_id', { authorPublicKey: claim.authorPublicKey }), role: record.role,
         memberAuthorPublic: claim.authorPublicKey, memberHpkePublic: claim.hpkePublicKey,
       });
       deleteMintRecord(inviteId);

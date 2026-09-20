@@ -394,7 +394,7 @@
         const owner = spawnWorker();
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
-        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        const ownerProv = await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
         const pin = await owner.keyringHash(ownerDoc); // { revision: 1, hash }
 
@@ -405,7 +405,7 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
-          newMemberId: 'acct-member', role: 'editor',
+          newMemberId: acct.memberId, role: 'editor',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
         });
 
@@ -421,7 +421,7 @@
         // Member joins via the genesis-walk (fetch keyrings + verify + unlock), then syncs.
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         const joined = await member.joinAsMember({
-          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
           memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         const sync = await member.syncNow(memberDoc);
@@ -434,6 +434,9 @@
           serverKeyringHead: (await transport.readKeyring(ownerDoc, 1)).head,
           // OPE-293: after the share, the owner's addMember asserted the resolved membership to /access.
           access: transport._access(),
+          // OPE-543 self-cert ids: the derived owner + member ids the /access view must carry.
+          ownerMemberId: ownerProv.memberId,
+          memberMemberId: acct.memberId,
         };
       },
 
@@ -471,7 +474,7 @@
         const parsed = parseLink(link);
         const claimObj = await buildClaim({
           s: parsed.s, inviteId, uuid: ownerDoc, role: 'editor',
-          memberId: 'acct-member', hpkePublicKey: acct.hpkePublicKey, authorPublicKey: acct.authorPublicKey,
+          memberId: acct.memberId, hpkePublicKey: acct.hpkePublicKey, authorPublicKey: acct.authorPublicKey,
         });
         let admitted = false; let admitError = null;
         try {
@@ -511,13 +514,13 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
-          newMemberId: 'acct-member', role: 'editor',
+          newMemberId: acct.memberId, role: 'editor',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
         });
 
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         const joined = await member.joinAsMember({
-          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
           memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.syncNow(memberDoc); // pull the shared base
@@ -598,7 +601,7 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner',
-          newMemberId: 'acct-member', role: 'maintainer',
+          newMemberId: acct.memberId, role: 'maintainer',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey, engine,
         });
         const dagPin = engine === 'dag' ? await owner.dagAnchorPin(ownerDoc) : null;
@@ -610,8 +613,8 @@
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember(
           engine === 'dag'
-            ? { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member', memberKdfParams: acct.kdfParams, pin: dagPin }
-            : { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member', memberKdfParams: acct.kdfParams, pinnedRevision: chainPin.revision, pinnedHash: chainPin.hash },
+            ? { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId, memberKdfParams: acct.kdfParams, pin: dagPin }
+            : { engine, treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId, memberKdfParams: acct.kdfParams, pinnedRevision: chainPin.revision, pinnedHash: chainPin.hash },
         );
         await member.syncNow(memberDoc);
         const proj = JSON.parse(await member.project(memberDoc)).people;
@@ -664,7 +667,7 @@
         const owner = spawnWorker();
         await owner.warm();
         await owner.clearPersisted(ownerDoc);
-        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        const ownerProv = await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
         const pin = await owner.keyringHash(ownerDoc);
 
@@ -674,7 +677,7 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
-          newMemberId: 'acct-member', role: 'editor',
+          newMemberId: acct.memberId, role: 'editor',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
         });
 
@@ -684,7 +687,7 @@
         await owner.syncNow(ownerDoc);
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
-          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
           memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.syncNow(memberDoc);
@@ -693,7 +696,7 @@
 
         // OWNER REMOVES the member: rotate the keyring, re-unlock the owner under the new epoch, publish rev 3.
         await owner.removeMember(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 2, removeMemberId: 'acct-member',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 2, removeMemberId: acct.memberId,
         });
         const headAfter = (await transport.readKeyring(ownerDoc, 1)).head; // rev 3 (after the remove)
 
@@ -712,7 +715,7 @@
         let lockedOut = false;
         try {
           await rejoin.joinAsMember({
-            treeId, docId: rejoinDoc, passphrase: memberPass, memberId: 'acct-member',
+            treeId, docId: rejoinDoc, passphrase: memberPass, memberId: acct.memberId,
             memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
           });
         } catch {
@@ -724,6 +727,9 @@
           // OPE-293: the owner's removeMember asserted the rotated membership to /access — the removed member
           // is dropped from the advisory view, the owner remains.
           accessAfterRemoval: transport._access(),
+          // OPE-543 self-cert ids: what /access must (owner) and must not (removed member) carry.
+          ownerMemberId: ownerProv.memberId,
+          memberMemberId: acct.memberId,
         };
       },
 
@@ -755,14 +761,14 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
-          newMemberId: 'acct-member', role: 'maintainer',
+          newMemberId: acct.memberId, role: 'maintainer',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
         });
 
         // Member joins (genesis-walk) and commits a data delta, syncing it to the remote.
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
-          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
           memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.assertAnchor(memberDoc, 'pMemberWrite', PERSON);
@@ -772,7 +778,7 @@
         // Owner removes the member: compact-before-remove pulls 'pMemberWrite' + pins it under the pre-removal
         // epoch, THEN rotates.
         await owner.removeMember(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 2, removeMemberId: 'acct-member',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 2, removeMemberId: acct.memberId,
         });
         const ownerLiveSees = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
 
@@ -813,23 +819,23 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
-          newMemberId: 'acct-member', role: 'editor',
+          newMemberId: acct.memberId, role: 'editor',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
         });
         await owner.changeRole(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'co-owner',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: acct.memberId, newRole: 'co-owner',
         });
 
         // Member joins as co-owner. It does NOT sync again, so it stays co-owner locally through the write below.
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
-          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
           memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
 
         // Owner DEMOTES the co-owner to editor.
         await owner.changeRole(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'editor',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: acct.memberId, newRole: 'editor',
         });
 
         // The member (still co-owner LOCALLY) writes a trailing edit and pushes it (the dumb store accepts it).
@@ -857,6 +863,7 @@
 
         return {
           pendingAuthors: pending.map((p) => p.authorMemberId),
+          memberMemberId: acct.memberId, // OPE-543: the demoted member's self-cert id (queue attribution)
           liveBeforeApprove, approvedAny, liveAfterApprove, seenAfterReload,
         };
       },
@@ -889,7 +896,7 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner',
-          newMemberId: 'acct-member', role: 'maintainer',
+          newMemberId: acct.memberId, role: 'maintainer',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey, engine: 'dag',
         });
         const pin = await owner.dagAnchorPin(ownerDoc); // the OOB trust pin (post-add anchor)
@@ -908,7 +915,7 @@
         let wrongPinRejected = false;
         try {
           await bad.joinAsMember({
-            engine: 'dag', treeId, docId: badDoc, passphrase: memberPass, memberId: 'acct-member',
+            engine: 'dag', treeId, docId: badDoc, passphrase: memberPass, memberId: acct.memberId,
             memberKdfParams: acct.kdfParams, pin: badPin,
           });
         } catch { wrongPinRejected = true; }
@@ -916,7 +923,7 @@
         // The member JOINS with the right pin, syncs, and sees the owner's signed write.
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         const joined = await member.joinAsMember({
-          engine: 'dag', treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          engine: 'dag', treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
           memberKdfParams: acct.kdfParams, pin,
         });
         await member.syncNow(memberDoc);
@@ -934,7 +941,7 @@
         const keyringHeadBefore = (await transport.readKeyring(ownerDoc, 1)).head;
         const dataBefore = transport._size();
         await owner.removeMember(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', removeMemberId: 'acct-member', engine: 'dag',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', removeMemberId: acct.memberId, engine: 'dag',
         });
         const keyringHeadAfter = (await transport.readKeyring(ownerDoc, 1)).head;
         const dataAfter = transport._size();
@@ -972,23 +979,23 @@
         await member.clearPersisted(memberDoc);
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: 'acct-member', role: 'editor',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: acct.memberId, role: 'editor',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey, engine: 'dag',
         });
         const roleOf = (id) => transport._access()?.members.find((m) => m.memberId === id)?.role;
-        const afterAdd = roleOf('acct-member');
+        const afterAdd = roleOf(acct.memberId);
 
         await owner.changeRole(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'co-owner', engine: 'dag',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: acct.memberId, newRole: 'co-owner', engine: 'dag',
         });
-        const afterPromote = roleOf('acct-member');
+        const afterPromote = roleOf(acct.memberId);
 
         await owner.changeRole(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'editor', engine: 'dag',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: acct.memberId, newRole: 'editor', engine: 'dag',
         });
-        const afterDemote = roleOf('acct-member');
+        const afterDemote = roleOf(acct.memberId);
 
-        return { afterAdd, afterPromote, afterDemote, present: roleOf('acct-member') != null };
+        return { afterAdd, afterPromote, afterDemote, present: roleOf(acct.memberId) != null };
       },
 
       // SLICE 3 (OPE-421) chain co-owner DEMOTE through the worker — no longer refused. An owner admits a
@@ -1017,20 +1024,20 @@
         const acct = await member.provisionMember(memberPass);
         await owner.addMember(ownerDoc, {
           passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
-          newMemberId: 'acct-member', role: 'editor',
+          newMemberId: acct.memberId, role: 'editor',
           memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
         });
         const roleOf = (id) => transport._access()?.members.find((m) => m.memberId === id)?.role;
         // Promote to co-owner so the member can commit data deltas.
         await owner.changeRole(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'co-owner',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: acct.memberId, newRole: 'co-owner',
         });
-        const afterPromote = roleOf('acct-member');
+        const afterPromote = roleOf(acct.memberId);
 
         // The member joins (now a co-owner in the keyring) and commits a delta, syncing it to the remote.
         await member.attachTransport(memberDoc, Comlink.proxy(transport));
         await member.joinAsMember({
-          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: acct.memberId,
           memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
         });
         await member.assertAnchor(memberDoc, 'pMemberWrite', PERSON);
@@ -1039,9 +1046,9 @@
 
         // Owner DEMOTES the co-owner to editor (chain) — compact-before-demote pins their write first.
         await owner.changeRole(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'editor',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: acct.memberId, newRole: 'editor',
         });
-        const afterDemote = roleOf('acct-member');
+        const afterDemote = roleOf(acct.memberId);
 
         // Cold reload of the owner: the demoted member's pre-demote commit survives (recovered from the pin).
         const reloaded = spawnWorker();
@@ -1049,7 +1056,7 @@
         await reloaded.unlockCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
         const seenAfterReload = JSON.parse(await reloaded.project(ownerDoc)).people.map((p) => p.id);
 
-        return { afterPromote, afterDemote, present: roleOf('acct-member') != null, seenAfterReload };
+        return { afterPromote, afterDemote, present: roleOf(acct.memberId) != null, seenAfterReload };
       },
 
       // THE dag self-heal, end to end through the worker (OPE-382 + OPE-393): an owner admits TWO maintainers
@@ -1080,20 +1087,20 @@
         const carolAcct = await carol.provisionMember(carolPass);
 
         await owner.addMember(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: 'acct-bob', role: 'maintainer',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: bobAcct.memberId, role: 'maintainer',
           memberAuthorPublic: bobAcct.authorPublicKey, memberHpkePublic: bobAcct.hpkePublicKey, engine: 'dag',
         });
         await owner.addMember(ownerDoc, {
-          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: 'acct-carol', role: 'maintainer',
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: carolAcct.memberId, role: 'maintainer',
           memberAuthorPublic: carolAcct.authorPublicKey, memberHpkePublic: carolAcct.hpkePublicKey, engine: 'dag',
         });
         const pin = await owner.dagAnchorPin(ownerDoc); // one pin over the anchor with BOTH members
 
         // bob + carol join. They share the current epoch, so carol can later decrypt bob's write.
         await bob.attachTransport(bobDoc, Comlink.proxy(transport));
-        await bob.joinAsMember({ engine: 'dag', treeId, docId: bobDoc, passphrase: bobPass, memberId: 'acct-bob', memberKdfParams: bobAcct.kdfParams, pin });
+        await bob.joinAsMember({ engine: 'dag', treeId, docId: bobDoc, passphrase: bobPass, memberId: bobAcct.memberId, memberKdfParams: bobAcct.kdfParams, pin });
         await carol.attachTransport(carolDoc, Comlink.proxy(transport));
-        await carol.joinAsMember({ engine: 'dag', treeId, docId: carolDoc, passphrase: carolPass, memberId: 'acct-carol', memberKdfParams: carolAcct.kdfParams, pin });
+        await carol.joinAsMember({ engine: 'dag', treeId, docId: carolDoc, passphrase: carolPass, memberId: carolAcct.memberId, memberKdfParams: carolAcct.kdfParams, pin });
 
         // bob writes a signed entry and pushes it; the owner pulls it (so its store holds bob's entry to cover).
         await bob.assertAnchor(bobDoc, 'pBob', PERSON);
@@ -1107,7 +1114,7 @@
 
         // Owner REMOVES bob: forward-secret re-epoch, author + push the self-heal cover (under the new epoch),
         // publish the rotated anchor.
-        await owner.removeMember(ownerDoc, { passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', removeMemberId: 'acct-bob', engine: 'dag' });
+        await owner.removeMember(ownerDoc, { passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', removeMemberId: bobAcct.memberId, engine: 'dag' });
 
         // Carol syncs: keyring-before-data adopts the rotated anchor (bob removed) + ADOPTS the new epoch DEK,
         // then pulls the data — bob's pBob (old epoch, held since join) + the cover (new epoch, just adopted).
