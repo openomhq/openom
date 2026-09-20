@@ -694,8 +694,11 @@ const api = {
     // Anti-rollback floor = the CURRENT keyring revision (from the stored watermark), computed here rather than
     // taken from the caller — matching the native host. It used to default to 0 (no floor at all). OPE-443.
     const minRevision = chainRevision(await loadWatermark(docId));
+    // OPE-543: membership ops authorize with the owner's durable ACCOUNT, re-derived from the persisted
+    // keystore blob + passphrase (both engines) — loaded once here, reused by the re-unlock below.
+    const ownerKeystore = await loadKeystore(docId);
     const change = wasmAddMember(
-      eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision,
+      eng, head.bytes, passphrase, ownerKeystore, treeId, ownerMemberId, freshReplica(), minRevision,
       newMemberId, role, memberAuthorPublic, memberHpkePublic,
     );
     await keyringStore().saveHead(docId, eng, change.keyring);
@@ -707,7 +710,6 @@ const api = {
     // A solo→shared transition: the running sealer (built while solo) does NOT sign, so its writes would be
     // rejected by peers. Re-unlock the owner on the shared keyring (the DEK is unchanged) → a signing sealer +
     // the §B3 resolver — so subsequent writes are attributed. Mirrors unlockCore; hydrate preserves the log.
-    const ownerKeystore = await loadKeystore(docId); // owner's durable-account blob (unchanged by membership ops)
     const re = wasmUnlock(eng, passphrase, treeId, ownerMemberId, freshReplica(), change.keyring, ownerKeystore, docId);
     try {
       await saveWatermark(docId, re.watermark);
@@ -774,8 +776,11 @@ const api = {
       try { await syncData(c, 1); } catch { /* preserve-history is best-effort; removal still proceeds */ }
     }
     const minRevision = chainRevision(await loadWatermark(docId)); // anti-rollback floor = current revision (OPE-443)
+    // OPE-543: membership ops authorize with the owner's durable ACCOUNT, re-derived from the persisted
+    // keystore blob + passphrase (both engines) — loaded once here, reused by the re-unlock below.
+    const ownerKeystore = await loadKeystore(docId);
     const change = wasmRemoveMember(
-      eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, removeMemberId,
+      eng, head.bytes, passphrase, ownerKeystore, treeId, ownerMemberId, freshReplica(), minRevision, removeMemberId,
     );
     await keyringStore().saveHead(docId, eng, change.keyring);
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
@@ -789,7 +794,6 @@ const api = {
     // dag, author a self-heal cover so that member's already-accepted history stays verifiable on a fresh
     // replay (the chain retains per-revision membership, so its history needs no cover). hydrate reloads the
     // durable log, which is what authorCover sweeps.
-    const ownerKeystore = await loadKeystore(docId); // owner's durable-account blob (unchanged by membership ops)
     const re = wasmUnlock(eng, passphrase, treeId, ownerMemberId, freshReplica(), change.keyring, ownerKeystore, docId);
     let nc = null;
     try {
@@ -847,8 +851,10 @@ const api = {
       try { await syncData(c, 1); } catch { /* preserve-history is best-effort; the demote still proceeds */ }
     }
     const minRevision = chainRevision(await loadWatermark(docId)); // anti-rollback floor = current revision (OPE-443)
+    // OPE-543: membership ops authorize with the owner's durable ACCOUNT (keystore blob + passphrase, both engines).
+    const ownerKeystore = await loadKeystore(docId);
     const change = wasmChangeRole(
-      eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, targetMemberId, newRole,
+      eng, head.bytes, passphrase, ownerKeystore, treeId, ownerMemberId, freshReplica(), minRevision, targetMemberId, newRole,
     );
     await keyringStore().saveHead(docId, eng, change.keyring);
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
