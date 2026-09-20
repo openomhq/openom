@@ -3,7 +3,7 @@
 //! decode to a keyring, so these return before any crypto runs — cheap.)
 
 use openom_crypto::Passphrase;
-use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
+use openom_protocol::ids::{ReplicaId, TreeId};
 use openom_vault::vault::{recover, unlock, RecoverWatermark};
 use openom_vault::AccountKeystore;
 use proptest::prelude::*;
@@ -17,7 +17,6 @@ proptest! {
             &bytes,
             account,
             &TreeId::new(b"tree-uuid-16byte".as_slice()),
-            &MemberId::new("acct-1"),
             &ReplicaId::new(b"replica-0".as_slice()),
         );
         prop_assert!(r.is_err());
@@ -33,7 +32,6 @@ proptest! {
             &code,
             &Passphrase::new(b"pass".to_vec()),
             &TreeId::new(b"tree-uuid-16byte".as_slice()),
-            &MemberId::new("acct-1"),
             &ReplicaId::new(b"replica-0".as_slice()),
             &RecoverWatermark { min_revision: 0, write_key_id: &[], dek_hash: &[] },
         );

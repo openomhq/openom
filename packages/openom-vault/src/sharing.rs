@@ -818,7 +818,6 @@ pub fn add_member(
                 keyring,
                 &account,
                 &TreeId::new(tree_id),
-                &MemberId::new(owner_member_id),
                 min_revision,
                 &vault::Joiner::from_bytes(
                     &joiner_id,
@@ -893,7 +892,6 @@ pub fn remove_member(
                 keyring,
                 &account,
                 &TreeId::new(tree_id),
-                &MemberId::new(owner_member_id),
                 min_revision,
                 &MemberId::new(remove_member_id),
                 &ReplicaId::new(replica_id),
@@ -961,22 +959,17 @@ pub fn change_role(
     let promote = new_role == "co-owner";
     match engine {
         EngineKind::Chain => {
-            let (tree, owner, target) = (
-                TreeId::new(tree_id),
-                MemberId::new(founder_member_id),
-                MemberId::new(target_member_id),
-            );
+            let (tree, target) = (TreeId::new(tree_id), MemberId::new(target_member_id));
             // PROMOTE adds to the signer set; DEMOTE lowers the co-owner to a non-signer role (admin/editor/
             // viewer) — forward-secure via the OPE-421 look-behind. Both return the same `CoOwnerChanged`.
             let account = owner_account(founder_keystore, founder_passphrase)?;
             let changed = if promote {
-                vault::add_co_owner(keyring, &account, &tree, &owner, min_revision, &target)?
+                vault::add_co_owner(keyring, &account, &tree, min_revision, &target)?
             } else {
                 vault::remove_co_owner(
                     keyring,
                     &account,
                     &tree,
-                    &owner,
                     min_revision,
                     &target,
                     parse_member_role(new_role)?,

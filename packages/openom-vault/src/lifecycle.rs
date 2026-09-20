@@ -296,7 +296,7 @@ impl KeyringLifecycle for ChainVault {
         let account = account.ok_or_else(|| {
             VaultError::BadKeyring("chain unlock requires the account identity".into())
         })?;
-        let u = vault::unlock(anchor, account, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
+        let u = vault::unlock(anchor, account, ctx.tree_id, ctx.replica_id)?;
         Ok(Unlocked {
             sealer: u.sealer,
             watermark: Self::watermark(u.revision, &u.write_key_id, &u.write_dek_hash),
@@ -328,7 +328,6 @@ impl KeyringLifecycle for ChainVault {
             recovery_code,
             new_passphrase,
             ctx.tree_id,
-            ctx.member_id,
             ctx.replica_id,
             &vault::RecoverWatermark {
                 min_revision: min_rev,
@@ -408,6 +407,31 @@ mod tests {
             ChainVault::floor(&[1, 2, 3]),
             Err(VaultError::MalformedWatermark)
         ));
+    }
+
+    /// Regression (OPE-543): the chain OWNER path resolves its on-tree id from the VERIFIED account, NEVER the
+    /// caller's `ctx.member_id` label. Provision under the real derived id, then unlock with a DELIBERATELY WRONG
+    /// label — it must still open under the same identity (the label is advisory now). Pre-fix, the owner-path
+    /// DEK unwrap keyed on the caller label, so a mismatched label produced
+    /// `BadKeyring("write epoch not in the reachable set")` on reopen; this guards that regression.
+    #[test]
+    fn chain_owner_unlock_ignores_a_wrong_caller_member_label() {
+        use crate::AccountKeystore;
+        let tree = TreeId::new(TREE);
+        let pass = Passphrase::new(b"correct horse");
+        let (ks, _code, _u) = AccountKeystore::create(pass.expose()).unwrap();
+        let real = MemberId::new(ks.unlock(pass.expose()).unwrap().member_id);
+        let bogus = MemberId::new("acct-owner-not-self-certifying".to_string());
+        assert_ne!(real.as_str(), bogus.as_str(), "the two ids must differ for the test to mean anything");
+
+        let p = ChainVault
+            .provision(&ctx(&tree, &real, &ReplicaId::new(b"rA")), &pass, Some(ks.unlock(pass.expose()).unwrap()))
+            .unwrap();
+        // Unlock passing the BOGUS label — the owner is resolved from the account, so it opens regardless.
+        let u = ChainVault
+            .unlock(&ctx(&tree, &bogus, &ReplicaId::new(b"rB")), &p.anchor, &pass, Some(ks.unlock(pass.expose()).unwrap()))
+            .unwrap();
+        assert_eq!(u.did_key, p.did_key, "resolved from the account identity, not the caller's label");
     }
 
     /// The whole `KeyringLifecycle` contract, engine-agnostic (OPE-543 durable identity — BOTH engines are

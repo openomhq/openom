@@ -275,11 +275,14 @@ pub fn unlock(
     keyring_bytes: &[u8],
     account: UnlockedAccount,
     tree_id: &TreeId,
-    member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<Unlocked, VaultError> {
     let tree_id = tree_id.as_bytes();
-    let member_id = member_id.as_str();
+    // OPE-543: the owner id is the account's SELF-CERTIFYING, tamper-checked `member_id` — sourced from the
+    // VERIFIED account, never a caller label, so the DEK / escrow / author paths below cannot diverge from it.
+    // (There is no longer any caller-supplied owner id to get wrong — the label bug is unrepresentable here.)
+    let member_id_owned = account.member_id.clone();
+    let member_id = member_id_owned.as_str();
     let replica_id = replica_id.as_bytes();
     let Opened {
         key_id: write_key_id,
@@ -287,7 +290,7 @@ pub fn unlock(
         rrk_secret,
         keyring,
         ..
-    } = open_with_account(keyring_bytes, &account, tree_id, member_id)?;
+    } = open_with_account(keyring_bytes, &account, tree_id)?;
     // The account identity now moves out (the `open_with_account` borrow has ended); the did:key is captured
     // before `identity` may move into the sealer (attributed epochs).
     let root = account.root;
@@ -358,7 +361,6 @@ pub fn recover(
     recovery_code: &RecoveryCode,
     new_passphrase: &Passphrase,
     tree_id: &TreeId,
-    member_id: &MemberId,
     replica_id: &ReplicaId,
     watermark: &RecoverWatermark<'_>,
 ) -> Result<Recovered, VaultError> {
@@ -385,7 +387,7 @@ pub fn recover(
 
     // Open the tree with the restored identity by the ordinary owner path — the anchor is unchanged, so the
     // resolved owner is exactly this identity (anti-substitution inside `unlock` enforces it).
-    let u = unlock(keyring_bytes, unlocked, tree_id, member_id, replica_id)?;
+    let u = unlock(keyring_bytes, unlocked, tree_id, replica_id)?;
     Ok(Recovered {
         keyring: keyring_bytes.to_vec(),
         recovery_code: RecoveryCode::new(String::new()),
@@ -585,12 +587,12 @@ pub fn add_member(
     keyring_bytes: &[u8],
     owner: &UnlockedAccount,
     tree_id: &TreeId,
-    owner_member_id: &MemberId,
     min_revision: u32,
     joiner: &Joiner<MemberRole>,
 ) -> Result<MemberAdded, VaultError> {
     let tree_id = tree_id.as_bytes();
-    let owner_member_id = owner_member_id.as_str();
+    // OPE-543: the owner id is the account's self-certifying, verified member_id, never a caller label.
+    let owner_member_id = owner.member_id.as_str();
     let new_member_id = joiner.member_id.as_str();
     guard_ordinary_role(joiner.role)?;
     let Opened {
@@ -599,7 +601,7 @@ pub fn add_member(
         prev_hash,
         keyring,
         ..
-    } = open_with_account(keyring_bytes, owner, tree_id, owner_member_id)?;
+    } = open_with_account(keyring_bytes, owner, tree_id)?;
 
     if new_member_id == owner_member_id
         || keyring.members.iter().any(|m| m.member_id == new_member_id)
@@ -833,13 +835,14 @@ pub fn remove_member(
     keyring_bytes: &[u8],
     owner: &UnlockedAccount,
     tree_id: &TreeId,
-    owner_member_id: &MemberId,
     min_revision: u32,
     remove_member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<MemberRemoved, VaultError> {
     let tree_id = tree_id.as_bytes();
-    let owner_member_id = owner_member_id.as_str();
+    // OPE-543: the owner id is the account's self-certifying, verified member_id (this also makes the
+    // CannotRemoveOwner guard below compare the removal target against the REAL owner, not a caller label).
+    let owner_member_id = owner.member_id.as_str();
     let remove_member_id = remove_member_id.as_str();
     let replica_id = replica_id.as_bytes();
     let Opened {
@@ -848,7 +851,7 @@ pub fn remove_member(
         rrk_secret,
         keyring,
         ..
-    } = open_with_account(keyring_bytes, owner, tree_id, owner_member_id)?;
+    } = open_with_account(keyring_bytes, owner, tree_id)?;
 
     if remove_member_id == owner_member_id {
         return Err(VaultError::CannotRemoveOwner);
@@ -1001,12 +1004,12 @@ pub fn add_co_owner(
     keyring_bytes: &[u8],
     founder: &UnlockedAccount,
     tree_id: &TreeId,
-    founder_member_id: &MemberId,
     min_revision: u32,
     target_member_id: &MemberId,
 ) -> Result<CoOwnerChanged, VaultError> {
     let tree_id = tree_id.as_bytes();
-    let founder_member_id = founder_member_id.as_str();
+    // OPE-543: the founder id is the account's self-certifying, verified member_id, never a caller label.
+    let founder_member_id = founder.member_id.as_str();
     let target_member_id = target_member_id.as_str();
     let Opened {
         revision,
@@ -1014,7 +1017,7 @@ pub fn add_co_owner(
         rrk_secret,
         mut keyring,
         ..
-    } = open_with_account(keyring_bytes, founder, tree_id, founder_member_id)?;
+    } = open_with_account(keyring_bytes, founder, tree_id)?;
 
     // Already a signer (this also rejects re-adding the founder) — a member at CO_OWNER or stronger.
     if keyring
@@ -1081,13 +1084,14 @@ pub fn remove_co_owner(
     keyring_bytes: &[u8],
     founder: &UnlockedAccount,
     tree_id: &TreeId,
-    founder_member_id: &MemberId,
     min_revision: u32,
     target_member_id: &MemberId,
     new_role: MemberRole,
 ) -> Result<CoOwnerChanged, VaultError> {
     let tree_id = tree_id.as_bytes();
-    let founder_member_id = founder_member_id.as_str();
+    // OPE-543: the founder id is the account's self-certifying, verified member_id (this also makes the
+    // founder-demote guard below compare against the REAL founder, not a caller label).
+    let founder_member_id = founder.member_id.as_str();
     let target_member_id = target_member_id.as_str();
     if matches!(
         new_role,
@@ -1103,7 +1107,7 @@ pub fn remove_co_owner(
         rrk_secret,
         mut keyring,
         ..
-    } = open_with_account(keyring_bytes, founder, tree_id, founder_member_id)?;
+    } = open_with_account(keyring_bytes, founder, tree_id)?;
 
     if target_member_id == founder_member_id {
         return Err(VaultError::CannotRemoveOwner);
@@ -1169,7 +1173,6 @@ fn open_with_account(
     keyring_bytes: &[u8],
     account: &UnlockedAccount,
     tree_id: &[u8],
-    _member_id: &str,
 ) -> Result<Opened, VaultError> {
     let keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
@@ -1572,7 +1575,6 @@ mod tests {
             &p.keyring,
             acct(&ks, &pass),
             &TreeId::new(TREE),
-            &me,
             &ReplicaId::new(b"replica-B"),
         )
         .unwrap();
@@ -1592,7 +1594,6 @@ mod tests {
             &p.keyring,
             acct(&other_ks, &other_pass),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
         )
         .is_err());
@@ -1604,7 +1605,7 @@ mod tests {
         let (ks, _c) = make_owner(&pass);
         let p = provision(&acct(&ks, &pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).unwrap();
         assert!(matches!(
-            unlock(&p.keyring, acct(&ks, &pass), &TreeId::new(b"other-tree-16byt"), &MemberId::new(MEMBER), &ReplicaId::new(b"r")),
+            unlock(&p.keyring, acct(&ks, &pass), &TreeId::new(b"other-tree-16byt"), &ReplicaId::new(b"r")),
             Err(VaultError::TreeMismatch)
         ));
     }
@@ -1617,7 +1618,7 @@ mod tests {
         let mut k = Keyring::decode(p.keyring.as_slice()).unwrap();
         k.epochs[0] ^= 0xFF;
         let bytes = k.encode_to_vec();
-        assert!(unlock(&bytes, acct(&ks, &pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r")).is_err());
+        assert!(unlock(&bytes, acct(&ks, &pass), &TreeId::new(TREE), &ReplicaId::new(b"r")).is_err());
     }
 
     #[test]
@@ -1646,7 +1647,7 @@ mod tests {
         let founder = founder_key(&p.keyring).to_bytes();
         assert_eq!(p.did_key.as_str(), did::encode_ed25519(&founder));
         assert!(p.did_key.as_str().starts_with("did:key:z6Mk"));
-        let u = unlock(&p.keyring, acct(&ks, &pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"replica-B")).unwrap();
+        let u = unlock(&p.keyring, acct(&ks, &pass), &TreeId::new(TREE), &ReplicaId::new(b"replica-B")).unwrap();
         assert_eq!(u.did_key, p.did_key);
     }
 
@@ -1673,7 +1674,7 @@ mod tests {
         let new_ks = AccountKeystore::from_bytes(&re.keystore).unwrap();
         assert!(new_ks.unlock(b"new").is_ok());
         assert!(new_ks.unlock(b"old").is_err());
-        let u = unlock(&re.keyring, new_ks.unlock(b"new").unwrap(), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).unwrap();
+        let u = unlock(&re.keyring, new_ks.unlock(b"new").unwrap(), &TreeId::new(TREE), &ReplicaId::new(b"r")).unwrap();
         assert_eq!(u.did_key, p.did_key);
     }
 
@@ -1710,7 +1711,6 @@ mod tests {
             &code,
             &Passphrase::new(b"new"),
             &TreeId::new(TREE),
-            &me,
             &ReplicaId::new(b"r2"),
             &no_watermark(),
         )
@@ -1738,7 +1738,6 @@ mod tests {
             &wrong,
             &Passphrase::new(b"new"),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
             &no_watermark(),
         )
@@ -1758,7 +1757,6 @@ mod tests {
                 &code,
                 &Passphrase::new(b"new"),
                 &TreeId::new(TREE),
-                &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r"),
                 &RecoverWatermark { min_revision: 5, write_key_id: &[], dek_hash: &[] },
             ),
@@ -1799,7 +1797,6 @@ mod tests {
             &owner.keyring,
             &acct(&ks, &owner_pass),
             &TreeId::new(TREE),
-            &me,
             0,
             &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
@@ -1833,7 +1830,6 @@ mod tests {
             &owner.keyring,
             &acct(&ks, &owner_pass),
             &TreeId::new(TREE),
-            &me,
             0,
             &Joiner::from_bytes(&mid, MemberRole::Viewer, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
@@ -1875,7 +1871,6 @@ mod tests {
             &owner.keyring,
             &acct(&ks, &owner_pass),
             &TreeId::new(TREE),
-            &me,
             0,
             &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
@@ -1885,7 +1880,6 @@ mod tests {
                 &added.keyring,
                 &acct(&ks, &owner_pass),
                 &TreeId::new(TREE),
-                &me,
                 0,
                 &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
             ),
@@ -1906,7 +1900,6 @@ mod tests {
             &owner.keyring,
             &acct(&wks, &wpass),
             &TreeId::new(TREE),
-            &MemberId::new(MEMBER),
             0,
             &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap(),
         )
@@ -1923,11 +1916,11 @@ mod tests {
         let b = provision_member(&Passphrase::new(b"b pass")).unwrap();
         let a_id = jid(&a.author_public_key);
         let b_id = jid(&b.author_public_key);
-        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&a_id, MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
-        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&b_id, MemberRole::Viewer, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&a_id, MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&b_id, MemberRole::Viewer, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
 
-        let removed = remove_member(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &a_id, &ReplicaId::new(b"r-owner2")).unwrap();
+        let removed = remove_member(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &a_id, &ReplicaId::new(b"r-owner2")).unwrap();
         let new_sealed = seal_open(&removed.sealer, b"post-removal secret");
 
         assert!(matches!(
@@ -1938,7 +1931,7 @@ mod tests {
         let (bu, _) = unlock_as_member(&removed.keyring, &MemberAuth { passphrase: &Passphrase::new(b"b pass"), kdf: &b.kdf_params, member_id: &b_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-b"), 0).unwrap();
         assert_eq!(bu.sealer.open_entry(EntryKind::Snapshot, &new_sealed).unwrap(), b"post-removal secret");
 
-        assert!(unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).is_ok());
+        assert!(unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &ReplicaId::new(b"r")).is_ok());
     }
 
     #[test]
@@ -1951,14 +1944,14 @@ mod tests {
         let b = provision_member(&Passphrase::new(b"b pass")).unwrap();
         let a_id = jid(&a.author_public_key);
         let b_id = jid(&b.author_public_key);
-        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&a_id, MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
-        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&b_id, MemberRole::Editor, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&a_id, MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&b_id, MemberRole::Editor, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
 
         let (bu, b_hpke) = unlock_as_member(&k2.keyring, &MemberAuth { passphrase: &Passphrase::new(b"b pass"), kdf: &b.kdf_params, member_id: &b_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-b"), 0).unwrap();
         let (_, a_hpke) = unlock_as_member(&k2.keyring, &MemberAuth { passphrase: &Passphrase::new(b"a pass"), kdf: &a.kdf_params, member_id: &a_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-a"), 0).unwrap();
 
-        let removed = remove_member(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &a_id, &ReplicaId::new(b"r-owner2")).unwrap();
+        let removed = remove_member(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &a_id, &ReplicaId::new(b"r-owner2")).unwrap();
         let new_sealed = seal_open(&removed.sealer, b"post-removal secret");
         assert!(bu.sealer.open_entry(EntryKind::Snapshot, &new_sealed).is_err());
 
@@ -1979,10 +1972,10 @@ mod tests {
         let old = seal_open(&owner.sealer, b"old epoch content");
         let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         let mid = jid(&m.author_public_key);
-        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
-        let removed = remove_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &mid, &ReplicaId::new(b"r-o2")).unwrap();
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
+        let removed = remove_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &mid, &ReplicaId::new(b"r-o2")).unwrap();
         let new = seal_open(&removed.sealer, b"new epoch content");
-        let u = unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r")).unwrap();
+        let u = unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &ReplicaId::new(b"r")).unwrap();
         assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &old).unwrap(), b"old epoch content");
         assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &new).unwrap(), b"new epoch content");
     }
@@ -1996,7 +1989,7 @@ mod tests {
         let pre = seal_open(&owner.sealer, b"pre-join photo");
         let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         let mid = jid(&m.author_public_key);
-        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&mid, MemberRole::Viewer, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&mid, MemberRole::Viewer, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
         let (u, _) = unlock_as_member(&added.keyring, &MemberAuth { passphrase: &Passphrase::new(b"m pass"), kdf: &m.kdf_params, member_id: &mid, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-m"), 0).unwrap();
         assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &pre).unwrap(), b"pre-join photo");
@@ -2010,28 +2003,28 @@ mod tests {
         let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let co_id = jid(&co.author_public_key);
-        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
 
-        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
+        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id).unwrap();
         let k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
         assert!(k.members.iter().any(|m| m.member_id == co_id.as_str() && m.role == MemberRole::CoOwner as i32 && m.author_public_key == co.author_public_key));
         verify_keyring(&k, &founder_key(&owner.keyring)).unwrap();
 
         assert!(matches!(
-            add_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id),
+            add_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id),
             Err(VaultError::MemberExists)
         ));
         assert!(matches!(
-            add_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &MemberId::new("nobody")),
+            add_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &MemberId::new("nobody")),
             Err(VaultError::MemberNotFound)
         ));
 
-        let demoted = remove_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id, MemberRole::Viewer).unwrap();
+        let demoted = remove_co_owner(&promoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id, MemberRole::Viewer).unwrap();
         let k2 = Keyring::decode(demoted.keyring.as_slice()).unwrap();
         assert!(!k2.members.iter().any(|m| m.member_id == co_id.as_str() && (m.role == MemberRole::Owner as i32 || m.role == MemberRole::CoOwner as i32)));
         assert!(k2.members.iter().any(|m| m.member_id == co_id.as_str() && m.role == MemberRole::Viewer as i32));
         assert!(matches!(
-            remove_co_owner(&demoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id, MemberRole::Viewer),
+            remove_co_owner(&demoted.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id, MemberRole::Viewer),
             Err(VaultError::MemberNotFound)
         ));
     }
@@ -2045,8 +2038,8 @@ mod tests {
         let sealed = seal_open(&owner.sealer, b"tree content");
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let co_id = jid(&co.author_public_key);
-        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
-        let promoted = add_co_owner(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id).unwrap();
         let pinned = founder_key(&owner.keyring);
 
         let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
@@ -2075,9 +2068,9 @@ mod tests {
         let victim = provision_member(&Passphrase::new(b"v pass")).unwrap();
         let co_id = jid(&co.author_public_key);
         let victim_id = jid(&victim.author_public_key);
-        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
-        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&victim_id, MemberRole::Editor, &victim.author_public_key, &victim.hpke_public_key).unwrap()).unwrap();
-        let promoted = add_co_owner(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&victim_id, MemberRole::Editor, &victim.author_public_key, &victim.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id).unwrap();
         let pinned = founder_key(&owner.keyring);
 
         let removed = remove_member_as_co_owner(
@@ -2095,7 +2088,7 @@ mod tests {
             unlock_as_member(&removed.keyring, &MemberAuth { passphrase: &Passphrase::new(b"v pass"), kdf: &victim.kdf_params, member_id: &victim_id, trusted_signers: &[pinned, co_vk] }, &TreeId::new(TREE), &ReplicaId::new(b"r"), 0),
             Err(VaultError::MissingWrap)
         ));
-        let ou = unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o2")).unwrap();
+        let ou = unlock(&removed.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &ReplicaId::new(b"r-o2")).unwrap();
         assert_eq!(ou.sealer.open_entry(EntryKind::Snapshot, &new).unwrap(), b"post-removal");
     }
 
@@ -2107,7 +2100,7 @@ mod tests {
         let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let ed = provision_member(&Passphrase::new(b"ed pass")).unwrap();
         let ed_id = jid(&ed.author_public_key);
-        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&ed_id, MemberRole::Editor, &ed.author_public_key, &ed.hpke_public_key).unwrap()).unwrap();
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&ed_id, MemberRole::Editor, &ed.author_public_key, &ed.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
         let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
         let m3_id = jid(&m3.author_public_key);
@@ -2131,10 +2124,10 @@ mod tests {
         let co2 = provision_member(&Passphrase::new(b"co2 pass")).unwrap();
         let co1_id = jid(&co1.author_public_key);
         let co2_id = jid(&co2.author_public_key);
-        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co1_id, MemberRole::Editor, &co1.author_public_key, &co1.hpke_public_key).unwrap()).unwrap();
-        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co2_id, MemberRole::Editor, &co2.author_public_key, &co2.hpke_public_key).unwrap()).unwrap();
-        let p1 = add_co_owner(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co1_id).unwrap();
-        let p2 = add_co_owner(&p1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co2_id).unwrap();
+        let k1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co1_id, MemberRole::Editor, &co1.author_public_key, &co1.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co2_id, MemberRole::Editor, &co2.author_public_key, &co2.hpke_public_key).unwrap()).unwrap();
+        let p1 = add_co_owner(&k2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co1_id).unwrap();
+        let p2 = add_co_owner(&p1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co2_id).unwrap();
         let pinned = founder_key(&owner.keyring);
         assert!(matches!(
             remove_member_as_co_owner(&p2.keyring, &MemberAuth { passphrase: &Passphrase::new(b"co1 pass"), kdf: &co1.kdf_params, member_id: &co1_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), 0, &co2_id, &ReplicaId::new(b"r")),
@@ -2149,8 +2142,8 @@ mod tests {
         let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-o")).unwrap();
         let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         let mid = jid(&m.author_public_key);
-        assert!(add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&mid, MemberRole::CoOwner, &m.author_public_key, &m.hpke_public_key).unwrap()).is_err());
-        assert!(add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&mid, MemberRole::Owner, &m.author_public_key, &m.hpke_public_key).unwrap()).is_err());
+        assert!(add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&mid, MemberRole::CoOwner, &m.author_public_key, &m.hpke_public_key).unwrap()).is_err());
+        assert!(add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&mid, MemberRole::Owner, &m.author_public_key, &m.hpke_public_key).unwrap()).is_err());
     }
 
     #[test]
@@ -2161,8 +2154,8 @@ mod tests {
         let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let co_id = jid(&co.author_public_key);
-        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
-        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id).unwrap();
         let founder = founder_key(&owner.keyring);
 
         let co_identity = derive_root(b"co pass", &co.kdf_params).unwrap().identity;
@@ -2179,13 +2172,17 @@ mod tests {
     fn the_owner_cannot_be_removed_and_a_non_member_is_rejected() {
         let owner_pass = Passphrase::new(b"owner pass");
         let (ks, _c) = make_owner(&owner_pass);
-        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
+        // The owner's on-tree id is the account's SELF-CERTIFYING derived id (OPE-543), not a caller label.
+        let me = owner_id(&ks, &owner_pass);
+        let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
+        // Removing the DERIVED owner id hits CannotRemoveOwner — a caller can no longer smuggle the real owner
+        // id past the guard (the guard compares against the resolved owner, not a spoofable caller label).
         assert!(matches!(
-            remove_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &MemberId::new(MEMBER), &ReplicaId::new(b"r")),
+            remove_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &me, &ReplicaId::new(b"r")),
             Err(VaultError::CannotRemoveOwner)
         ));
         assert!(matches!(
-            remove_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &MemberId::new("nobody"), &ReplicaId::new(b"r")),
+            remove_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &MemberId::new("nobody"), &ReplicaId::new(b"r")),
             Err(VaultError::MemberNotFound)
         ));
     }
@@ -2198,12 +2195,12 @@ mod tests {
         let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let co_id = jid(&co.author_public_key);
-        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
-        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &co_id).unwrap();
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let promoted = add_co_owner(&added.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &co_id).unwrap();
         let pinned = founder_key(&owner.keyring);
         let ks_bytes = ks.to_bytes().unwrap();
 
-        let rec = recover(&promoted.keyring, &ks_bytes, &code, &Passphrase::new(b"new pass"), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o2"), &no_watermark()).unwrap();
+        let rec = recover(&promoted.keyring, &ks_bytes, &code, &Passphrase::new(b"new pass"), &TreeId::new(TREE), &ReplicaId::new(b"r-o2"), &no_watermark()).unwrap();
         let k = Keyring::decode(rec.keyring.as_slice()).unwrap();
         assert!(k.members.iter().any(|m| m.member_id == co_id.as_str() && m.role == MemberRole::CoOwner as i32 && m.author_public_key == co.author_public_key));
         assert!(unlock_as_member(&rec.keyring, &MemberAuth { passphrase: &Passphrase::new(b"co pass"), kdf: &co.kdf_params, member_id: &co_id, trusted_signers: &[pinned] }, &TreeId::new(TREE), &ReplicaId::new(b"r-co"), 0).is_ok());
@@ -2217,7 +2214,7 @@ mod tests {
         let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-o")).unwrap();
         let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let co_id = jid(&co.author_public_key);
-        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
+        let added = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 0, &Joiner::from_bytes(&co_id, MemberRole::Editor, &co.author_public_key, &co.hpke_public_key).unwrap()).unwrap();
         let pinned = founder_key(&owner.keyring);
         let ks_bytes = ks.to_bytes().unwrap();
 
@@ -2236,18 +2233,18 @@ mod tests {
 
         let m2 = provision_member(&Passphrase::new(b"m2 pass")).unwrap();
         let m2_id = jid(&m2.author_public_key);
-        let add1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 1, &Joiner::from_bytes(&m2_id, MemberRole::Editor, &m2.author_public_key, &m2.hpke_public_key).unwrap()).unwrap();
+        let add1 = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 1, &Joiner::from_bytes(&m2_id, MemberRole::Editor, &m2.author_public_key, &m2.hpke_public_key).unwrap()).unwrap();
         assert_eq!(add1.revision, 2);
         assert_eq!(first_shared(&add1.keyring), 2);
 
         let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
         let m3_id = jid(&m3.author_public_key);
-        let add2 = add_member(&add1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 2, &Joiner::from_bytes(&m3_id, MemberRole::Editor, &m3.author_public_key, &m3.hpke_public_key).unwrap()).unwrap();
+        let add2 = add_member(&add1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 2, &Joiner::from_bytes(&m3_id, MemberRole::Editor, &m3.author_public_key, &m3.hpke_public_key).unwrap()).unwrap();
         assert_eq!(first_shared(&add2.keyring), 2);
 
-        let rem1 = remove_member(&add2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 3, &m3_id, &ReplicaId::new(b"r-owner")).unwrap();
+        let rem1 = remove_member(&add2.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 3, &m3_id, &ReplicaId::new(b"r-owner")).unwrap();
         assert_eq!(first_shared(&rem1.keyring), 2);
-        let rem2 = remove_member(&rem1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 4, &m2_id, &ReplicaId::new(b"r-owner")).unwrap();
+        let rem2 = remove_member(&rem1.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 4, &m2_id, &ReplicaId::new(b"r-owner")).unwrap();
         let k = Keyring::decode(rem2.keyring.as_slice()).unwrap();
         assert_eq!(k.members.len(), 1);
         assert_eq!(k.first_shared_revision, 2);
@@ -2261,15 +2258,15 @@ mod tests {
         let me = owner_id(&ks, &owner_pass);
         let owner = provision(&acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-owner")).unwrap();
 
-        let u_solo = unlock(&owner.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-b")).unwrap();
+        let u_solo = unlock(&owner.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &ReplicaId::new(b"r-b")).unwrap();
         let solo = Envelope::decode(seal_open(&u_solo.sealer, b"solo edit").as_slice()).unwrap().header.unwrap();
         assert!(solo.author_signature.is_empty(), "a never-shared tree writes unattributed");
 
         let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         let mid = jid(&m.author_public_key);
-        let add = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), &me, 1, &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
+        let add = add_member(&owner.keyring, &acct(&ks, &owner_pass), &TreeId::new(TREE), 1, &Joiner::from_bytes(&mid, MemberRole::Editor, &m.author_public_key, &m.hpke_public_key).unwrap()).unwrap();
 
-        let u_owner = unlock(&add.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &me, &ReplicaId::new(b"r-c")).unwrap();
+        let u_owner = unlock(&add.keyring, acct(&ks, &owner_pass), &TreeId::new(TREE), &ReplicaId::new(b"r-c")).unwrap();
         let owner_h = Envelope::decode(seal_open(&u_owner.sealer, b"owner edit").as_slice()).unwrap().header.unwrap();
         assert!(!owner_h.author_signature.is_empty(), "shared tree: owner signs");
         assert_eq!(owner_h.author_member_id, me.as_str());
