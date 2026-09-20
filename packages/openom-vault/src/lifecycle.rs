@@ -144,23 +144,13 @@ pub struct Rekeyed {
 /// The client keyring lifecycle — the shared menu (see the module docs). `anchor` and `floor` are
 /// engine-opaque bytes; results carry the new anchor to publish plus the opaque watermark to persist.
 pub trait KeyringLifecycle {
-    /// Create a brand-new encrypted tree. `account` is the caller's durable ACCOUNT identity (OPE-542/543): the
-    /// dag (owner-as-member) engine REQUIRES it and derives the owner identity from it; the chain engine ignores
-    /// it and provisions from the `passphrase` credential, so the caller passes `None`.
+    /// Create a brand-new encrypted tree under the caller's already-unlocked durable account identity.
     ///
     /// # Errors
     /// Returns [`VaultError`] if provisioning fails.
-    fn provision(
-        &self,
-        ctx: &VaultContext,
-        passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
-    ) -> Result<Provisioned, VaultError>;
+    fn provision(&self, ctx: &VaultContext, account: &UnlockedAccount) -> Result<Provisioned, VaultError>;
 
-    /// Re-open an existing tree from its trusted `anchor` (returning / a new device). `account` is the caller's
-    /// durable ACCOUNT identity: the dag engine REQUIRES it (the owner reads via their account member wrap and
-    /// its identity is checked against the resolved owner); the chain engine ignores it and unlocks from
-    /// `passphrase`, so the caller passes `None`.
+    /// Re-open an existing tree from its trusted `anchor` using the already-unlocked durable account.
     ///
     /// # Errors
     /// Returns [`VaultError`] if unlock fails (wrong passphrase / account, or a malformed/stale keyring).
@@ -168,8 +158,7 @@ pub trait KeyringLifecycle {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
+        account: &UnlockedAccount,
     ) -> Result<Unlocked, VaultError>;
 
     /// Recover with the recovery code, re-establishing owner access under `new_passphrase`, preserving
@@ -266,15 +255,9 @@ impl KeyringLifecycle for ChainVault {
     fn provision(
         &self,
         ctx: &VaultContext,
-        _passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
+        account: &UnlockedAccount,
     ) -> Result<Provisioned, VaultError> {
-        // OPE-543 durable identity: the chain owner IS the durable account (symmetric with the dag). The
-        // `_passphrase` credential no longer derives the owner; the account is REQUIRED.
-        let account = account.ok_or_else(|| {
-            VaultError::BadKeyring("chain provision requires the account identity".into())
-        })?;
-        let p = vault::provision(&account, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
+        let p = vault::provision(account, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
         Ok(Provisioned {
             anchor: p.keyring,
             recovery_code: p.recovery_code,
@@ -288,14 +271,8 @@ impl KeyringLifecycle for ChainVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        _passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
+        account: &UnlockedAccount,
     ) -> Result<Unlocked, VaultError> {
-        // The owner reads via their durable ACCOUNT identity (the app unlocked the keystore and passes it in);
-        // `_passphrase` is no longer used to derive the owner. The account is REQUIRED.
-        let account = account.ok_or_else(|| {
-            VaultError::BadKeyring("chain unlock requires the account identity".into())
-        })?;
         let u = vault::unlock(anchor, account, ctx.tree_id, ctx.replica_id)?;
         Ok(Unlocked {
             sealer: u.sealer,
@@ -425,11 +402,11 @@ mod tests {
         assert_ne!(real.as_str(), bogus.as_str(), "the two ids must differ for the test to mean anything");
 
         let p = ChainVault
-            .provision(&ctx(&tree, &real, &ReplicaId::new(b"rA")), &pass, Some(ks.unlock(pass.expose()).unwrap()))
+            .provision(&ctx(&tree, &real, &ReplicaId::new(b"rA")), &ks.unlock(pass.expose()).unwrap())
             .unwrap();
         // Unlock passing the BOGUS label — the owner is resolved from the account, so it opens regardless.
         let u = ChainVault
-            .unlock(&ctx(&tree, &bogus, &ReplicaId::new(b"rB")), &p.anchor, &pass, Some(ks.unlock(pass.expose()).unwrap()))
+            .unlock(&ctx(&tree, &bogus, &ReplicaId::new(b"rB")), &p.anchor, &ks.unlock(pass.expose()).unwrap())
             .unwrap();
         assert_eq!(u.did_key, p.did_key, "resolved from the account identity, not the caller's label");
     }
@@ -446,7 +423,7 @@ mod tests {
         let tree = TreeId::new(TREE);
         let pass = Passphrase::new(b"correct horse");
         // The durable ACCOUNT is the owner on BOTH engines (OPE-542/543). One keystore is the tree's single
-        // owner across every lifecycle call; each call that signs consumes a fresh `UnlockedAccount`.
+        // owner across every lifecycle call; tree sessions borrow it and derive their own owned signing keys.
         let (ks, code, _u) = AccountKeystore::create(pass.expose()).unwrap();
         let ks_bytes = ks.to_bytes().unwrap();
         // OPE-543: the owner's on-tree id is SELF-CERTIFYING — the durable account's `member_id`
@@ -457,8 +434,7 @@ mod tests {
         let p = engine
             .provision(
                 &ctx(&tree, &member, &ReplicaId::new(b"rA")),
-                &pass,
-                Some(ks.unlock(pass.expose()).unwrap()),
+                &ks.unlock(pass.expose()).unwrap(),
             )
             .unwrap();
         assert!(
@@ -479,8 +455,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"rB")),
                 &p.anchor,
-                &pass,
-                Some(ks.unlock(pass.expose()).unwrap()),
+                &ks.unlock(pass.expose()).unwrap(),
             )
             .unwrap();
         assert_eq!(u.did_key, p.did_key);
@@ -523,8 +498,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"rC")),
                 &re.anchor,
-                &new_pass,
-                Some(re_ks.unlock(new_pass.expose()).unwrap()),
+                &re_ks.unlock(new_pass.expose()).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -577,5 +551,52 @@ mod tests {
         // point (OPE-278) delegates identically, so the hosts can drive one type (OPE-276's "write once").
         lifecycle_contract(&crate::AppVault::Chain(ChainVault));
         lifecycle_contract(&crate::AppVault::Dag(crate::DagVault));
+    }
+
+    fn reusable_account_contract<E: KeyringLifecycle>(engine: &E) {
+        use crate::AccountKeystore;
+
+        let passphrase = Passphrase::new(b"one profile passphrase");
+        let (_keystore, _recovery_code, account) =
+            AccountKeystore::create(passphrase.expose()).unwrap();
+        let member = MemberId::new(account.member_id.clone());
+        let first_tree = TreeId::new(b"first-tree-id-01");
+        let second_tree = TreeId::new(b"second-tree-id02");
+
+        let first = engine
+            .provision(
+                &ctx(&first_tree, &member, &ReplicaId::new(b"first-create")),
+                &account,
+            )
+            .unwrap();
+        let second = engine
+            .provision(
+                &ctx(&second_tree, &member, &ReplicaId::new(b"second-create")),
+                &account,
+            )
+            .unwrap();
+
+        assert_eq!(first.did_key, second.did_key, "one profile account owns both trees");
+        let first_open = engine
+            .unlock(
+                &ctx(&first_tree, &member, &ReplicaId::new(b"first-open")),
+                &first.anchor,
+                &account,
+            )
+            .unwrap();
+        let second_open = engine
+            .unlock(
+                &ctx(&second_tree, &member, &ReplicaId::new(b"second-open")),
+                &second.anchor,
+                &account,
+            )
+            .unwrap();
+        assert_eq!(first_open.did_key, second_open.did_key);
+    }
+
+    #[test]
+    fn one_unlocked_account_is_reusable_across_trees() {
+        reusable_account_contract(&ChainVault);
+        reusable_account_contract(&crate::DagVault);
     }
 }

@@ -68,12 +68,11 @@ impl KeyringLifecycle for AppVault {
     fn provision(
         &self,
         ctx: &VaultContext,
-        passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
+        account: &UnlockedAccount,
     ) -> Result<Provisioned, VaultError> {
         match self {
-            Self::Chain(v) => v.provision(ctx, passphrase, account),
-            Self::Dag(v) => v.provision(ctx, passphrase, account),
+            Self::Chain(v) => v.provision(ctx, account),
+            Self::Dag(v) => v.provision(ctx, account),
         }
     }
 
@@ -81,12 +80,11 @@ impl KeyringLifecycle for AppVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
+        account: &UnlockedAccount,
     ) -> Result<Unlocked, VaultError> {
         match self {
-            Self::Chain(v) => v.unlock(ctx, anchor, passphrase, account),
-            Self::Dag(v) => v.unlock(ctx, anchor, passphrase, account),
+            Self::Chain(v) => v.unlock(ctx, anchor, account),
+            Self::Dag(v) => v.unlock(ctx, anchor, account),
         }
     }
 

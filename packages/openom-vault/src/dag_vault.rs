@@ -575,7 +575,7 @@ pub struct DagVault;
 fn unlock_with_account(
     ctx: &VaultContext,
     anchor: &[u8],
-    account: UnlockedAccount,
+    account: &UnlockedAccount,
 ) -> Result<Unlocked, VaultError> {
     let tree_id = ctx.tree_id.as_bytes();
     let replica_id = ctx.replica_id.as_bytes();
@@ -597,7 +597,7 @@ fn unlock_with_account(
         ..
     } = fold_resolved(&resolved)?;
 
-    let root = account.root;
+    let root = account.tree_root();
     // Anti-substitution: the account identity must be the RESOLVED Owner's key, so a swapped owner — or an
     // account that isn't this tree's owner — fails here. And self-cert: the key must bind the resolved owner id.
     let derived = root.identity.verifying_key().to_bytes();
@@ -641,8 +641,7 @@ impl KeyringLifecycle for DagVault {
     fn provision(
         &self,
         ctx: &VaultContext,
-        _passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
+        account: &UnlockedAccount,
     ) -> Result<Provisioned, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let replica_id = ctx.replica_id.as_bytes();
@@ -656,9 +655,6 @@ impl KeyringLifecycle for DagVault {
         // account keystore, not the tree — and no owner passphrase KDF rides the sealing (the `_passphrase` here
         // is the chain's credential; the dag path ignores it). `ctx.member_id` is the app's notion; the ON-TREE
         // identity is the derived one, which must match or resolve() would reject the genesis.
-        let account = account.ok_or_else(|| {
-            VaultError::BadKeyring("dag provision requires the account identity".into())
-        })?;
         let root = &account.root;
 
         let dek = generate_dek()?;
@@ -713,16 +709,12 @@ impl KeyringLifecycle for DagVault {
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
-        _passphrase: &Passphrase,
-        account: Option<UnlockedAccount>,
+        account: &UnlockedAccount,
     ) -> Result<Unlocked, VaultError> {
         // OPE-543 owner-as-member + OPE-542 durable identity: the owner reads via the MEMBER path using their
         // durable ACCOUNT identity (the app unlocked the keystore and passes it in) — NOT a passphrase re-derive
         // off a sealing-carried KDF. The `_passphrase` here is the chain's credential; the dag path takes the
         // identity from `account`. All the resolve/verify/open work lives in the shared `unlock_with_account`.
-        let account = account.ok_or_else(|| {
-            VaultError::BadKeyring("dag unlock requires the account identity".into())
-        })?;
         unlock_with_account(ctx, anchor, account)
     }
 
@@ -756,7 +748,7 @@ impl KeyringLifecycle for DagVault {
 
         // Open the tree with the restored identity by the ordinary owner path — the anchor is unchanged, so the
         // resolved owner is exactly this identity (anti-substitution inside `unlock_with_account` enforces it).
-        let u = unlock_with_account(ctx, anchor, unlocked)?;
+        let u = unlock_with_account(ctx, anchor, &unlocked)?;
         Ok(Recovered {
             anchor: anchor.to_vec(),
             recovery_code: RecoveryCode::new(String::new()),
@@ -1681,7 +1673,7 @@ mod tests {
     ) -> (AccountKeystore, Provisioned) {
         let ks = owner_ks(pass);
         let p = DagVault
-            .provision(&ctx(tree, member, replica), pass, Some(acct(&ks, pass)))
+            .provision(&ctx(tree, member, replica), &acct(&ks, pass))
             .unwrap();
         (ks, p)
     }
@@ -2509,8 +2501,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"replica-B")),
                 &p.anchor,
-                &pass,
-                Some(acct(&ks, &pass)),
+                &acct(&ks, &pass),
             )
             .unwrap();
         assert_eq!(
@@ -2541,8 +2532,7 @@ mod tests {
         let p = DagVault
             .provision(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
-                &old_pass,
-                Some(ks.unlock(old_pass.expose()).unwrap()),
+                &ks.unlock(old_pass.expose()).unwrap(),
             )
             .unwrap();
         let sealed = p
@@ -2581,8 +2571,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r3")),
                 &p.anchor,
-                &new_pass,
-                Some(new_ks.unlock(new_pass.expose()).unwrap()),
+                &new_ks.unlock(new_pass.expose()).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -2678,7 +2667,7 @@ mod tests {
 
         // The owner unlocks but CANNOT reach the write epoch — locked out, cannot self-heal.
         let u_before = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &hostile, &owner_pass, Some(acct(&ks, &owner_pass)))
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &hostile, &acct(&ks, &owner_pass))
             .unwrap();
         assert!(
             u_before.write_epoch_unreachable,
@@ -2704,7 +2693,7 @@ mod tests {
 
         // Now the owner reaches the once-locked-out epoch.
         let u_after = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r3")), &healed.anchor, &owner_pass, Some(acct(&ks, &owner_pass)))
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r3")), &healed.anchor, &acct(&ks, &owner_pass))
             .unwrap();
         assert!(!u_after.write_epoch_unreachable, "the owner now reaches the write epoch");
         assert_eq!(
@@ -2784,8 +2773,7 @@ mod tests {
         let p = DagVault
             .provision(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
-                &old_pass,
-                Some(ks.unlock(old_pass.expose()).unwrap()),
+                &ks.unlock(old_pass.expose()).unwrap(),
             )
             .unwrap();
         let sealed = p
@@ -2815,8 +2803,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r2")),
                 &p.anchor,
-                &new_pass,
-                Some(new_ks.unlock(new_pass.expose()).unwrap()),
+                &new_ks.unlock(new_pass.expose()).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -2859,8 +2846,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
                 &p.anchor,
-                &old_pass,
-                Some(acct(&ks, &old_pass)),
+                &acct(&ks, &old_pass),
             )
             .unwrap();
         assert!(
@@ -2970,8 +2956,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &new_anchor,
-                &pass,
-                Some(acct(&ks, &pass)),
+                &acct(&ks, &pass),
             )
             .unwrap();
         assert_eq!(
@@ -3031,8 +3016,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &new_anchor,
-                &owner_pass,
-                Some(acct(&ks, &owner_pass)),
+                &acct(&ks, &owner_pass),
             )
             .unwrap();
         let owner_h = seal_header(&u_owner.sealer, b"owner edit");
@@ -3082,7 +3066,7 @@ mod tests {
 
         // The owner seals an entry under the CURRENT (first) epoch.
         let u = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &shared, &owner_pass, Some(acct(&ks, &owner_pass)))
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &shared, &acct(&ks, &owner_pass))
             .unwrap();
         let sealed = u
             .sealer
@@ -3231,8 +3215,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &a2,
-                &owner_pass,
-                Some(acct(&ks, &owner_pass)),
+                &acct(&ks, &owner_pass),
             )
             .unwrap();
         let post = u
@@ -3286,8 +3269,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &merged,
-                &owner_pass,
-                Some(acct(&ks, &owner_pass)),
+                &acct(&ks, &owner_pass),
             )
             .unwrap();
         assert!(
@@ -3310,8 +3292,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &r.anchor,
-                &owner_pass,
-                Some(acct(&ks, &owner_pass)),
+                &acct(&ks, &owner_pass),
             )
             .unwrap();
         assert!(
@@ -3356,8 +3337,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
                 &r3.anchor,
-                &owner_pass,
-                Some(acct(&ks, &owner_pass)),
+                &acct(&ks, &owner_pass),
             )
             .unwrap();
         assert!(
@@ -3384,8 +3364,7 @@ mod tests {
                 .unlock(
                     &ctx(&tree, &member, &ReplicaId::new(b"r")),
                     &p.anchor,
-                    &pass,
-                    Some(acct(&stranger, &stranger_pass)),
+                    &acct(&stranger, &stranger_pass),
                 )
                 .is_err(),
             "a foreign account does not open the dag vault"
@@ -3435,7 +3414,7 @@ mod tests {
                 "{stage}: the owner is not locked out of any retained epoch"
             );
             let u = DagVault
-                .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"ra")), anchor, &pass, Some(acct(&ks, &pass)))
+                .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"ra")), anchor, &acct(&ks, &pass))
                 .unwrap();
             assert!(
                 !u.write_epoch_unreachable,
@@ -3450,7 +3429,7 @@ mod tests {
 
         // provision
         let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass, Some(acct(&ks, &pass)))
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &acct(&ks, &pass))
             .unwrap();
         assert_eq!(
             DagVault.resolved_reset_authority(&p.anchor).unwrap(),

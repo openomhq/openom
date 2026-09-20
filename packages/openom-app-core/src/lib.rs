@@ -201,7 +201,7 @@ pub fn provision<S: BlobStore>(
     // code is empty on both engines now.
     let (ks, account_code, unlocked) = AccountKeystore::create(passphrase.expose())?;
     let keystore = ks.to_bytes()?;
-    let p = AppVault::from_kind(engine).provision(&ctx, passphrase, Some(unlocked))?;
+    let p = AppVault::from_kind(engine).provision(&ctx, &unlocked)?;
     let did = p.did_key.into_string();
     Ok(Provisioned {
         core: AppCore::new(did.clone(), p.sealer, Arc::new(store), doc, replica_id),
@@ -238,8 +238,8 @@ pub fn unlock<S: BlobStore>(
     // OPE-542/543 durable identity: BOTH engines re-derive the owner's durable ACCOUNT identity from the
     // persisted keystore blob + passphrase (the blob comes back from the platform layer that stored it at
     // provision); the vault checks that identity IS the resolved owner.
-    let account = Some(AccountKeystore::from_bytes(keystore)?.unlock(passphrase.expose())?);
-    let u = AppVault::from_kind(engine).unlock(&ctx, anchor, passphrase, account)?;
+    let account = AccountKeystore::from_bytes(keystore)?.unlock(passphrase.expose())?;
+    let u = AppVault::from_kind(engine).unlock(&ctx, anchor, &account)?;
     let did = u.did_key.into_string();
     Ok(Unlocked {
         core: AppCore::new(did.clone(), u.sealer, Arc::new(store), doc, replica_id),

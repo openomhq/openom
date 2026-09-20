@@ -15,7 +15,7 @@ proptest! {
         let (_ks, _code, account) = AccountKeystore::create(b"pass").unwrap();
         let r = unlock(
             &bytes,
-            account,
+            &account,
             &TreeId::new(b"tree-uuid-16byte".as_slice()),
             &ReplicaId::new(b"replica-0".as_slice()),
         );

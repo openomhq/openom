@@ -67,6 +67,14 @@ pub struct UnlockedAccount {
     identity_master: Zeroizing<[u8; 32]>,
 }
 
+impl UnlockedAccount {
+    /// Derive a fresh owned key bundle for a tree session while this account remains unlocked and reusable.
+    /// The returned secrets are independent allocations and are zeroized by their owning types on drop.
+    pub(crate) fn tree_root(&self) -> RootKeys {
+        derive_account_keys(&self.identity_master)
+    }
+}
+
 /// A placeholder KDF for the INNER wrap: its KEK is the raw `account_root` supplied directly at unwrap, so the
 /// wrap's stored `kdf` is never used to re-derive anything (mirrors `vault_core::open_rrk_secret`).
 fn inner_placeholder_kdf() -> KeyeoKdfParams {

@@ -1,17 +1,19 @@
 # openom-vault
 
-> The keyring **vault** layer — the passphrase-driven lifecycle (provision / unlock / recover /
+> The keyring **vault** layer — the durable-account-backed lifecycle (provision / unlock / recover /
 > change-passphrase / author membership) over a keyring, for both engines.
 
 **Status:** built · key-custody lifecycle · openom-coupled by design · design keyring-dag/design.dag-vault.md (OPE-273/279)
-**Last updated:** 2026-09-10
+**Last updated:** 2026-09-21
 
 ## What it is — and is not
 
-The stateful, secret-holding top of the keyring stack. Behind the [`KeyringLifecycle`] trait it turns a
-passphrase (or recovery code) + the keyring bytes into an unlocked DEK session and drives every membership
-operation: provision a tree, unlock on a new device, recover, change passphrase, add/remove a member,
-promote/demote a co-owner. [`AppVault`] dispatches each call to the right engine — [`ChainVault`] over
+The stateful, secret-holding top of the keyring stack. Behind the [`KeyringLifecycle`] trait it borrows one
+profile-level [`UnlockedAccount`] to provision and unlock any number of independent tree sessions. Each
+session receives fresh owned keys derived from the account's stored-random identity master, so the account
+remains resident and reusable while session secrets remain independently owned. Recovery and credential
+changes remain explicit lifecycle operations. The vault also drives membership operations: add/remove a
+member and promote/demote a co-owner. [`AppVault`] dispatches each call to the right engine — [`ChainVault`] over
 `openom-keyring-chain` or [`DagVault`] over `openom-keyring-dag` — on the tree's bound [`openom_keyring_api::EngineKind`], so one binary
 serves both. Underneath sits the engine-neutral **sealing core** (`vault_core`: DEK / epoch / RRK / KDF /
 recovery-code / `SealerSet` machinery), extracted so both engines share one implementation of the
@@ -34,8 +36,8 @@ coupling is load-bearing, not incidental (see `packages/openom-crypto` and OPE-2
 
 | id | guarantee | why it matters | verified by |
 |----|-----------|----------------|-------------|
-| **VAULT-1** | Provision-then-unlock from the keyring bytes + passphrase alone, on a second independent replica, reaches the identical DEK and opens what the first sealed. | The whole point of a passphrase-derived KEK: a new device joins from the passphrase, not a copied key file. | `vault::tests::provision_then_unlock_on_another_device_opens_the_same_data`, `dag_vault::tests::dag_provision_then_unlock_opens_the_same_data` |
-| **VAULT-2** | `unlock` / `change_passphrase` / `recover` all fail on the wrong credential. | The keyring is an otherwise-public blob; the credential is the only thing between it and the DEK. | `vault::tests::wrong_passphrase_is_rejected`, `dag_vault::tests::dag_unlock_rejects_a_wrong_passphrase` |
+| **VAULT-1** | One unlocked durable account can provision and unlock multiple independent trees under the same stable identity; a second replica reaches each tree's identical DEK. | Account authentication happens once per profile session, rather than consuming or re-deriving identity for every tree operation. | `lifecycle::tests::one_unlocked_account_is_reusable_across_trees`, `vault::tests::provision_then_unlock_on_another_device_opens_the_same_data`, `dag_vault::tests::dag_provision_then_unlock_opens_the_same_data` |
+| **VAULT-2** | Account unlock / credential change / recovery reject the wrong credential, and tree unlock rejects a foreign account. | Public keystore and keyring blobs reveal no usable account or tree secret without the corresponding credential and identity. | `account_keystore::tests::wrong_passphrase_fails`, `vault::tests::unlock_with_the_wrong_account_is_rejected`, `vault::tests::change_passphrase_with_the_wrong_old_passphrase_fails`, `vault::tests::recover_with_the_wrong_code_fails` |
 | **VAULT-3** | Both engines satisfy one lifecycle contract, and a keyring for another `tree_id` is refused (the caller's expected id is trusted, never the document's). | `AppVault` can dispatch either engine identically, and the tree-binding AAD stays non-circular. | `lifecycle::tests::chain_and_dag_satisfy_the_same_lifecycle_contract`, `vault::tests::a_keyring_for_another_tree_is_refused` |
 | **VAULT-4** | Removing a member re-keys to a fresh epoch that locks them out of new content. | Forward secrecy: a removed member keeps only what they could already read. | `vault::tests::removing_a_member_re_keys_and_denies_them_new_content`, `dag_vault::tests::dag_remove_member_forward_secret_epoch_locks_them_out` |
 | **VAULT-5** | `recover` pins the write epoch to DEK *material* (`revision‖key_id‖H(DEK)`), and a stale anchor / rolled-back watermark is refused. | Anti-rollback binds recovery to real key material, not a public label an attacker can mint (OPE-286). | `vault::tests::recover_pins_the_write_epoch_to_dek_material`, `dag_vault::tests::dag_watermark_advances_and_a_stale_anchor_is_refused` |
@@ -47,14 +49,15 @@ Run: `node scripts/cargo.mjs test -p openom-vault` (from the repo root).
 ## Usage
 
 ```rust,ignore
-use openom_vault::{AppVault, lifecycle::VaultContext};
+use openom_vault::{AppVault, lifecycle::{KeyringLifecycle, VaultContext}};
 
 // Dispatches to the chain or dag engine on the tree's bound EngineKind.
-let vault = AppVault::for_engine(engine_kind);
+let vault = AppVault::from_kind(engine_kind);
+let account = keystore.unlock(passphrase.expose())?;
 let ctx = VaultContext { tree_id, member_id, replica_id };
 
-let provisioned = vault.provision(&ctx, &passphrase)?;   // new tree → keyring bytes + a DEK session
-let session     = vault.unlock(&ctx, &keyring_bytes, &passphrase)?; // another device → same DEK
+let provisioned = vault.provision(&ctx, &account)?; // new tree → keyring bytes + a DEK session
+let session = vault.unlock(&ctx, &keyring_bytes, &account)?; // same account remains usable for other trees
 ```
 
 Entry points: `AppVault` (engine dispatch), the `KeyringLifecycle` trait, `ChainVault` / `DagVault`,
