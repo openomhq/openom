@@ -175,6 +175,7 @@ pub fn vault_error_code(e: &VaultError) -> &'static str {
             ec::INVALID_REQUEST
         }
         VaultError::MalformedWatermark => ec::INTERNAL,
+        VaultError::KeystoreGenerationRollback { .. } => ec::GENERATION_ROLLBACK,
     }
 }
 
