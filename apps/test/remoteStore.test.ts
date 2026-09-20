@@ -172,3 +172,119 @@ describe('RemoteStore membership summary (/access)', () => {
     );
   });
 });
+
+describe('RemoteStore account surface (/register, /me, /account/keystore)', () => {
+  // JSON Response stand-in with a plain `{ error: code }` body (what the account handlers return, not RFC 9457).
+  const jres = ({ status = 200, json = {} as any } = {}) => ({
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: () => null },
+    json: async () => json,
+    text: async () => JSON.stringify(json),
+  });
+
+  it('register sends the snake_case PoP body and returns { memberId }', async () => {
+    const fetch = vi.fn(async () => jres({ json: { member_id: 'mid-1' } }));
+    const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth: async () => 'jwt' });
+    const out = await store.register({
+      memberId: 'mid-1',
+      authorPublicKey: new Uint8Array([1, 2, 3]),
+      signature: new Uint8Array([4, 5]),
+      ts: 1000,
+    });
+    expect(out).toEqual({ memberId: 'mid-1' });
+    expect(fetch.mock.calls[0][0]).toBe('http://x/v1/register');
+    const init = fetch.mock.calls[0][1] as any;
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({
+      member_id: 'mid-1',
+      author_pubkey: 'AQID', // base64([1,2,3])
+      signature: 'BAU=', // base64([4,5])
+      ts: 1000,
+    });
+  });
+
+  it('register does NOT auth-retry a 401 PoP failure — it maps the body code, not auth_required', async () => {
+    const fetch = vi.fn(async () => jres({ status: 401, json: { error: 'stale_timestamp' } }));
+    const auth = { getAccessToken: vi.fn(async () => 'jwt') };
+    const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
+    const err = await store
+      .register({ memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 })
+      .catch((e: any) => e);
+    expect(err.code).toBe('stale_timestamp');
+    expect(fetch).toHaveBeenCalledTimes(1); // NO forced-refresh retry, despite the seam being present
+  });
+
+  it('register maps a 409 to identity_conflict', async () => {
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ status: 409, json: { error: 'identity_conflict' } }),
+      auth: async () => 'jwt',
+    });
+    const err = await store
+      .register({ memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 })
+      .catch((e: any) => e);
+    expect(err.code).toBe('identity_conflict');
+  });
+
+  it('me maps the shape and decodes the keystore blob', async () => {
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ json: { member_id: 'm', keystore: 'CQk=', generation: 2 } }),
+      auth: async () => 'jwt',
+    });
+    const out = await store.me();
+    expect(out.memberId).toBe('m');
+    expect(Array.from(out.keystore!)).toEqual([9, 9]);
+    expect(out.generation).toBe(2);
+  });
+
+  it('me returns a null keystore when the server has no backup', async () => {
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ json: { member_id: 'm', keystore: null, generation: 0 } }),
+      auth: async () => 'jwt',
+    });
+    expect(await store.me()).toEqual({ memberId: 'm', keystore: null, generation: 0 });
+  });
+
+  it('getKeystore decodes the blob, and throws unregistered on a 403', async () => {
+    const ok = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ json: { keystore: 'CQk=', generation: 3 } }),
+      auth: async () => 'jwt',
+    });
+    const got = await ok.getKeystore();
+    expect(Array.from(got.keystore!)).toEqual([9, 9]);
+    expect(got.generation).toBe(3);
+
+    const unreg = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ status: 403, json: { error: 'unregistered' } }),
+      auth: async () => 'jwt',
+    });
+    const err = await unreg.getKeystore().catch((e: any) => e);
+    expect(err.code).toBe('unregistered');
+  });
+
+  it('putKeystore sends { keystore, generation } and returns the accepted generation', async () => {
+    const fetch = vi.fn(async () => jres({ json: { generation: 5 } }));
+    const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth: async () => 'jwt' });
+    const out = await store.putKeystore(new Uint8Array([9, 9]), 5);
+    expect(out).toEqual({ generation: 5 });
+    expect(fetch.mock.calls[0][0]).toBe('http://x/v1/account/keystore');
+    const init = fetch.mock.calls[0][1] as any;
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ keystore: 'CQk=', generation: 5 });
+  });
+
+  it('putKeystore maps a 409 to generation_rollback', async () => {
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ status: 409, json: { error: 'generation_rollback' } }),
+      auth: async () => 'jwt',
+    });
+    const err = await store.putKeystore(new Uint8Array([1]), 1).catch((e: any) => e);
+    expect(err.code).toBe('generation_rollback');
+  });
+});

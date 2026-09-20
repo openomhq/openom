@@ -31,9 +31,15 @@ pub const SIGN_IN_FAILED: &str = "sign_in_failed";
 pub const SIGN_UP_FAILED: &str = "sign_up_failed";
 pub const EMAIL_TAKEN: &str = "email_taken";
 pub const RECIPIENT_PIN_MISMATCH: &str = "recipient_pin_mismatch";
+pub const UNREGISTERED: &str = "unregistered";
+pub const STALE_TIMESTAMP: &str = "stale_timestamp";
+pub const BAD_SIGNATURE: &str = "bad_signature";
+pub const MEMBER_ID_MISMATCH: &str = "member_id_mismatch";
+pub const IDENTITY_CONFLICT: &str = "identity_conflict";
 pub const WRONG_PASSPHRASE: &str = "wrong_passphrase";
 pub const TAMPERED_ANCHOR: &str = "tampered_anchor";
 pub const REVISION_ROLLBACK: &str = "revision_rollback";
+pub const GENERATION_ROLLBACK: &str = "generation_rollback";
 pub const RECOVERY_CODE_INVALID: &str = "recovery_code_invalid";
 pub const KEYRING_VERIFY_FAILED: &str = "keyring_verify_failed";
 pub const DECRYPT_FAILED: &str = "decrypt_failed";
@@ -64,9 +70,15 @@ pub const ERROR_CODES: &[CodeMeta] = &[
     CodeMeta { code: "sign_up_failed", domain: "auth", title: "Sign-up failed", retriable: false, action: None },
     CodeMeta { code: "email_taken", domain: "auth", title: "Email already registered", retriable: false, action: None },
     CodeMeta { code: "recipient_pin_mismatch", domain: "auth", title: "This invite is for a different email", retriable: false, action: Some("reauth") },
+    CodeMeta { code: "unregistered", domain: "auth", title: "Account not registered", retriable: false, action: Some("reauth") },
+    CodeMeta { code: "stale_timestamp", domain: "auth", title: "Registration timestamp out of window", retriable: false, action: None },
+    CodeMeta { code: "bad_signature", domain: "auth", title: "Registration proof invalid", retriable: false, action: Some("contact") },
+    CodeMeta { code: "member_id_mismatch", domain: "auth", title: "Member id not self-certifying", retriable: false, action: Some("contact") },
+    CodeMeta { code: "identity_conflict", domain: "auth", title: "Identity already bound", retriable: false, action: None },
     CodeMeta { code: "wrong_passphrase", domain: "vault", title: "Wrong passphrase", retriable: false, action: None },
     CodeMeta { code: "tampered_anchor", domain: "vault", title: "Tree verification failed", retriable: false, action: Some("contact") },
     CodeMeta { code: "revision_rollback", domain: "vault", title: "Version rollback detected", retriable: false, action: None },
+    CodeMeta { code: "generation_rollback", domain: "vault", title: "Account backup rolled back", retriable: false, action: None },
     CodeMeta { code: "recovery_code_invalid", domain: "vault", title: "Invalid recovery code", retriable: false, action: None },
     CodeMeta { code: "keyring_verify_failed", domain: "vault", title: "Keyring verification failed", retriable: false, action: Some("contact") },
     CodeMeta { code: "decrypt_failed", domain: "vault", title: "Decryption failed", retriable: false, action: Some("contact") },

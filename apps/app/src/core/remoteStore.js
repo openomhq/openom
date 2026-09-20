@@ -72,6 +72,19 @@ function statusFallbackCode(status) {
   return 'invalid_request';
 }
 
+/** An ACCOUNT-route error RESPONSE → AppError. The register/keystore handlers return a PLAIN `{ error: code }`
+ *  body (not RFC 9457), so read `error` — including the register-only PoP codes (stale_timestamp/bad_signature,
+ *  which ride a 401 that is NOT a token problem). Falls back to a status-derived code for a bodyless/infra failure. */
+async function accountAppError(res) {
+  let body = null;
+  try { body = await res.json(); } catch { /* infra / non-JSON body */ }
+  const code = body?.error;
+  if (code && Object.prototype.hasOwnProperty.call(ERROR_CODES, code)) {
+    return makeError(code, { httpStatus: res.status });
+  }
+  return makeError(statusFallbackCode(res.status), { httpStatus: res.status });
+}
+
 export class RemoteStore {
   #baseUrl;
   #fetch;
@@ -121,7 +134,7 @@ export class RemoteStore {
   // forced-refresh retry (the token may just be stale). If the retry still 401s, surface an
   // AuthError so the composition root re-gates / signs out. Never loops. Non-401 statuses are
   // handed back untouched for each method to interpret (404/409/410/etc.).
-  async #send(url, { method, extraHeaders = {}, body } = {}) {
+  async #send(url, { method, extraHeaders = {}, body, authRetry = true } = {}) {
     // Stable across the 401 forced-refresh retry (the body doesn't change), so compute it once.
     const withHash = { ...extraHeaders, 'x-amz-content-sha256': await bodyContentHash(body) };
     const attempt = async (forceRefresh) => {
@@ -138,7 +151,10 @@ export class RemoteStore {
       }
     };
     let res = await attempt(false);
-    if (res.status === 401) {
+    // A 401 normally means a stale token: one forced-refresh retry, then AuthError. `authRetry: false` opts out
+    // (POST /register returns 401 for a PoP failure — stale_timestamp/bad_signature — which a token refresh
+    // can't fix; the caller's error mapper must see that body code instead of an AuthError).
+    if (authRetry && res.status === 401) {
       if (this.#getAccessToken) res = await attempt(true); // one forced-refresh retry
       if (res.status === 401) {
         let detail = '';
@@ -613,6 +629,99 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
+  }
+
+  // ---- account / durable-identity surface (POST /v1/register, GET /v1/me, GET/PUT /v1/account/keystore) ----
+  //
+  // ACCOUNT-scoped, not tree-scoped: the durable-identity binding. `/register` maps this session's JWT subject
+  // to the client's SELF-CERTIFYING member_id (== uuid8(SHA-256(author_pubkey))); the keystore routes back up the
+  // E2E-wrapped account keystore under a server-enforced monotonic generation floor. These handlers return a
+  // PLAIN { error: code } body (not RFC 9457), so they map through `accountAppError`.
+
+  /**
+   * Bind this session's JWT subject to the account's self-certifying member_id (the sole binder). `proof` is the
+   * core-produced proof-of-possession: `{ memberId, authorPublicKey(bytes), signature(bytes), ts }`, where
+   * `signature` is Ed25519 over the domain-tagged (iss, sub, member_id, ts). Idempotent — a re-register of the
+   * same binding is a 200. Returns the server-echoed `{ memberId }`; throws an AppError otherwise
+   * (`identity_conflict`, `member_id_mismatch`, `bad_signature`, `stale_timestamp`, `invalid_request`). Skips the
+   * 401 auth-retry: the PoP-failure 401s are not token problems (see `#send`).
+   */
+  async register({ memberId, authorPublicKey, signature, ts }) {
+    let res;
+    try {
+      res = await this.#send(`${this.#baseUrl}/v1/register`, {
+        method: 'POST',
+        extraHeaders: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          member_id: memberId,
+          author_pubkey: b64encode(authorPublicKey),
+          signature: b64encode(signature),
+          ts,
+        }),
+        authRetry: false,
+      });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await accountAppError(res);
+    const b = await res.json().catch(() => ({}));
+    return { memberId: b.member_id ?? memberId };
+  }
+
+  /**
+   * This session's account view: `{ memberId, keystore(bytes|null), generation }`. `keystore` is the stored E2E
+   * backup blob, null when none has been pushed (dev auth, or before the first backup). A cheap post-sign-in
+   * probe of whether the subject is registered (`unregistered` 403 if not) and whether a backup exists to restore.
+   */
+  async me() {
+    let res;
+    try {
+      res = await this.#send(`${this.#baseUrl}/v1/me`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await accountAppError(res);
+    const b = await res.json();
+    return {
+      memberId: b.member_id,
+      keystore: b.keystore ? b64decode(b.keystore) : null,
+      generation: b.generation ?? 0,
+    };
+  }
+
+  /** The stored E2E keystore backup: `{ keystore(bytes|null), generation }`. Throws `unregistered` (403) when the
+   *  subject has no identities row. The client enforces its own generation floor on the returned blob before use. */
+  async getKeystore() {
+    let res;
+    try {
+      res = await this.#send(`${this.#baseUrl}/v1/account/keystore`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await accountAppError(res);
+    const b = await res.json();
+    return { keystore: b.keystore ? b64decode(b.keystore) : null, generation: b.generation ?? 0 };
+  }
+
+  /**
+   * Back up the E2E-wrapped keystore `bytes` at `generation` (its monotonic anti-rollback floor). A PUT below the
+   * server's stored generation is refused as `generation_rollback` (409); equal generation is idempotent (a
+   * same-gen re-wrap such as change-passphrase). Returns the accepted `{ generation }`.
+   */
+  async putKeystore(bytes, generation) {
+    let res;
+    try {
+      res = await this.#send(`${this.#baseUrl}/v1/account/keystore`, {
+        method: 'PUT',
+        extraHeaders: { 'content-type': 'application/json' },
+        body: JSON.stringify({ keystore: b64encode(bytes), generation }),
+      });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await accountAppError(res);
+    const b = await res.json().catch(() => ({}));
+    return { generation: b.generation ?? generation };
   }
 
   async list() {
