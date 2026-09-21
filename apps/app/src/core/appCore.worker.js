@@ -745,68 +745,6 @@ const api = {
   },
 
   /**
-   * Re-open an existing tree (returning / new device): load its persisted keyring head, unlock, and
-   * hydrate the durable core. Returns the author `didKey` + advisory self-heal flags. `opts`:
-   * { passphrase, treeId: Uint8Array, memberId, docId, engine? }.
-   */
-  async unlockCore({ passphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
-    await ensureInit();
-    void memberId;
-    await ensureAccount(passphrase);
-    return api.openTree({ treeId, docId, engine });
-  },
-
-  /** Recover the profile account under a new passphrase, preserving its identity, then reopen the selected
-   * tree through the unchanged trusted keyring. The submitted recovery code is revoked and replaced.
-   */
-  async recoverCore({ recoveryCode, newPassphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
-    await ensureInit();
-    void memberId;
-    const saved = await loadAccount();
-    if (!saved) throw new Error('no account keystore stored for this profile');
-    let recovered;
-    try {
-      recovered = wasmAccountRecover(recoveryCode, newPassphrase, saved.keystore, saved.generation);
-    } catch (e) {
-      throw vaultError(e);
-    }
-    try {
-      await saveAccount(recovered.keystore, recovered.generation);
-      const nextRecoveryCode = recovered.recoveryCode;
-      replaceAccount(recovered.takeHandle());
-      return { recoveryCode: nextRecoveryCode, ...(await api.openTree({ treeId, docId, engine })) };
-    } finally {
-      recovered.free();
-    }
-  },
-
-  /** Re-wrap the profile account under a new passphrase. Tree keyrings, tree sessions, and the recovery code
-   * remain unchanged, so the running cores keep working and there is no new code to display.
-   */
-  async changePassphraseCore({ current, next, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
-    await ensureInit();
-    void treeId; void memberId; void docId; void engine;
-    const saved = await loadAccount();
-    if (!saved) throw new Error('no account keystore stored for this profile');
-    let verified;
-    try {
-      verified = wasmAccountUnlock(current, saved.keystore, saved.generation);
-    } catch (e) {
-      throw vaultError(e);
-    }
-    if (account) verified.free();
-    else replaceAccount(verified);
-    let changed;
-    try {
-      changed = wasmAccountChangePassphrase(requireAccount(), next);
-      await saveAccount(changed.keystore, changed.generation);
-      return { recoveryCode: '' };
-    } finally {
-      changed?.free();
-    }
-  },
-
-  /**
    * Confirm a rotation survived the merge (DAG only, the two-phase gate): pass the `resetAuthority` from
    * `rotateRecoveryCore`. Returns true iff it is the authority resolved on the CURRENT (synced) keyring — so
    * sync the keyring before calling. False → the rotation was superseded: the new code is void, the OLD code
@@ -918,7 +856,7 @@ const api = {
     }
     // A solo→shared transition: the running sealer (built while solo) does NOT sign, so its writes would be
     // rejected by peers. Re-unlock the owner on the shared keyring (the DEK is unchanged) → a signing sealer +
-    // the §B3 resolver — so subsequent writes are attributed. Mirrors unlockCore; hydrate preserves the log.
+    // the §B3 resolver — so subsequent writes are attributed. Mirrors openTree; hydrate preserves the log.
     const re = wasmUnlockTree(requireAccount(), eng, treeId, freshReplica(), change.keyring, docId);
     try {
       await saveWatermark(docId, re.watermark);
@@ -930,7 +868,7 @@ const api = {
         await hydrate(nc);
         await installMembership(nc, docId, eng, change.keyring);
       } else {
-        // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
+        // Install §B3 verify BEFORE hydrate (see openTree): the reopen re-fold must be gated by the membership.
         await installMembership(nc, docId, eng, change.keyring); // the tree is now shared → verify goes live
         await hydrate(nc);
       }
@@ -1008,7 +946,7 @@ const api = {
     try {
       await saveWatermark(docId, re.watermark);
       nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
-      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold under the rotated head must be
+      // Install §B3 verify BEFORE hydrate (see openTree): the reopen re-fold under the rotated head must be
       // gated by the membership, or the removed member's forgeries in the mirror re-merge unverified.
       await installMembership(nc, docId, eng, change.keyring);
       await hydrate(nc);
@@ -1239,7 +1177,7 @@ const api = {
     try {
       await saveWatermark(docId, res.watermark);
       const c = new Core(res.takeHandle(), docId, true, opts.treeId, engine);
-      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
+      // Install §B3 verify BEFORE hydrate (see openTree): the reopen re-fold must be gated by the membership.
       await installMembership(c, docId, engine, (await keyringStore().loadHead(docId)).bytes);
       await hydrate(c);
       cores.set(docId, c);
@@ -1484,12 +1422,6 @@ const api = {
       try { account.free(); } catch { /* already gone */ }
       account = null;
     }
-  },
-
-  /** Compatibility composition for callers not yet split onto AccountSession. */
-  async provisionCore({ passphrase, treeId, docId, engine = KEYRING_ENGINE }) {
-    const accountState = await ensureAccount(passphrase, true);
-    return { recoveryCode: accountState.recoveryCode, ...(await api.provisionTree({ treeId, docId, engine })) };
   },
 
   /** Open a stored tree under the already-unlocked profile account. */

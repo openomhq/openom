@@ -189,36 +189,12 @@ export function createNativeAppCore() {
       return call('core_provision', { doc: docId, treeId: bytes(treeId) });
     },
 
-    async provisionCore({ passphrase, treeId, docId }) {
-      let account;
-      try {
-        const opened = await api.accountCreate(passphrase);
-        account = { ...opened, ...(await api.accountPublicIdentity()) };
-      } catch {
-        account = await api.accountUnlock(passphrase);
-      }
-      return { ...account, ...(await api.provisionTree({ treeId, docId })) };
-    },
-
     async openTree({ treeId, docId }) {
       remember(docId, treeId);
       const out = await call('core_unlock', { doc: docId, treeId: bytes(treeId) });
       await call('core_bootstrap', { doc: docId });
       return out;
     },
-
-    async unlockCore({ passphrase, treeId, docId }) {
-      await api.accountUnlock(passphrase);
-      return api.openTree({ treeId, docId });
-    },
-
-    async recoverCore({ recoveryCode, newPassphrase, treeId, docId }) {
-      const account = await api.accountRecover({ recoveryCode, newPassphrase });
-      return { ...account, ...(await api.openTree({ treeId, docId })) };
-    },
-
-    changePassphraseCore: ({ current, next }) =>
-      api.accountChangePassphrase({ current, next }),
 
     // The demo/dev core (reserved dev key) is web-only — the native host has no keyless dev path.
     openDev: () => Promise.reject(new Error('the demo (dev) core is not available on the native host')),

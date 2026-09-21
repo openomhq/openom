@@ -273,7 +273,7 @@ pub struct Recovered {
     pub needs_reseal: bool,
     pub needs_backfill: bool,
     /// Recovery mints a fresh escrow reaching every epoch, so these are always `false` — present only so the
-    /// native `recoverCore` result matches the veneer's shape (M2).
+    /// native recovery result matches the account-plus-tree composition used by the veneer (M2).
     pub needs_rrk_backfill: bool,
     pub write_epoch_unreachable: bool,
 }
@@ -1468,7 +1468,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// Whether native custody holds a MEMBER context for `doc` (the kdf params + trusted signers written at JOIN).
     /// A reopen dispatches on this: `true` → a joined device reopens via [`unlock_as_member`](Self::unlock_as_member);
     /// `false` → an owner via [`unlock`](Self::unlock). It's custody metadata (no DEK), so it's probeable BEFORE
-    /// unlock — which is what lets one client-facing `unlockCore` cover both roles without the webview choosing.
+    /// unlock — which lets the client-facing open-tree path cover both roles without the webview choosing.
     ///
     /// # Errors
     /// [`HostError::Store`] if the member-context store read fails.

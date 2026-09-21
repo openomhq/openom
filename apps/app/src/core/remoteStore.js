@@ -502,7 +502,8 @@ export class RemoteStore {
   /**
    * Invitee: submit the MAC'd public-key claim against a pending invite. `claim` is the `invite.claim()` output —
    * `{ inviteId, memberId, hpkePublicKey, authorPublicKey, tag }` (bytes) — sent base64. The server enforces
-   * member_id == the JWT sub, the recipient pin, OPEN + unexpired, and one live claim; it does NOT verify the MAC.
+   * member_id == the identity resolved from the authenticated subject, the recipient pin, OPEN + unexpired, and
+   * one live claim; it does NOT verify the MAC.
    */
   async claimInvite(claim) {
     const body = {
