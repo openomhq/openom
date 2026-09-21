@@ -126,7 +126,88 @@ fn _assert_app_core_send_sync<S: BlobStore + Send + Sync + 'static>() {
 /// account root resident in memory.
 pub struct AccountHandle {
     keystore: AccountKeystore,
+    keystore_bytes: Vec<u8>,
     account: openom_vault::UnlockedAccount,
+}
+
+/// An authenticated account-keystore generation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AccountGeneration(u64);
+
+impl AccountGeneration {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Canonical SHA-256 digest of the exact wrapped account-keystore bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AccountBlobHash([u8; 32]);
+
+impl AccountBlobHash {
+    #[must_use]
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// The identity of one backupable account blob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AccountBackupVersion {
+    generation: AccountGeneration,
+    blob_hash: AccountBlobHash,
+}
+
+impl AccountBackupVersion {
+    #[must_use]
+    pub const fn new(generation: AccountGeneration, blob_hash: AccountBlobHash) -> Self {
+        Self { generation, blob_hash }
+    }
+
+    #[must_use]
+    pub const fn generation(self) -> AccountGeneration {
+        self.generation
+    }
+
+    #[must_use]
+    pub const fn blob_hash(self) -> AccountBlobHash {
+        self.blob_hash
+    }
+}
+
+/// Exact wrapped account bytes plus the version authenticated by the resident handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountSnapshot {
+    keystore: Vec<u8>,
+    version: AccountBackupVersion,
+}
+
+impl AccountSnapshot {
+    #[must_use]
+    pub fn keystore(&self) -> &[u8] {
+        &self.keystore
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> AccountBackupVersion {
+        self.version
+    }
+
+    #[must_use]
+    pub fn into_keystore(self) -> Vec<u8> {
+        self.keystore
+    }
 }
 
 /// Public admission material for the durable account. These values are safe to send through the invite
@@ -158,8 +239,18 @@ impl AccountHandle {
 
     /// The authenticated anti-rollback generation carried by the current keystore.
     #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.keystore.generation
+    pub const fn generation(&self) -> AccountGeneration {
+        AccountGeneration::new(self.keystore.generation)
+    }
+}
+
+/// Snapshot the exact wrapped bytes corresponding to an already-authenticated account handle.
+#[must_use]
+pub fn account_snapshot(handle: &AccountHandle) -> AccountSnapshot {
+    let blob_hash = AccountBlobHash::new(Sha256::digest(&handle.keystore_bytes).into());
+    AccountSnapshot {
+        keystore: handle.keystore_bytes.clone(),
+        version: AccountBackupVersion::new(handle.generation(), blob_hash),
     }
 }
 
@@ -168,7 +259,7 @@ pub struct AccountCreated {
     pub handle: AccountHandle,
     pub keystore: Vec<u8>,
     pub recovery_code: String,
-    pub generation: u64,
+    pub generation: AccountGeneration,
 }
 
 /// A recovered account. Recovery rotates the wrapping root, revokes the submitted code, and returns a new
@@ -177,20 +268,20 @@ pub struct AccountRecovered {
     pub handle: AccountHandle,
     pub keystore: Vec<u8>,
     pub recovery_code: String,
-    pub generation: u64,
+    pub generation: AccountGeneration,
 }
 
 /// Persisted output of an account passphrase change.
 pub struct AccountChanged {
     pub keystore: Vec<u8>,
-    pub generation: u64,
+    pub generation: AccountGeneration,
 }
 
 /// Persisted output of an account-root rotation.
 pub struct AccountRotated {
     pub keystore: Vec<u8>,
     pub recovery_code: String,
-    pub generation: u64,
+    pub generation: AccountGeneration,
 }
 
 /// Create one profile-level durable account, already unlocked for subsequent tree operations.
@@ -199,10 +290,10 @@ pub struct AccountRotated {
 /// Returns [`VaultError`] if key generation, wrapping, or serialization fails.
 pub fn account_create(passphrase: &Passphrase) -> Result<AccountCreated, VaultError> {
     let (keystore, recovery_code, account) = AccountKeystore::create(passphrase.expose())?;
-    let generation = keystore.generation;
+    let generation = AccountGeneration::new(keystore.generation);
     let bytes = keystore.to_bytes()?;
     Ok(AccountCreated {
-        handle: AccountHandle { keystore, account },
+        handle: AccountHandle { keystore, keystore_bytes: bytes.clone(), account },
         keystore: bytes,
         recovery_code: recovery_code.into_string(),
         generation,
@@ -216,11 +307,24 @@ pub fn account_create(passphrase: &Passphrase) -> Result<AccountCreated, VaultEr
 pub fn account_unlock(
     passphrase: &Passphrase,
     keystore: &[u8],
-    generation_floor: u64,
+    generation_floor: AccountGeneration,
 ) -> Result<AccountHandle, VaultError> {
-    let keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor)?;
+    let exact_bytes = keystore.to_vec();
+    let keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor.get())?;
     let account = keystore.unlock(passphrase.expose())?;
-    Ok(AccountHandle { keystore, account })
+    Ok(AccountHandle { keystore, keystore_bytes: exact_bytes, account })
+}
+
+/// Verify a fetched account blob into temporary custody without mutating persistence or resident state.
+///
+/// # Errors
+/// Returns [`VaultError`] for malformed, rolled-back, tampered, or wrongly-credentialed candidate bytes.
+pub fn account_open_candidate(
+    passphrase: &Passphrase,
+    candidate: &[u8],
+    generation_floor: AccountGeneration,
+) -> Result<AccountHandle, VaultError> {
+    account_unlock(passphrase, candidate, generation_floor)
 }
 
 /// Re-wrap the account root under a new passphrase. Tree anchors and sessions remain untouched.
@@ -235,8 +339,9 @@ pub fn account_change_passphrase(
         .keystore
         .change_passphrase(&handle.account, new_passphrase.expose())?;
     let bytes = keystore.to_bytes()?;
-    let generation = keystore.generation;
+    let generation = AccountGeneration::new(keystore.generation);
     handle.keystore = keystore;
+    handle.keystore_bytes.clone_from(&bytes);
     Ok(AccountChanged { keystore: bytes, generation })
 }
 
@@ -249,21 +354,39 @@ pub fn account_recover(
     recovery_code: &RecoveryCode,
     new_passphrase: &Passphrase,
     keystore: &[u8],
-    generation_floor: u64,
+    generation_floor: AccountGeneration,
 ) -> Result<AccountRecovered, VaultError> {
-    let old_keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor)?;
+    let old_keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor.get())?;
     let recovered = old_keystore.unlock_with_recovery(recovery_code)?;
     let (keystore, next_recovery_code) =
         old_keystore.rotate_account_root(&recovered, new_passphrase.expose())?;
     let account = keystore.unlock(new_passphrase.expose())?;
-    let generation = keystore.generation;
+    let generation = AccountGeneration::new(keystore.generation);
     let bytes = keystore.to_bytes()?;
     Ok(AccountRecovered {
-        handle: AccountHandle { keystore, account },
+        handle: AccountHandle { keystore, keystore_bytes: bytes.clone(), account },
         keystore: bytes,
         recovery_code: next_recovery_code.into_string(),
         generation,
     })
+}
+
+/// Verify a fetched account blob with a recovery credential and rotate it into temporary custody.
+///
+/// # Errors
+/// Returns [`VaultError`] for a malformed/rolled-back candidate, invalid recovery code, or rotation failure.
+pub fn account_recover_candidate(
+    recovery_code: &RecoveryCode,
+    new_passphrase: &Passphrase,
+    candidate: &[u8],
+    generation_floor: AccountGeneration,
+) -> Result<AccountRecovered, VaultError> {
+    account_recover(
+        recovery_code,
+        new_passphrase,
+        candidate,
+        generation_floor,
+    )
 }
 
 /// Rotate the account wrapping root and refresh the live handle to the new root material.
@@ -279,8 +402,9 @@ pub fn account_rotate_root(
         .rotate_account_root(&handle.account, passphrase.expose())?;
     let account = keystore.unlock(passphrase.expose())?;
     let bytes = keystore.to_bytes()?;
-    let generation = keystore.generation;
+    let generation = AccountGeneration::new(keystore.generation);
     handle.keystore = keystore;
+    handle.keystore_bytes.clone_from(&bytes);
     handle.account = account;
     Ok(AccountRotated {
         keystore: bytes,
@@ -602,7 +726,7 @@ pub fn unlock<S: BlobStore>(
     doc: impl Into<String>,
 ) -> Result<Unlocked<S>, VaultError> {
     let _ = member_id;
-    let account = account_unlock(passphrase, keystore, 0)?;
+    let account = account_unlock(passphrase, keystore, AccountGeneration::default())?;
     unlock_tree(store, engine, &account, tree_id, replica_id, anchor, doc)
 }
 
@@ -766,6 +890,7 @@ pub fn unlock_tree_as_member<S: BlobStore>(
 mod lifecycle_tests {
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::{derive_member_id_bytes, EngineKind};
+    use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicU64, Ordering};
     use store_blob::FsBlob;
 
@@ -974,6 +1099,64 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn account_candidates_authenticate_generation_before_exposing_a_snapshot() {
+        let passphrase = Passphrase::new(b"profile passphrase".to_vec());
+        let created = super::account_create(&passphrase).unwrap();
+        let candidate = super::account_open_candidate(
+            &passphrase,
+            &created.keystore,
+            super::AccountGeneration::default(),
+        )
+        .unwrap();
+        let snapshot = super::account_snapshot(&candidate);
+
+        assert_eq!(snapshot.keystore(), created.keystore);
+        assert_eq!(snapshot.version().generation(), created.generation);
+        assert_eq!(
+            snapshot.version().blob_hash().as_bytes(),
+            Sha256::digest(&created.keystore).as_slice()
+        );
+        assert!(super::account_open_candidate(
+            &passphrase,
+            &created.keystore,
+            super::AccountGeneration::new(created.generation.get() + 1),
+        )
+        .is_err());
+
+        let mut forged = openom_vault::AccountKeystore::from_bytes(&created.keystore).unwrap();
+        forged.generation = u64::MAX;
+        let forged = forged.to_bytes().unwrap();
+        assert!(super::account_open_candidate(
+            &passphrase,
+            &forged,
+            super::AccountGeneration::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn recovery_candidate_rotates_before_it_can_be_adopted() {
+        let passphrase = Passphrase::new(b"profile passphrase".to_vec());
+        let created = super::account_create(&passphrase).unwrap();
+        let old_recovery = RecoveryCode::new(created.recovery_code);
+        let new_passphrase = Passphrase::new(b"replacement passphrase".to_vec());
+        let recovered = super::account_recover_candidate(
+            &old_recovery,
+            &new_passphrase,
+            &created.keystore,
+            super::AccountGeneration::default(),
+        )
+        .unwrap();
+        let snapshot = super::account_snapshot(&recovered.handle);
+
+        assert_eq!(snapshot.version().generation().get(), created.generation.get() + 1);
+        assert_eq!(recovered.handle.member_id(), created.handle.member_id());
+        let rotated = openom_vault::AccountKeystore::from_bytes(snapshot.keystore()).unwrap();
+        assert!(rotated.unlock_with_recovery(&old_recovery).is_err());
+        assert!(rotated.unlock(&new_passphrase.expose()).is_ok());
+    }
+
+    #[test]
     fn recovery_and_root_rotation_refresh_the_handle_and_revoke_old_material() {
         let passphrase = Passphrase::new(b"profile passphrase".to_vec());
         let created = super::account_create(&passphrase).unwrap();
@@ -988,7 +1171,7 @@ mod lifecycle_tests {
         )
         .unwrap();
 
-        assert_eq!(recovered.generation, created.generation + 1);
+        assert_eq!(recovered.generation.get(), created.generation.get() + 1);
         assert_eq!(recovered.handle.member_id(), member_id);
         assert!(super::account_unlock(&passphrase, &created.keystore, recovered.generation).is_err());
         let recovered_keystore = openom_vault::AccountKeystore::from_bytes(&recovered.keystore).unwrap();
@@ -996,7 +1179,7 @@ mod lifecycle_tests {
 
         let recovery_after_recover = recovered.recovery_code.clone();
         let rotated = super::account_rotate_root(&mut recovered.handle, &new_passphrase).unwrap();
-        assert_eq!(rotated.generation, recovered.generation + 1);
+        assert_eq!(rotated.generation.get(), recovered.generation.get() + 1);
         assert_eq!(recovered.handle.generation(), rotated.generation);
         assert_eq!(recovered.handle.member_id(), member_id);
         let rotated_keystore = openom_vault::AccountKeystore::from_bytes(&rotated.keystore).unwrap();

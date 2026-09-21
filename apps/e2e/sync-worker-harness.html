@@ -406,6 +406,67 @@
         };
       },
 
+      // Phase 2b: fetched account bytes stay a temporary candidate until Rust verifies the credential and
+      // authenticated generation. Only then does the worker commit the returned snapshot and install its handle.
+      async accountCandidateAdoption() {
+        const nonce = crypto.randomUUID();
+        const source = spawnWorker(`candidate-source-${nonce}`);
+        const passTarget = spawnWorker(`candidate-pass-${nonce}`);
+        const recoveryTarget = spawnWorker(`candidate-recovery-${nonce}`);
+        const passphrase = 'candidate source passphrase';
+        const newPassphrase = 'candidate recovered passphrase';
+        await Promise.all([source.warm(), passTarget.warm(), recoveryTarget.warm()]);
+
+        const created = await source.accountCreate(passphrase);
+        const sourceSnapshot = await source.accountSnapshot();
+        let wrongRejected = false;
+        try {
+          await passTarget.accountAdoptCandidate({
+            keystore: sourceSnapshot.keystore,
+            credential: { passphrase: 'wrong passphrase' },
+          });
+        } catch {
+          wrongRejected = true;
+        }
+        const statusAfterWrong = await passTarget.accountStatus();
+
+        const adopted = await passTarget.accountAdoptCandidate({
+          keystore: sourceSnapshot.keystore,
+          credential: { passphrase },
+        });
+        const passSnapshot = await passTarget.accountSnapshot();
+
+        const recovered = await recoveryTarget.accountAdoptCandidate({
+          keystore: sourceSnapshot.keystore,
+          credential: { recoveryCode: created.recoveryCode, newPassphrase },
+        });
+        const recoverySnapshot = await recoveryTarget.accountSnapshot();
+        await recoveryTarget.accountLock();
+        let usedRecoveryRejected = false;
+        try {
+          await recoveryTarget.accountRecover({
+            recoveryCode: created.recoveryCode,
+            newPassphrase: 'should not work',
+          });
+        } catch {
+          usedRecoveryRejected = true;
+        }
+
+        return {
+          memberIds: [created.memberId, adopted.memberId, recovered.memberId],
+          sourceGeneration: sourceSnapshot.generation,
+          adoptedGeneration: passSnapshot.generation,
+          recoveredGeneration: recoverySnapshot.generation,
+          sourceHash: Array.from(sourceSnapshot.blobHash),
+          adoptedHash: Array.from(passSnapshot.blobHash),
+          recoveryHash: Array.from(recoverySnapshot.blobHash),
+          recoveryCodeRotated: recovered.recoveryCode !== created.recoveryCode,
+          wrongRejected,
+          statusAfterWrong,
+          usedRecoveryRejected,
+        };
+      },
+
       // Phase 0 acceptance: one browser-profile account owns two trees, joins a third, changes its
       // passphrase once, then reopens every tree through the verified founder/member role dispatch.
       async durableAccountAcrossTrees(engine) {

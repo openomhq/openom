@@ -132,6 +132,26 @@ test('app-core: real keyring lifecycle — provision, mint, reload, unlock', asy
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: account candidates verify before snapshot adoption', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(String(error)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const result = await page.evaluate(() => (window as any).__syncWorker.accountCandidateAdoption());
+  expect(new Set(result.memberIds).size).toBe(1);
+  expect(result.wrongRejected).toBe(true);
+  expect(result.statusAfterWrong).toBe('none');
+  expect(result.adoptedGeneration).toBe(result.sourceGeneration);
+  expect(result.adoptedHash).toEqual(result.sourceHash);
+  expect(result.recoveredGeneration).toBe(result.sourceGeneration + 1);
+  expect(result.recoveryHash).not.toEqual(result.sourceHash);
+  expect(result.recoveryCodeRotated).toBe(true);
+  expect(result.usedRecoveryRejected).toBe(true);
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 for (const engine of ['chain', 'dag'] as const) {
   test(`app-core: one durable account owns and joins multiple trees (${engine})`, async ({ page }) => {
     const errors: string[] = [];

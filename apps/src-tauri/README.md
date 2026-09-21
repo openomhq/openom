@@ -52,7 +52,9 @@ tree DEKs remain inside Rust and **never cross the `invoke` boundary into the we
 one generation-stamped wrapped account plus per-tree keyrings/watermarks, separately from each tree's local
 blob directory so restoring tree data cannot silently roll back the custody floor.
 The `account_status` command reports `none` / `locked` / `unlocked`; `account_lock` drops all live trees and
-the resident account without deleting encrypted persistence.
+the resident account without deleting encrypted persistence. `account_snapshot` exposes only wrapped bytes
+plus their Rust-authenticated generation/hash, while candidate-adoption commands verify into temporary
+custody and persist before replacing the resident account.
 
 It is **not** where the logic or the tests live. Every `#[command]` here is a thin wrapper: it
 (de)serializes arguments, runs account create/unlock/recover/passphrase changes as `async` + `spawn_blocking`

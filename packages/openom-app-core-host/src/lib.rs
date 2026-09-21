@@ -136,6 +136,25 @@ pub struct AccountChanged {
     pub generation: u64,
 }
 
+/// Exact wrapped account bytes and the backup version authenticated by the resident Rust handle.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSnapshot {
+    pub keystore: Vec<u8>,
+    pub generation: u64,
+    pub blob_hash: Vec<u8>,
+}
+
+/// A fetched candidate that was credential-verified, durably committed, and installed as resident custody.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAdopted {
+    pub member_id: String,
+    pub recovery_code: String,
+    pub generation: u64,
+    pub blob_hash: Vec<u8>,
+}
+
 /// Compatibility shape for callers transitioning to [`AppCoreHost::account_public_identity`]. `kdf_params`
 /// is always empty because member credentials are no longer provisioned per tree.
 #[cfg(test)]
@@ -356,6 +375,51 @@ impl<St: VaultStore> AppCoreHost<St> {
         }
     }
 
+    fn snapshot_wire(snapshot: openom_app_core::AccountSnapshot) -> AccountSnapshot {
+        let version = snapshot.version();
+        AccountSnapshot {
+            keystore: snapshot.into_keystore(),
+            generation: version.generation().get(),
+            blob_hash: version.blob_hash().as_bytes().to_vec(),
+        }
+    }
+
+    fn candidate_floor(&self) -> Result<openom_app_core::AccountGeneration, HostError> {
+        Ok(self
+            .store
+            .load_account()
+            .map_err(HostError::Store)?
+            .map_or_else(openom_app_core::AccountGeneration::default, |record| {
+                openom_app_core::AccountGeneration::new(record.generation.get())
+            }))
+    }
+
+    fn commit_candidate(
+        &self,
+        handle: AccountHandle,
+        recovery_code: String,
+    ) -> Result<AccountAdopted, HostError> {
+        let member_id = handle.member_id().to_string();
+        let snapshot = Self::snapshot_wire(openom_app_core::account_snapshot(&handle));
+        self.store
+            .commit_account(&Self::account_record(
+                snapshot.keystore.clone(),
+                snapshot.generation,
+            ))
+            .map_err(HostError::Store)?;
+        self.lock_cores().clear();
+        *self
+            .account
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+        Ok(AccountAdopted {
+            member_id,
+            recovery_code,
+            generation: snapshot.generation,
+            blob_hash: snapshot.blob_hash,
+        })
+    }
+
     /// Report whether this profile has no account, a persisted locked account, or a resident unlocked account.
     ///
     /// # Errors
@@ -407,7 +471,10 @@ impl<St: VaultStore> AppCoreHost<St> {
         }
         let created = openom_app_core::account_create(passphrase)?;
         self.store
-            .commit_account(&Self::account_record(created.keystore, created.generation))
+            .commit_account(&Self::account_record(
+                created.keystore,
+                created.generation.get(),
+            ))
             .map_err(HostError::Store)?;
         *self
             .account
@@ -415,7 +482,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(created.handle);
         Ok(AccountOpened {
             recovery_code: created.recovery_code,
-            generation: created.generation,
+            generation: created.generation.get(),
         })
     }
 
@@ -432,7 +499,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         let handle = openom_app_core::account_unlock(
             passphrase,
             record.keystore.as_bytes(),
-            record.generation.get(),
+            openom_app_core::AccountGeneration::new(record.generation.get()),
         )?;
         let identity = openom_app_core::account_public_identity(&handle);
         *self
@@ -461,6 +528,53 @@ impl<St: VaultStore> AppCoreHost<St> {
         })
     }
 
+    /// Return the exact wrapped bytes and authenticated backup version for the resident account.
+    ///
+    /// # Errors
+    /// Returns [`HostError::NoAccount`] when the profile account is locked.
+    pub fn account_snapshot(&self) -> Result<AccountSnapshot, HostError> {
+        self.with_account(|account| {
+            Ok(Self::snapshot_wire(openom_app_core::account_snapshot(account)))
+        })
+    }
+
+    /// Verify and durably adopt a fetched account blob with a passphrase.
+    ///
+    /// # Errors
+    /// Returns [`HostError`] without changing resident custody when verification or persistence fails.
+    pub fn account_adopt_candidate(
+        &self,
+        candidate: &[u8],
+        passphrase: &Passphrase,
+    ) -> Result<AccountAdopted, HostError> {
+        let handle = openom_app_core::account_open_candidate(
+            passphrase,
+            candidate,
+            self.candidate_floor()?,
+        )?;
+        self.commit_candidate(handle, String::new())
+    }
+
+    /// Verify, rotate, and durably adopt a fetched account blob with a recovery credential.
+    ///
+    /// # Errors
+    /// Returns [`HostError`] without changing resident custody when verification, rotation, or persistence
+    /// fails.
+    pub fn account_adopt_recovery_candidate(
+        &self,
+        candidate: &[u8],
+        recovery_code: &RecoveryCode,
+        new_passphrase: &Passphrase,
+    ) -> Result<AccountAdopted, HostError> {
+        let recovered = openom_app_core::account_recover_candidate(
+            recovery_code,
+            new_passphrase,
+            candidate,
+            self.candidate_floor()?,
+        )?;
+        self.commit_candidate(recovered.handle, recovered.recovery_code)
+    }
+
     /// Recover and rotate the singleton account, atomically persisting its new generation.
     ///
     /// # Errors
@@ -479,12 +593,12 @@ impl<St: VaultStore> AppCoreHost<St> {
             recovery_code,
             new_passphrase,
             record.keystore.as_bytes(),
-            record.generation.get(),
+            openom_app_core::AccountGeneration::new(record.generation.get()),
         )?;
         self.store
             .commit_account(&Self::account_record(
                 recovered.keystore,
-                recovered.generation,
+                recovered.generation.get(),
             ))
             .map_err(HostError::Store)?;
         *self
@@ -493,7 +607,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(recovered.handle);
         Ok(AccountOpened {
             recovery_code: recovered.recovery_code,
-            generation: recovered.generation,
+            generation: recovered.generation.get(),
         })
     }
 
@@ -515,13 +629,16 @@ impl<St: VaultStore> AppCoreHost<St> {
         )?;
         if let Err(error) = self
             .store
-            .commit_account(&Self::account_record(changed.keystore, changed.generation))
+            .commit_account(&Self::account_record(
+                changed.keystore,
+                changed.generation.get(),
+            ))
         {
             *resident = None;
             return Err(HostError::Store(error));
         }
         Ok(AccountChanged {
-            generation: changed.generation,
+            generation: changed.generation.get(),
         })
     }
 
@@ -541,14 +658,17 @@ impl<St: VaultStore> AppCoreHost<St> {
         )?;
         if let Err(error) = self
             .store
-            .commit_account(&Self::account_record(rotated.keystore, rotated.generation))
+            .commit_account(&Self::account_record(
+                rotated.keystore,
+                rotated.generation.get(),
+            ))
         {
             *resident = None;
             return Err(HostError::Store(error));
         }
         Ok(AccountOpened {
             recovery_code: rotated.recovery_code,
-            generation: rotated.generation,
+            generation: rotated.generation.get(),
         })
     }
 
@@ -2170,7 +2290,7 @@ mod tests {
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::EngineKind;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Mutex;
 
     type Rows = HashMap<String, (Vec<u8>, Vec<u8>)>;
@@ -2180,6 +2300,7 @@ mod tests {
     struct MemStore {
         rows: Mutex<Rows>,
         account: Mutex<Option<AccountRecord>>,
+        fail_account_commit: AtomicBool,
     }
     impl VaultStore for MemStore {
         fn load_keyring(&self, tree_key: &str) -> Result<Option<Vec<u8>>, String> {
@@ -2215,6 +2336,9 @@ mod tests {
             Ok(self.account.lock().unwrap().clone())
         }
         fn commit_account(&self, account: &AccountRecord) -> Result<(), String> {
+            if self.fail_account_commit.load(Ordering::Relaxed) {
+                return Err("injected account commit failure".into());
+            }
             *self.account.lock().unwrap() = Some(account.clone());
             Ok(())
         }
@@ -2319,6 +2443,86 @@ mod tests {
 
         host.account_unlock(&passphrase).unwrap();
         assert_eq!(host.account_status().unwrap(), AccountStatus::Unlocked);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn candidate_adoption_commits_before_replacing_native_custody() {
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let local_passphrase = Passphrase::new(b"local profile passphrase".to_vec());
+        host.account_create(&local_passphrase).unwrap();
+        let local_member = host.account_public_identity().unwrap().member_id;
+        host.provision_tree("tree", &TreeId::new([28; 16])).unwrap();
+
+        let remote_passphrase = Passphrase::new(b"remote profile passphrase".to_vec());
+        let remote = openom_app_core::account_create(&remote_passphrase).unwrap();
+        let remote_member = remote.handle.member_id().to_string();
+        assert_ne!(local_member, remote_member);
+
+        assert!(host
+            .account_adopt_candidate(&remote.keystore, &Passphrase::new(b"wrong passphrase".to_vec()))
+            .is_err());
+        assert_eq!(host.account_public_identity().unwrap().member_id, local_member);
+        assert!(host.core("tree").is_some());
+
+        host.store()
+            .fail_account_commit
+            .store(true, Ordering::Relaxed);
+        assert!(matches!(
+            host.account_adopt_candidate(&remote.keystore, &remote_passphrase),
+            Err(HostError::Store(_))
+        ));
+        assert_eq!(host.account_public_identity().unwrap().member_id, local_member);
+        assert!(host.core("tree").is_some());
+
+        host.store()
+            .fail_account_commit
+            .store(false, Ordering::Relaxed);
+        let adopted = host
+            .account_adopt_candidate(&remote.keystore, &remote_passphrase)
+            .unwrap();
+        assert_eq!(adopted.member_id, remote_member);
+        assert_eq!(host.account_public_identity().unwrap().member_id, remote_member);
+        assert!(host.core("tree").is_none());
+        let snapshot = host.account_snapshot().unwrap();
+        assert_eq!(snapshot.generation, adopted.generation);
+        assert_eq!(snapshot.blob_hash, adopted.blob_hash);
+        assert_eq!(snapshot.keystore, remote.keystore);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_candidate_rotates_before_native_adoption() {
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let remote_passphrase = Passphrase::new(b"remote profile passphrase".to_vec());
+        let remote = openom_app_core::account_create(&remote_passphrase).unwrap();
+        let remote_member = remote.handle.member_id().to_string();
+        let old_recovery = RecoveryCode::new(remote.recovery_code);
+        let new_passphrase = Passphrase::new(b"recovered profile passphrase".to_vec());
+
+        let adopted = host
+            .account_adopt_recovery_candidate(
+                &remote.keystore,
+                &old_recovery,
+                &new_passphrase,
+            )
+            .unwrap();
+
+        assert_eq!(adopted.member_id, remote_member);
+        assert_eq!(adopted.generation, remote.generation.get() + 1);
+        assert_ne!(adopted.recovery_code, old_recovery.expose());
+        host.account_lock();
+        assert!(host
+            .account_recover(
+                &old_recovery,
+                &Passphrase::new(b"second recovery passphrase".to_vec()),
+            )
+            .is_err());
+        assert_eq!(host.account_unlock(&new_passphrase).unwrap().member_id, remote_member);
 
         std::fs::remove_dir_all(&dir).ok();
     }

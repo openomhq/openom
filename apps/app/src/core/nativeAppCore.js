@@ -173,6 +173,27 @@ export function createNativeAppCore() {
     accountLock: () => call('account_lock'),
     accountRecover: ({ recoveryCode, newPassphrase }) =>
       call('account_recover', { recoveryCode, newPassphrase }),
+    accountSnapshot: () => call('account_snapshot'),
+    accountAdoptCandidate: ({ keystore, credential }) => {
+      if (credential && typeof credential.passphrase === 'string') {
+        return call('account_adopt_candidate', {
+          candidate: bytes(keystore),
+          passphrase: credential.passphrase,
+        });
+      }
+      if (
+        credential
+        && typeof credential.recoveryCode === 'string'
+        && typeof credential.newPassphrase === 'string'
+      ) {
+        return call('account_adopt_recovery_candidate', {
+          candidate: bytes(keystore),
+          recoveryCode: credential.recoveryCode,
+          newPassphrase: credential.newPassphrase,
+        });
+      }
+      return Promise.reject(makeError('invalid_request', { cause: 'invalid account candidate credential' }));
+    },
     async accountChangePassphrase({ current, next }) {
       await api.accountUnlock(current);
       const changed = await call('account_change_passphrase', { newPassphrase: next });

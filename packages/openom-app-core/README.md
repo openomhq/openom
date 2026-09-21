@@ -4,7 +4,7 @@
 > encrypted tree sessions, the claim engine, and local-first synchronization.
 
 **Status:** built · account/tree custody cutover in progress · wasm + native rlib
-**Last updated:** 2026-09-21
+**Last updated:** 2026-09-22
 
 ## What it is — and is not
 
@@ -31,6 +31,7 @@ registration signature, generation, and one-time recovery code.
 | **APP-CORE-2** | Recovery and explicit root rotation preserve `member_id`, advance the generation, refresh the live handle, and revoke the prior recovery material. | A stale handle or old recovery code must not silently restore revoked account custody. | `lifecycle_tests::recovery_and_root_rotation_refresh_the_handle_and_revoke_old_material` |
 | **APP-CORE-3** | Registration proof signs the shared, domain-separated issuer/subject/member/timestamp encoding and fails verification when a bound claim changes. | The auth subject can only bind itself to an account whose signing key the client controls. | `lifecycle_tests::registration_proof_matches_the_server_verification_bytes` |
 | **APP-CORE-4** | One durable account uses the same identity for an owned tree and for joined trees on both engines, including after dropping and reopening the account handle. | Joined membership must not mint a second passphrase-derived identity or depend on per-tree member credentials. | `lifecycle_tests::one_account_identity_joins_and_reopens_trees_on_both_engines` |
+| **APP-CORE-5** | Account backup snapshots contain the exact wrapped bytes, their credential-authenticated generation, and a canonical SHA-256 hash; fetched candidates expose no snapshot until credential and floor verification succeeds. | Transport metadata must never advance the rollback floor or become persisted account state without cryptographic verification. | `lifecycle_tests::account_candidates_authenticate_generation_before_exposing_a_snapshot`, `lifecycle_tests::recovery_candidate_rotates_before_it_can_be_adopted` |
 
 Run: `node scripts/cargo.mjs test -p openom-app-core --all-features` (from the repo root).
 
@@ -43,8 +44,9 @@ let second = provision_tree(store_b, engine, &created.handle, &tree_b, &replica,
 assert_eq!(first.did_key, second.did_key);
 ```
 
-Entry points: account custody (`AccountHandle`, `account_create`, `account_unlock`,
-`account_change_passphrase`, `account_recover`, `account_rotate_root`, `account_register_proof`), tree custody
+Entry points: account custody (`AccountHandle`, `account_create`, `account_unlock`, `account_snapshot`,
+`account_open_candidate`, `account_recover_candidate`, `account_change_passphrase`, `account_recover`,
+`account_rotate_root`, `account_register_proof`), tree custody
 (`provision_tree`, `unlock_tree`), and the live local-first engine (`AppCore`).
 Joined-tree custody enters through `account_public_identity`, `account_tree_role`, and
 `unlock_tree_as_member`; role dispatch reads a trusted keyring head rather than a persisted secret context.

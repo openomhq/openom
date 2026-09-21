@@ -67,7 +67,9 @@ joined-tree reopen selects the founder or admitted-member path from the already-
 from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle
 and exposes its durable member ID only as the raw development bearer; it does not own accounts.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
-passphrase, rotate root, public identity, and registration proof), while keeping every secret handle in Rust/wasm.
+passphrase, snapshot, verified candidate adoption, rotate root, public identity, and registration proof), while
+keeping every secret handle in Rust/wasm. Candidate adoption verifies the fetched wrapped bytes before replacing
+the profile's persisted snapshot and resident account.
 
 It is **not** a general-purpose SPA: there is no client-side router beyond the app's own
 `data-view` state, no CSS framework, and no dependency-injection container — `src/ui/dom.js`'s `h()`

@@ -15,8 +15,11 @@ import init, {
   accountCreate as wasmAccountCreate,
   accountUnlock as wasmAccountUnlock,
   accountRecover as wasmAccountRecover,
+  accountOpenCandidate as wasmAccountOpenCandidate,
+  accountRecoverCandidate as wasmAccountRecoverCandidate,
   accountChangePassphrase as wasmAccountChangePassphrase,
   accountRotateRoot as wasmAccountRotateRoot,
+  accountSnapshot as wasmAccountSnapshot,
   accountPublicIdentity as wasmAccountPublicIdentity,
   accountRegisterProof as wasmAccountRegisterProof,
   accountTreeRole as wasmAccountTreeRole,
@@ -636,6 +639,63 @@ const api = {
       throw vaultError(e);
     } finally {
       recovered?.free();
+    }
+  },
+
+  /** Return the resident account snapshot and its public identity without exposing a secret handle. */
+  async accountSnapshot() {
+    await ensureInit();
+    let snapshot;
+    try {
+      snapshot = wasmAccountSnapshot(requireAccount());
+      return {
+        ...publicAccountIdentity(),
+        keystore: snapshot.keystore,
+        generation: snapshot.generation,
+        blobHash: snapshot.blobHash,
+      };
+    } catch (e) {
+      throw vaultError(e);
+    } finally {
+      snapshot?.free();
+    }
+  },
+
+  /** Verify a fetched account snapshot before replacing durable and resident custody. */
+  async accountAdoptCandidate({ keystore, credential }) {
+    await ensureInit();
+    const saved = await loadAccount();
+    const generationFloor = saved?.generation ?? 0;
+    let candidate;
+    try {
+      if (credential && typeof credential.passphrase === 'string') {
+        candidate = wasmAccountOpenCandidate(credential.passphrase, keystore, generationFloor);
+      } else if (
+        credential
+        && typeof credential.recoveryCode === 'string'
+        && typeof credential.newPassphrase === 'string'
+      ) {
+        candidate = wasmAccountRecoverCandidate(
+          credential.recoveryCode,
+          credential.newPassphrase,
+          keystore,
+          generationFloor,
+        );
+      } else {
+        throw new Error('invalid account candidate credential');
+      }
+      await saveAccount(candidate.keystore, candidate.generation);
+      replaceAccount(candidate.takeHandle());
+      return {
+        ...publicAccountIdentity(),
+        generation: candidate.generation,
+        blobHash: candidate.blobHash,
+        recoveryCode: candidate.recoveryCode,
+      };
+    } catch (e) {
+      throw vaultError(e);
+    } finally {
+      candidate?.free();
     }
   },
 

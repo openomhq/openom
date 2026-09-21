@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AccountChanged, AccountIdentity, AccountOpened, AccountStatus, AddedMember, AppCoreHost,
-    BlobData, BlobMeta, InviteMaterial, KeyringRevisionPayload, MemberToAdd, MemberUnlocked,
-    Provisioned, RemovedMember, RoleChanged, SyncOut, Unlocked,
+    AccountAdopted, AccountChanged, AccountIdentity, AccountOpened, AccountSnapshot, AccountStatus,
+    AddedMember, AppCoreHost, BlobData, BlobMeta, InviteMaterial, KeyringRevisionPayload,
+    MemberToAdd, MemberUnlocked, Provisioned, RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -142,6 +142,46 @@ async fn account_recover(
 #[tauri::command]
 fn account_public_identity(state: State<'_, Host>) -> Result<AccountIdentity, String> {
     state.account_public_identity().map_err(e)
+}
+
+#[tauri::command]
+fn account_snapshot(state: State<'_, Host>) -> Result<AccountSnapshot, String> {
+    state.account_snapshot().map_err(e)
+}
+
+#[tauri::command]
+async fn account_adopt_candidate(
+    state: State<'_, Host>,
+    candidate: Vec<u8>,
+    passphrase: String,
+) -> Result<AccountAdopted, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.account_adopt_candidate(&candidate, &Passphrase::new(passphrase.into_bytes()))
+            .map_err(e)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+async fn account_adopt_recovery_candidate(
+    state: State<'_, Host>,
+    candidate: Vec<u8>,
+    recovery_code: String,
+    new_passphrase: String,
+) -> Result<AccountAdopted, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.account_adopt_recovery_candidate(
+            &candidate,
+            &RecoveryCode::new(recovery_code),
+            &Passphrase::new(new_passphrase.into_bytes()),
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(join_err)?
 }
 
 #[tauri::command]
@@ -735,6 +775,9 @@ pub fn run() {
             account_rotate_root,
             account_register_proof,
             account_public_identity,
+            account_snapshot,
+            account_adopt_candidate,
+            account_adopt_recovery_candidate,
             core_provision,
             core_unlock,
             core_derive_member_id,

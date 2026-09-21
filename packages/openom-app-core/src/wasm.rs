@@ -49,7 +49,7 @@ impl AccountHandle {
     #[must_use]
     #[allow(clippy::cast_precision_loss)] // account generations remain far below JS's exact-integer ceiling
     pub fn generation(&self) -> f64 {
-        self.inner.generation() as f64
+        self.inner.generation().get() as f64
     }
 }
 
@@ -560,6 +560,8 @@ pub struct AccountPublicIdentity {
 pub struct AccountOpenResult {
     handle: Option<AccountHandle>,
     pub keystore: Vec<u8>,
+    #[wasm_bindgen(js_name = blobHash)]
+    pub blob_hash: Vec<u8>,
     #[wasm_bindgen(js_name = recoveryCode)]
     pub recovery_code: String,
     pub generation: f64,
@@ -578,9 +580,30 @@ impl AccountOpenResult {
 #[wasm_bindgen(getter_with_clone)]
 pub struct AccountUpdateResult {
     pub keystore: Vec<u8>,
+    #[wasm_bindgen(js_name = blobHash)]
+    pub blob_hash: Vec<u8>,
     #[wasm_bindgen(js_name = recoveryCode)]
     pub recovery_code: String,
     pub generation: f64,
+}
+
+/// Opaque wrapped account bytes and their authenticated backup version.
+#[wasm_bindgen(getter_with_clone)]
+pub struct AccountSnapshot {
+    pub keystore: Vec<u8>,
+    #[wasm_bindgen(js_name = blobHash)]
+    pub blob_hash: Vec<u8>,
+    pub generation: f64,
+}
+
+fn snapshot_result(account: &crate::AccountHandle) -> Result<AccountSnapshot, JsError> {
+    let snapshot = crate::account_snapshot(account);
+    let version = snapshot.version();
+    Ok(AccountSnapshot {
+        keystore: snapshot.into_keystore(),
+        blob_hash: version.blob_hash().as_bytes().to_vec(),
+        generation: generation_to_js(version.generation().get())?,
+    })
 }
 
 /// Create one profile-level durable account.
@@ -588,11 +611,13 @@ pub struct AccountUpdateResult {
 pub fn account_create(passphrase: String) -> Result<AccountOpenResult, JsValue> {
     let created = crate::account_create(&Passphrase::new(passphrase.into_bytes()))
         .map_err(|error| vault_err_to_js(&error))?;
+    let snapshot = snapshot_result(&created.handle)?;
     Ok(AccountOpenResult {
         handle: Some(AccountHandle { inner: created.handle }),
-        keystore: created.keystore,
+        keystore: snapshot.keystore,
+        blob_hash: snapshot.blob_hash,
         recovery_code: created.recovery_code,
-        generation: generation_to_js(created.generation)?,
+        generation: snapshot.generation,
     })
 }
 
@@ -606,10 +631,34 @@ pub fn account_unlock(
     let handle = crate::account_unlock(
         &Passphrase::new(passphrase.into_bytes()),
         keystore,
-        as_u64(generation_floor, "generationFloor")?,
+        crate::AccountGeneration::new(as_u64(generation_floor, "generationFloor")?),
     )
     .map_err(|error| vault_err_to_js(&error))?;
     Ok(AccountHandle { inner: handle })
+}
+
+/// Verify a fetched account blob into a temporary handle. The caller persists only this result, never a
+/// transport-supplied generation.
+#[wasm_bindgen(js_name = accountOpenCandidate)]
+pub fn account_open_candidate(
+    passphrase: String,
+    candidate: &[u8],
+    generation_floor: f64,
+) -> Result<AccountOpenResult, JsValue> {
+    let handle = crate::account_open_candidate(
+        &Passphrase::new(passphrase.into_bytes()),
+        candidate,
+        crate::AccountGeneration::new(as_u64(generation_floor, "generationFloor")?),
+    )
+    .map_err(|error| vault_err_to_js(&error))?;
+    let snapshot = snapshot_result(&handle)?;
+    Ok(AccountOpenResult {
+        handle: Some(AccountHandle { inner: handle }),
+        keystore: snapshot.keystore,
+        blob_hash: snapshot.blob_hash,
+        recovery_code: String::new(),
+        generation: snapshot.generation,
+    })
 }
 
 /// Re-wrap the resident account under a new passphrase without touching any tree keyring.
@@ -618,15 +667,17 @@ pub fn account_change_passphrase(
     account: &mut AccountHandle,
     new_passphrase: String,
 ) -> Result<AccountUpdateResult, JsValue> {
-    let changed = crate::account_change_passphrase(
+    let _changed = crate::account_change_passphrase(
         &mut account.inner,
         &Passphrase::new(new_passphrase.into_bytes()),
     )
     .map_err(|error| vault_err_to_js(&error))?;
+    let snapshot = snapshot_result(&account.inner)?;
     Ok(AccountUpdateResult {
-        keystore: changed.keystore,
+        keystore: snapshot.keystore,
+        blob_hash: snapshot.blob_hash,
         recovery_code: String::new(),
-        generation: generation_to_js(changed.generation)?,
+        generation: snapshot.generation,
     })
 }
 
@@ -642,14 +693,41 @@ pub fn account_recover(
         &RecoveryCode::new(recovery_code),
         &Passphrase::new(new_passphrase.into_bytes()),
         keystore,
-        as_u64(generation_floor, "generationFloor")?,
+        crate::AccountGeneration::new(as_u64(generation_floor, "generationFloor")?),
     )
     .map_err(|error| vault_err_to_js(&error))?;
+    let snapshot = snapshot_result(&recovered.handle)?;
     Ok(AccountOpenResult {
         handle: Some(AccountHandle { inner: recovered.handle }),
-        keystore: recovered.keystore,
+        keystore: snapshot.keystore,
+        blob_hash: snapshot.blob_hash,
         recovery_code: recovered.recovery_code,
-        generation: generation_to_js(recovered.generation)?,
+        generation: snapshot.generation,
+    })
+}
+
+/// Verify and rotate a fetched account blob with a recovery credential into temporary custody.
+#[wasm_bindgen(js_name = accountRecoverCandidate)]
+pub fn account_recover_candidate(
+    recovery_code: String,
+    new_passphrase: String,
+    candidate: &[u8],
+    generation_floor: f64,
+) -> Result<AccountOpenResult, JsValue> {
+    let recovered = crate::account_recover_candidate(
+        &RecoveryCode::new(recovery_code),
+        &Passphrase::new(new_passphrase.into_bytes()),
+        candidate,
+        crate::AccountGeneration::new(as_u64(generation_floor, "generationFloor")?),
+    )
+    .map_err(|error| vault_err_to_js(&error))?;
+    let snapshot = snapshot_result(&recovered.handle)?;
+    Ok(AccountOpenResult {
+        handle: Some(AccountHandle { inner: recovered.handle }),
+        keystore: snapshot.keystore,
+        blob_hash: snapshot.blob_hash,
+        recovery_code: recovered.recovery_code,
+        generation: snapshot.generation,
     })
 }
 
@@ -664,11 +742,19 @@ pub fn account_rotate_root(
         &Passphrase::new(passphrase.into_bytes()),
     )
     .map_err(|error| vault_err_to_js(&error))?;
+    let snapshot = snapshot_result(&account.inner)?;
     Ok(AccountUpdateResult {
-        keystore: rotated.keystore,
+        keystore: snapshot.keystore,
+        blob_hash: snapshot.blob_hash,
         recovery_code: rotated.recovery_code,
-        generation: generation_to_js(rotated.generation)?,
+        generation: snapshot.generation,
     })
+}
+
+/// Return the exact wrapped bytes and authenticated backup version for the resident account.
+#[wasm_bindgen(js_name = accountSnapshot)]
+pub fn account_snapshot(account: &AccountHandle) -> Result<AccountSnapshot, JsError> {
+    snapshot_result(&account.inner)
 }
 
 /// Return the account's public invite/admission identity without exposing secret material.
