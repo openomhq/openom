@@ -16,6 +16,7 @@ pub const BELOW_GC_FLOOR: &str = "below_gc_floor";
 pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
 pub const RATE_LIMITED: &str = "rate_limited";
 pub const VERSION_CONFLICT: &str = "version_conflict";
+pub const ACCOUNT_BACKUP_PRECONDITION_FAILED: &str = "account_backup_precondition_failed";
 pub const COVERED_ANOMALY: &str = "covered_anomaly";
 pub const HEAD_ROLLBACK: &str = "head_rollback";
 pub const INVALID_REQUEST: &str = "invalid_request";
@@ -40,6 +41,7 @@ pub const WRONG_PASSPHRASE: &str = "wrong_passphrase";
 pub const TAMPERED_ANCHOR: &str = "tampered_anchor";
 pub const REVISION_ROLLBACK: &str = "revision_rollback";
 pub const GENERATION_ROLLBACK: &str = "generation_rollback";
+pub const ACCOUNT_BACKUP_ROLLBACK: &str = "account_backup_rollback";
 pub const RECOVERY_CODE_INVALID: &str = "recovery_code_invalid";
 pub const KEYRING_VERIFY_FAILED: &str = "keyring_verify_failed";
 pub const DECRYPT_FAILED: &str = "decrypt_failed";
@@ -55,6 +57,7 @@ pub const ERROR_CODES: &[CodeMeta] = &[
     CodeMeta { code: "quota_exceeded", domain: "sync", title: "Storage quota exceeded", retriable: false, action: Some("upgrade") },
     CodeMeta { code: "rate_limited", domain: "sync", title: "Rate limited", retriable: true, action: Some("retry") },
     CodeMeta { code: "version_conflict", domain: "sync", title: "Version conflict", retriable: true, action: Some("retry") },
+    CodeMeta { code: "account_backup_precondition_failed", domain: "sync", title: "Account backup precondition failed", retriable: false, action: None },
     CodeMeta { code: "covered_anomaly", domain: "sync", title: "Coverage inconsistency", retriable: false, action: Some("contact") },
     CodeMeta { code: "head_rollback", domain: "sync", title: "Head pointer moved backward", retriable: false, action: None },
     CodeMeta { code: "invalid_request", domain: "sync", title: "Invalid request", retriable: false, action: Some("contact") },
@@ -79,6 +82,7 @@ pub const ERROR_CODES: &[CodeMeta] = &[
     CodeMeta { code: "tampered_anchor", domain: "vault", title: "Tree verification failed", retriable: false, action: Some("contact") },
     CodeMeta { code: "revision_rollback", domain: "vault", title: "Version rollback detected", retriable: false, action: None },
     CodeMeta { code: "generation_rollback", domain: "vault", title: "Account backup rolled back", retriable: false, action: None },
+    CodeMeta { code: "account_backup_rollback", domain: "vault", title: "Account backup rollback detected", retriable: false, action: None },
     CodeMeta { code: "recovery_code_invalid", domain: "vault", title: "Invalid recovery code", retriable: false, action: None },
     CodeMeta { code: "keyring_verify_failed", domain: "vault", title: "Keyring verification failed", retriable: false, action: Some("contact") },
     CodeMeta { code: "decrypt_failed", domain: "vault", title: "Decryption failed", retriable: false, action: Some("contact") },
