@@ -708,14 +708,9 @@ const api = {
     return true;
   },
 
-  /**
-   * Create a brand-new encrypted tree: provision the keyring, persist its genesis head, and open a
-   * durable core. Returns the show-once `recoveryCode` + the author `didKey` + advisory self-heal flags
-   * (the DEK stays in this worker). `opts`: { passphrase, treeId: Uint8Array, memberId, docId, engine? }.
-   */
-  async provisionCore({ passphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
+  /** Create a tree under the already-unlocked profile account. */
+  async provisionTree({ treeId, docId, engine = KEYRING_ENGINE }) {
     await ensureInit();
-    const accountState = await ensureAccount(passphrase, true);
     const res = wasmProvisionTree(requireAccount(), engine, treeId, freshReplica(), docId);
     try {
       await keyringStore().saveHead(docId, engine, res.keyring); // persist genesis for later unlock
@@ -738,7 +733,6 @@ const api = {
       const ownerMemberId = requireAccount().memberId;
       return {
         memberId: ownerMemberId,
-        recoveryCode: accountState.recoveryCode,
         didKey: res.didKey,
         needsReseal: res.needsReseal,
         needsBackfill: res.needsBackfill,
@@ -759,7 +753,7 @@ const api = {
     await ensureInit();
     void memberId;
     await ensureAccount(passphrase);
-    return openStoredTree({ treeId, docId, engine });
+    return api.openTree({ treeId, docId, engine });
   },
 
   /** Recover the profile account under a new passphrase, preserving its identity, then reopen the selected
@@ -780,7 +774,7 @@ const api = {
       await saveAccount(recovered.keystore, recovered.generation);
       const nextRecoveryCode = recovered.recoveryCode;
       replaceAccount(recovered.takeHandle());
-      return { recoveryCode: nextRecoveryCode, ...(await openStoredTree({ treeId, docId, engine })) };
+      return { recoveryCode: nextRecoveryCode, ...(await api.openTree({ treeId, docId, engine })) };
     } finally {
       recovered.free();
     }
@@ -1490,6 +1484,18 @@ const api = {
       try { account.free(); } catch { /* already gone */ }
       account = null;
     }
+  },
+
+  /** Compatibility composition for callers not yet split onto AccountSession. */
+  async provisionCore({ passphrase, treeId, docId, engine = KEYRING_ENGINE }) {
+    const accountState = await ensureAccount(passphrase, true);
+    return { recoveryCode: accountState.recoveryCode, ...(await api.provisionTree({ treeId, docId, engine })) };
+  },
+
+  /** Open a stored tree under the already-unlocked profile account. */
+  async openTree({ treeId, docId, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    return openStoredTree({ treeId, docId, engine });
   },
 };
 

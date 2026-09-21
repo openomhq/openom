@@ -5,6 +5,7 @@ import { createLockPolicy } from './core/lockPolicy.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { SessionController, DevAuth } from './core/session.js';
+import { AccountSession } from './core/accountSession.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
 import {
@@ -97,11 +98,12 @@ class App {
   gateBusy = false;
   gateRecoveryCode = '';
   pendingDid = null;
+  recoveryNextGate = null;
   lockable = false; // a real (passphrase) worker core is open — auto-lock / "Lock now" apply
   vault = null;
-  // The active member's ONE tree identity (§ treeId.js): realDoc = the UUID string (server resource
+  // The unlocked account's selected tree identity (§ treeId.js): realDoc = the UUID string (server resource
   // id, local doc/keyring key, sync docId — all the same); realTreeId = its 16 seam bytes (crypto
-  // scope, carried inside every payload). Both null until the member has provisioned a tree.
+  // scope, carried inside every payload). Both null until the account has selected a tree.
   realDoc = null;
   realTreeId = null;
   // The managed backend URL (null ⇒ local-only) and the active tree's owned SyncSession (null unless
@@ -124,8 +126,7 @@ class App {
     const { blobs, kind: blobKind } = createBlobStore();
     this.blobs = blobs;
     this.blobKind = blobKind;
-    // Identity seam: DevAuth (multi local accounts) behind the swappable SessionController. RemoteStore's
-    // bearer + the vault's member id both source from here; swapping to SupabaseAuth is one line (see session.js).
+    // Provider-auth seam. Cryptographic identity comes separately from AccountSession after account unlock.
     this.auth = new SessionController(new DevAuth());
     this.locale = 'en';
   }
@@ -154,71 +155,47 @@ class App {
     this.demoEnabled = landing === 'demo' || landing === 'test';
     this.startEnabled = landing !== 'demo'; // 'live' or 'test' (and the safe default when unset)
     this.serverUrl = readServerUrl(); // null ⇒ local-only (sync stays off; no account wall)
-    // A local account is the identity every provision/unlock binds to (memberId == the vault member ==
-    // the token's sub). Ensure one exists for this dev context; the account UI (later) creates/switches more.
-    if (!this.auth.memberId()) await this.auth.signIn({ label: 'You' });
-    // Identity change (sign-out / account switch / another tab) — the keyring + vault are per-member
-    // unlock state, so tear the whole stack down, lock the sealer, rebuild the vault, and re-gate. This
-    // lives at the composition root; RemoteStore stays dumb (it never swaps a token under a live store).
-    this.auth.onChange(() => this.onIdentityChange());
+    // Provider auth is independent of local account custody. Signing out stops remote sync but never locks
+    // local data; signing in restarts sync without changing the account identity.
+    this.auth.onChange(() => this.onAuthChange());
     this.worker = appCoreWorker();
     await this.worker.warm();
+    this.account = new AccountSession(this.worker);
+    await this.account.initialize();
     if (this.demoEnabled && new URLSearchParams(location.search).get('demo') === '1') {
       await this.startDemo();
       return;
     }
-    this.showGate(await this.gateForMember());
+    this.showGate(await this.gateForAccount());
   }
 
-  // Load the active member's tree identity (uuid + 16 seam bytes) into realDoc/realTreeId. Returns
-  // whether the member has a tree at all (provisioned before) — false for a brand-new account.
+  // Load the unlocked account's selected-tree identity (uuid + 16 seam bytes) into realDoc/realTreeId.
   loadTreeIdentity() {
-    const id = readTreeIdentity(this.auth.memberId());
+    const id = readTreeIdentity(this.account.memberId());
     this.realDoc = id?.uuid ?? null;
     this.realTreeId = id?.bytes ?? null;
     return !!id;
   }
 
-  // The gate a returning member lands on: 'unlock' if they have a provisioned tree keyring, else the
-  // 'welcome' first-run screen. Resolves (and caches) the member's tree identity as a side effect.
-  async gateForMember() {
+  // Tree lookup is deliberately delayed until account unlock reveals the durable member id.
+  async gateForAccount() {
+    if (this.account.state().account === 'none') return 'welcome';
+    if (this.account.state().account === 'locked') return 'unlock';
     return this.loadTreeIdentity() && (await this.worker.hasKeyring(this.realDoc)) ? 'unlock' : 'welcome';
   }
 
-  // The ONE identity source (OPE-336 invariant): the member id the vault provisions/unlocks under MUST
-  // equal AuthSession.memberId() — which is the token's `sub` — because the server ACL is keyed on the
-  // keyring member ids; any divergence 403s every request. Never mint this id independently of the seam.
-  authMemberId() {
-    const id = this.auth.memberId();
-    if (!id) throw new Error('no active account — sign in first');
+  // The only application identity source. AuthSession.subject() is an unrelated provider-auth fact.
+  accountMemberId() {
+    const id = this.account.memberId();
+    if (!id) throw new Error('profile account is locked');
     return id;
   }
 
-  // Composition-root reaction to an identity change (sign-out / account switch / another tab). The keyring
-  // and vault are per-member unlock state, so drop the whole open stack, lock the sealer, rebuild a fresh
-  // vault bound to the NEW member, and re-gate — never a token-swap under a live RemoteStore.
-  // The new member's tree identity is resolved per-member (gateForMember → loadTreeIdentity), so realDoc/
-  // realTreeId switch with the account, and enterApp rebuilds the SyncSession around the new member's
-  // authed RemoteStore. Tear the old session down first (its signal aborts, in-flight ticks no-op).
-  async onIdentityChange() {
+  // Provider auth changes affect only remote connectivity. The local unlocked account remains usable offline.
+  onAuthChange() {
     this.stopSync();
-    if (this.lockable && this.realDoc) {
-      try { await this.worker.close(this.realDoc); } catch (e) { console.warn('[openom] close core on identity change', e); }
-    }
-    this.lockable = false;
-    this.lockPolicy?.disarm();
-    this.togglePalette(false);
-    this.tree = null;
-    this.library = null;
-    this.transfer = null;
-    this.focusId = null;
-    this.viewStack = [];
-    try { await this.blobs?.lock?.(); } catch { /* best-effort */ }
-    // A fresh worker so the next provision/unlock binds to the new member id (drops the old DEK).
-    try { resetAppCoreWorker(); this.worker = appCoreWorker(); await this.worker.warm(); }
-    catch (e) { console.error('[openom] rebuild worker on identity change', e); }
-    if (!this.auth.memberId()) { this.realDoc = null; this.realTreeId = null; this.showGate('welcome'); return; } // signed out
-    this.showGate(await this.gateForMember());
+    if (this.lockable && this.tree && this.auth.subject()) this.startSync();
+    this.render();
   }
 
   // The gate owns its DOM: renderGate() mounts it on explicit transitions/actions, while the
@@ -255,19 +232,36 @@ class App {
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
+    let newRecoveryCode = '';
     try {
-      // First provision mints this member's ONE tree identity (serialized across tabs); recover/unlock
-      // read it back. The uuid is the server resource id + local doc/keyring key; the bytes are the seam id.
-      const id = await ensureTreeIdentity(this.authMemberId());
+      if (this.account.state().account === 'none') {
+        ({ recoveryCode: newRecoveryCode } = await this.account.createAccount(passphrase));
+      } else {
+        await this.account.unlock(passphrase);
+      }
+      // Provision only after account unlock supplies the durable identity used to key the selected-tree cache.
+      const id = await ensureTreeIdentity(this.accountMemberId());
       this.realDoc = id.uuid;
       this.realTreeId = id.bytes;
-      const { recoveryCode, didKey } = await this.worker.provisionCore({
-        passphrase, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
-      });
+      const { didKey } = await this.worker.provisionTree({ treeId: this.realTreeId, docId: this.realDoc });
       this.pendingDid = didKey;
-      this.gateRecoveryCode = recoveryCode;
-      this.showGate('recovery');
+      if (newRecoveryCode) {
+        this.gateRecoveryCode = newRecoveryCode;
+        this.showGate('recovery');
+      } else {
+        await this.enterApp({ docId: this.realDoc, createdBy: didKey, lockable: true });
+      }
     } catch (e) {
+      // Account creation may succeed before tree provisioning. Never strand its show-once recovery code:
+      // present it first, then return to welcome so provisioning can be retried under the same account.
+      if (newRecoveryCode) {
+        logError('provision-tree', e);
+        this.pendingDid = null;
+        this.recoveryNextGate = 'welcome';
+        this.gateRecoveryCode = newRecoveryCode;
+        this.showGate('recovery');
+        return;
+      }
       this.gateBusy = false;
       // Route through gateErr like every other gate flow: log the real cause (Tier 1) and render a code-keyed
       // message where the catalog covers it, falling back to the create-context copy (Tier 2).
@@ -280,9 +274,12 @@ class App {
     // After the recovery-code screen. From provision/recover there's a pending session to enter
     // the app with; from an in-app change-passphrase there isn't — just close the gate.
     const did = this.pendingDid;
+    const nextGate = this.recoveryNextGate;
     this.pendingDid = null;
+    this.recoveryNextGate = null;
     this.gateRecoveryCode = '';
     if (did) await this.enterApp({ docId: this.realDoc, createdBy: did, lockable: true });
+    else if (nextGate) this.showGate(nextGate);
     else { this.gate = null; this.render(); }
   }
 
@@ -292,6 +289,7 @@ class App {
     this.gateError = '';
     this.gateBusy = false;
     this.pendingDid = null;
+    this.recoveryNextGate = null;
     this.gateRecoveryCode = '';
     this.render();
   }
@@ -305,9 +303,9 @@ class App {
     this.lockable = false;
     this.lockPolicy?.disarm();
     this.togglePalette(false);
-    // Free the worker core — drops the DEK + every plaintext record held in the worker. Best-effort:
+    // Drop all tree DEKs plus the account secrets while retaining their encrypted persistence. Best-effort:
     // even if teardown throws we still drop the main-thread wrappers below and re-gate.
-    try { await this.worker.close(this.realDoc); } catch (e) { console.warn('[openom] lock teardown', e); }
+    try { await this.account.lock(); } catch (e) { console.warn('[openom] lock teardown', e); }
     // Drop decrypted material: the tree (every plaintext record), the library/transfer wrappers
     // built over it, and the image bytes + object URLs.
     this.tree = null;
@@ -328,14 +326,16 @@ class App {
 
   async doUnlock(passphrase) {
     if (!passphrase) { this.gateError = t('gate-err-enter-pass'); this.renderGate(); return; }
-    if (!this.realDoc) this.loadTreeIdentity(); // ensure the member's tree identity is resolved
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
     try {
-      const { didKey } = await this.worker.unlockCore({
-        passphrase, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
-      });
+      await this.account.unlock(passphrase);
+      if (!this.loadTreeIdentity() || !(await this.worker.hasKeyring(this.realDoc))) {
+        this.showGate('welcome');
+        return;
+      }
+      const { didKey } = await this.worker.openTree({ treeId: this.realTreeId, docId: this.realDoc });
       await this.enterApp({ docId: this.realDoc, createdBy: didKey, lockable: true });
     } catch (e) {
       this.gateBusy = false;
@@ -353,26 +353,39 @@ class App {
     if (!recoveryCode?.trim()) { this.gateError = t('gate-err-enter-code'); this.renderGate(); return; }
     if (!newPassphrase || newPassphrase.length < 8) { this.gateError = t('gate-err-min-new'); this.renderGate(); return; }
     if (newPassphrase !== confirm) { this.gateError = t('gate-err-mismatch'); this.renderGate(); return; }
-    if (!this.realDoc) this.loadTreeIdentity(); // ensure the member's tree identity is resolved
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
+    let newCode = '';
     try {
-      const { recoveryCode: newCode, didKey } = await this.worker.recoverCore({
-        recoveryCode, newPassphrase, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
-      });
+      ({ recoveryCode: newCode } = await this.account.recover(recoveryCode, newPassphrase));
+      if (!this.loadTreeIdentity() || !(await this.worker.hasKeyring(this.realDoc))) {
+        this.pendingDid = null;
+        this.recoveryNextGate = 'welcome';
+        this.gateRecoveryCode = newCode;
+        this.showGate('recovery');
+        return;
+      }
+      const { didKey } = await this.worker.openTree({ treeId: this.realTreeId, docId: this.realDoc });
       this.pendingDid = didKey;
       this.gateRecoveryCode = newCode; // a fresh code — the old one no longer works
       this.showGate('recovery');
     } catch (e) {
+      if (newCode) {
+        logError('recover-tree', e);
+        this.pendingDid = null;
+        this.recoveryNextGate = 'welcome';
+        this.gateRecoveryCode = newCode;
+        this.showGate('recovery');
+        return;
+      }
       this.gateBusy = false;
       this.gateError = this.gateErr(e, 'gate-err-recover');
       this.renderGate();
     }
   }
 
-  // Opened from Settings. The web account cutover re-wraps the profile account and retains its recovery code;
-  // the not-yet-cut-over native host still returns a newly-rotated per-tree code until Phase 0 chunk 3c.
+  // Opened from Settings. Re-wraps the profile account; tree keyrings and recovery credentials are unchanged.
   startChangePassphrase() {
     this.showGate('change');
   }
@@ -386,15 +399,8 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      const { recoveryCode } = await this.worker.changePassphraseCore({
-        current, next, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
-      });
-      if (recoveryCode) {
-        this.gateRecoveryCode = recoveryCode;
-        this.showGate('recovery');
-      } else {
-        this.cancelGate();
-      }
+      await this.account.changePassphrase(current, next);
+      this.cancelGate();
     } catch (e) {
       this.gateBusy = false;
       this.gateError = this.gateErr(e, 'gate-err-change');
@@ -410,7 +416,7 @@ class App {
   /** Promote an existing member to co-owner — grants signer/admin authority (add/remove members, key ops). */
   async promoteMember(targetMemberId, ownerPassphrase) {
     return this.worker.changeRole(this.realDoc, {
-      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.accountMemberId(),
       targetMemberId, newRole: 'co-owner',
     });
   }
@@ -420,7 +426,7 @@ class App {
    *  chain a demote is refused pending the attribution hardening (OPE-421) — remove the member instead. */
   async demoteMember(targetMemberId, newRole, ownerPassphrase) {
     return this.worker.changeRole(this.realDoc, {
-      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.accountMemberId(),
       targetMemberId, newRole,
     });
   }
@@ -429,20 +435,20 @@ class App {
    *  forward. The strong revocation for anyone you no longer trust. */
   async removeMember(removeMemberId, ownerPassphrase) {
     return this.worker.removeMember(this.realDoc, {
-      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.accountMemberId(),
       removeMemberId,
     });
   }
 
   // ── Mode A share invite / join seams (OPE-442) the members-UI (OPE-10/416) binds to. Invite/admit require the
   // server (the /invites transport + the keyring channel), so all of these need a configured backend + an active
-  // account; a local-only tree can't be shared. Orchestration lives in core/membership.js — these are thin App
+  // provider session; a local-only tree can't be shared. Orchestration lives in core/membership.js — these are thin App
   // wrappers that bind the active tree identity + a RemoteStore, mirroring the promote/demote/removeMember seams.
 
-  // A RemoteStore for the active backend+account, or null when local-only. Built on demand (stateless, per-request
+  // A RemoteStore for the active backend+provider session, or null when local-only. Built on demand (stateless, per-request
   // auth), exactly like startSync's.
   #membershipRemote() {
-    if (!this.serverUrl || !this.auth.memberId()) return null;
+    if (!this.serverUrl || !this.auth.subject()) return null;
     return new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth });
   }
 
@@ -480,7 +486,7 @@ class App {
     const remote = this.#membershipRemote();
     if (!remote) throw new Error('sharing needs a configured backend and an active account');
     return mAdmitMember({ worker: this.worker, remote }, {
-      docId: this.realDoc, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      docId: this.realDoc, treeId: this.realTreeId, ownerMemberId: this.accountMemberId(),
       passphrase: ownerPassphrase, inviteId, claim,
     });
   }
@@ -494,7 +500,7 @@ class App {
     const remote = this.#membershipRemote();
     if (!remote) throw new Error('joining needs a configured backend and an active account');
     return mJoinTree({ worker: this.worker, remote, attachTransport: this.#attachTransport(remote) }, {
-      link, passphrase, memberId: this.authMemberId(),
+      link, passphrase, memberId: this.accountMemberId(),
     });
   }
 
@@ -541,12 +547,12 @@ class App {
   }
 
   // Attach the network transport to the worker core + start the sync driver. Gated on a configured
-  // managed backend AND an active account — absent either, the tree stays local-first (no server, no
-  // account wall). One driver per open tree; a prior one is stopped first.
+  // managed backend AND an active provider session — absent either, the tree stays local-first. One driver
+  // per open tree; a prior one is stopped first.
   startSync() {
     this.stopSync();
     if (!this.lockable || !this.tree || !this.realDoc) return; // only the real, lockable tree syncs
-    if (!this.serverUrl || !this.auth.memberId()) return; // no backend / no account → local-only
+    if (!this.serverUrl || !this.auth.subject()) return; // no backend / no provider session → local-only
     try {
       const remote = new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth });
       // The worker calls the transport across Comlink; auth + serverUrl stay on the main thread.
@@ -610,11 +616,12 @@ class App {
       try {
         this.worker = appCoreWorker();
         await this.worker.warm();
+        this.account = new AccountSession(this.worker);
+        await this.account.initialize();
       } catch (e) {
         console.error('[openom] could not rebuild app-core worker', e);
       }
-      const next = (this.loadTreeIdentity() && (await this.worker?.hasKeyring(this.realDoc).catch(() => false))) ? 'unlock' : 'welcome';
-      this.showGate(next);
+      this.showGate(await this.gateForAccount());
     });
   }
 

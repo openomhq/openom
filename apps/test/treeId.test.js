@@ -31,7 +31,7 @@ function counterBytes() {
   };
 }
 
-describe('treeId — per-member tree identity', () => {
+describe('treeId — one selected tree per account', () => {
   it('readTreeIdentity is null before anything is minted', () => {
     expect(readTreeIdentity('m1', { storage: fakeStorage() })).toBeNull();
     expect(readTreeIdentity(null, { storage: fakeStorage() })).toBeNull();
@@ -61,11 +61,24 @@ describe('treeId — per-member tree identity', () => {
     expect(mk.count()).toBe(1); // minted exactly once despite two racing calls
   });
 
-  it('different members get different trees', async () => {
+  it('different account member IDs get different trees', async () => {
     const storage = fakeStorage();
     const a = await ensureTreeIdentity('m1', { storage, makeBytes: () => new Uint8Array(16).fill(1) });
     const b = await ensureTreeIdentity('m2', { storage, makeBytes: () => new Uint8Array(16).fill(2) });
     expect(a.uuid).not.toBe(b.uuid);
+  });
+
+  it('does not find an account tree under a distinct provider auth subject', async () => {
+    const storage = fakeStorage();
+    const accountMemberId = 'durable-member-1';
+    const providerSubject = 'provider-subject-1';
+    const identity = await ensureTreeIdentity(accountMemberId, {
+      storage,
+      makeBytes: () => new Uint8Array(16).fill(8),
+    });
+
+    expect(readTreeIdentity(accountMemberId, { storage })).toEqual(identity);
+    expect(readTreeIdentity(providerSubject, { storage })).toBeNull();
   });
 
   it('works without navigator.locks (single-tab fallback)', async () => {

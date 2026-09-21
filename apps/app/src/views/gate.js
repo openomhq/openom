@@ -125,9 +125,9 @@ function unlockScreen(app) {
     ghost(t('gate-forgot'), () => app.startRecover()));
 }
 
-// Reached from Settings while the app is open (a session already exists). On success it shows the
-// fresh recovery code, then returns to the app — it does not re-enter or rebuild the store (the
-// DEK is unchanged; only the passphrase wrap and recovery code are replaced).
+// Reached from Settings while the app is open (a session already exists). On success it returns
+// directly to the app: only the account's passphrase wrap changes, while its recovery code and
+// every tree DEK remain unchanged.
 function changeScreen(app) {
   const cur = passField('gate-current', t('gate-current-pass'), 'current-password');
   const p1 = passField('gate-pass', t('gate-new-pass'), 'new-password');

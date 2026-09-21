@@ -8,8 +8,8 @@
 //  - invoke arg keys are camelCase; Tauri maps them to the snake_case Rust params.
 //  - byte arguments (ids, keyrings, hops) cross as number arrays (`Array.from`), Vec<u8> the other way.
 //  - result structs derive serde camelCase, so fields arrive as recoveryCode/didKey/… already.
-//  - unlock/recover/join do NOT hydrate on the host, so this client bootstraps after them (as the worker's
-//    unlockCore does its import+bootstrap) — a no-op on a fresh provision.
+//  - open/join do NOT hydrate on the host, so this client bootstraps after them (as the worker's
+//    openTree does its import+bootstrap) — a no-op on a fresh provision.
 //
 // STATUS: the local-first lifecycle (provision/unlock/recover/change-passphrase + all claim edits + reads +
 // membership) is complete and matches the command surface. The sync path (attachTransport/syncNow) is a
@@ -183,6 +183,12 @@ export function createNativeAppCore() {
     accountRegisterProof: ({ issuer, subject, timestamp }) =>
       call('account_register_proof', { issuer, subject, timestamp }),
 
+    async provisionTree({ treeId, docId }) {
+      remember(docId, treeId);
+      markNeedsCreateTree(docId); // owner-only: a new tree whose server row the first tick must mint
+      return call('core_provision', { doc: docId, treeId: bytes(treeId) });
+    },
+
     async provisionCore({ passphrase, treeId, docId }) {
       let account;
       try {
@@ -191,26 +197,24 @@ export function createNativeAppCore() {
       } catch {
         account = await api.accountUnlock(passphrase);
       }
-      remember(docId, treeId);
-      markNeedsCreateTree(docId); // owner-only: a new tree whose server row the first tick must mint
-      const tree = await call('core_provision', { doc: docId, treeId: bytes(treeId) });
-      return { ...account, ...tree };
+      return { ...account, ...(await api.provisionTree({ treeId, docId })) };
     },
 
-    async unlockCore({ passphrase, treeId, docId }) {
+    async openTree({ treeId, docId }) {
       remember(docId, treeId);
-      await api.accountUnlock(passphrase);
       const out = await call('core_unlock', { doc: docId, treeId: bytes(treeId) });
-      await call('core_bootstrap', { doc: docId }); // hydrate the durable log (the worker's unlockCore does this)
+      await call('core_bootstrap', { doc: docId });
       return out;
     },
 
+    async unlockCore({ passphrase, treeId, docId }) {
+      await api.accountUnlock(passphrase);
+      return api.openTree({ treeId, docId });
+    },
+
     async recoverCore({ recoveryCode, newPassphrase, treeId, docId }) {
-      remember(docId, treeId);
       const account = await api.accountRecover({ recoveryCode, newPassphrase });
-      const out = await call('core_unlock', { doc: docId, treeId: bytes(treeId) });
-      await call('core_bootstrap', { doc: docId });
-      return { ...account, ...out };
+      return { ...account, ...(await api.openTree({ treeId, docId })) };
     },
 
     changePassphraseCore: ({ current, next }) =>

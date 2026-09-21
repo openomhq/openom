@@ -27,22 +27,23 @@ const mk = (over = {}) =>
   new DevAuth({ storage: new FakeStorage(), broadcast: new EventTarget(), makeId: seqIds(), ...over });
 
 describe('DevAuth — multi-account', () => {
-  it('starts signed out: no accounts, null memberId, getAccessToken throws', async () => {
+  it('starts signed out: no accounts, null auth subject, getAccessToken throws', async () => {
     const auth = mk();
     expect(auth.list()).toEqual([]);
-    expect(auth.memberId()).toBeNull();
+    expect(auth.subject()).toBeNull();
+    expect(auth.memberId).toBeUndefined();
     expect(auth.activeAccount()).toBeNull();
     // Signed out → the auth seam rejects with the unified `auth_required` AppError (OPE-419), not a raw
     // Error; the driver routes that code to re-gate rather than treating it as a transient offline blip.
     await expect(auth.getAccessToken()).rejects.toMatchObject({ code: 'auth_required', retriable: false });
   });
 
-  it('signIn creates a local account, activates it, and makes memberId its uuid', async () => {
+  it('signIn creates a local account, activates it, and makes its UUID the auth subject', async () => {
     const auth = mk();
     const acc = await auth.signIn({ label: 'Alice' });
     expect(acc.label).toBe('Alice');
     expect(acc.id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(auth.memberId()).toBe(acc.id);
+    expect(auth.subject()).toBe(acc.id);
     expect(auth.list()).toEqual([acc]);
   });
 
@@ -51,29 +52,29 @@ describe('DevAuth — multi-account', () => {
     const alice = await auth.createAccount('Alice');
     const bob = await auth.createAccount('Bob'); // creating also activates
     expect(auth.list().map((a) => a.label)).toEqual(['Alice', 'Bob']);
-    expect(auth.memberId()).toBe(bob.id);
+    expect(auth.subject()).toBe(bob.id);
     auth.switchTo(alice.id);
-    expect(auth.memberId()).toBe(alice.id);
+    expect(auth.subject()).toBe(alice.id);
     expect(auth.switchTo('unknown-id')).toBeNull(); // no-op
-    expect(auth.memberId()).toBe(alice.id);
+    expect(auth.subject()).toBe(alice.id);
   });
 
   it('getAccessToken returns the active uuid as the bearer (option A) and accepts forceRefresh', async () => {
     const auth = mk();
     const acc = await auth.signIn({ label: 'Alice' });
-    expect(await auth.getAccessToken()).toBe(acc.id); // token == memberId == sub
+    expect(await auth.getAccessToken()).toBe(acc.id); // dev convenience: token subject equals the local account UUID
     expect(await auth.getAccessToken({ forceRefresh: true })).toBe(acc.id); // seam accepts it (no-op today)
-    expect(await auth.getAccessToken()).toBe(auth.memberId());
+    expect(await auth.getAccessToken()).toBe(auth.subject());
   });
 
   it('signOut clears the active account but keeps the list for switching back', async () => {
     const auth = mk();
     const alice = await auth.signIn({ label: 'Alice' });
     await auth.signOut();
-    expect(auth.memberId()).toBeNull();
+    expect(auth.subject()).toBeNull();
     expect(auth.list()).toEqual([alice]); // preserved
     auth.switchTo(alice.id);
-    expect(auth.memberId()).toBe(alice.id);
+    expect(auth.subject()).toBe(alice.id);
   });
 
   it('capabilities: local accounts are self-serve (register/login/sync all true)', () => {
@@ -111,8 +112,8 @@ describe('DevAuth — onChange', () => {
     fireStorage(broadcast, DevAuth.ACTIVE_KEY);
 
     expect(onB).toHaveBeenCalled();
-    expect(tabB.memberId()).toBe(acc.id); // tabB now sees the shared active account
-    expect(tabB.memberId()).toBe(tabA.memberId());
+    expect(tabB.subject()).toBe(acc.id); // tabB now sees the shared active account
+    expect(tabB.subject()).toBe(tabA.subject());
   });
 
   it('ignores storage events for unrelated keys', async () => {
@@ -127,11 +128,12 @@ describe('DevAuth — onChange', () => {
 });
 
 describe('SessionController — delegates the AuthSession seam', () => {
-  it('forwards memberId / getAccessToken / capabilities / onChange to the backend', async () => {
+  it('forwards auth subject / getAccessToken / capabilities / onChange to the backend', async () => {
     const backend = mk();
     const ctrl = new SessionController(backend);
     const acc = await ctrl.signIn({ label: 'Alice' });
-    expect(ctrl.memberId()).toBe(acc.id);
+    expect(ctrl.subject()).toBe(acc.id);
+    expect(ctrl.memberId).toBeUndefined();
     expect(await ctrl.getAccessToken()).toBe(acc.id);
     expect(ctrl.capabilities()).toEqual({ canRegister: true, canLogin: true, sync: true });
     expect(ctrl.backend).toBe(backend);

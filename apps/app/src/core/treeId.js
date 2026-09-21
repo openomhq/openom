@@ -1,4 +1,4 @@
-// Per-member tree identity — the ONE id, in its two encodings.
+// Per-account selected-tree identity — the ONE id, in its two encodings.
 //
 // The server binds the 16-byte tree id carried INSIDE every signed/sealed payload to the raw
 // bytes of the URL's UUID (openom/src/{trees,log,keyring}.rs). So the sealer's scope id and the
@@ -8,16 +8,17 @@
 //
 // The keyring's own tree binding is the ULTIMATE source of truth (any device that legitimately
 // holds the keyring already knows the tree's id). This localStorage entry is only a cache so the
-// boot/unlock path knows which tree to open BEFORE the keyring is decrypted — it is seeded at
-// provision and is re-derivable from the keyring head.
+// post-account-unlock path knows which keyring to decrypt — it is seeded at provision and is
+// re-derivable from the keyring head. Its key is the durable AccountSession member ID, never the
+// provider-auth subject.
 //
-// The mint is serialized across tabs (navigator.locks): two tabs of one member both seeing "no id
-// yet" at a first provision would otherwise each mint a different id and split the member's one
+// The mint is serialized across tabs (navigator.locks): two tabs of one account both seeing "no id
+// yet" at a first provision would otherwise each mint a different id and split the account's one
 // tree across two server rows (cas_create accepts both — nothing reconciles them afterwards).
 
 import { treeIdToUuid } from './keyringPublish.js';
 
-const key = (memberId) => `openom.tree.${memberId}`;
+const key = (accountMemberId) => `openom.tree.${accountMemberId}`;
 
 function defaultStorage() {
   try {
@@ -37,9 +38,9 @@ const b64 = {
   dec: (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)),
 };
 
-function read(storage, memberId) {
+function read(storage, accountMemberId) {
   try {
-    const raw = storage.getItem(key(memberId));
+    const raw = storage.getItem(key(accountMemberId));
     if (!raw) return null;
     const { seam, uuid } = JSON.parse(raw);
     const bytes = b64.dec(seam);
@@ -50,72 +51,72 @@ function read(storage, memberId) {
   }
 }
 
-function write(storage, memberId, bytes, uuid) {
+function write(storage, accountMemberId, bytes, uuid) {
   try {
-    storage.setItem(key(memberId), JSON.stringify({ seam: b64.enc(bytes), uuid }));
+    storage.setItem(key(accountMemberId), JSON.stringify({ seam: b64.enc(bytes), uuid }));
   } catch {
     /* best effort — the caller still holds the freshly-minted identity for this session */
   }
 }
 
 /**
- * The member's already-minted tree identity, or null if none exists yet (not provisioned).
- * Synchronous — the boot/unlock path uses it to decide the gate before any lock is taken.
+ * The account's already-minted selected-tree identity, or null if none exists yet (not provisioned).
+ * Synchronous — called only after account unlock has supplied the durable member ID.
  * @returns {{ bytes: Uint8Array, uuid: string } | null}
  */
-export function readTreeIdentity(memberId, { storage = defaultStorage() } = {}) {
-  if (!memberId) return null;
-  return read(storage, memberId);
+export function readTreeIdentity(accountMemberId, { storage = defaultStorage() } = {}) {
+  if (!accountMemberId) return null;
+  return read(storage, accountMemberId);
 }
 
 /**
- * Mint-or-read the member's tree identity, serialized across tabs so concurrent first-provisions
+ * Mint-or-read the account's tree identity, serialized across tabs so concurrent first-provisions
  * converge on ONE identity. Call at provision; `readTreeIdentity` suffices at unlock.
  * @returns {Promise<{ bytes: Uint8Array, uuid: string }>}
  */
 export async function ensureTreeIdentity(
-  memberId,
+  accountMemberId,
   {
     storage = defaultStorage(),
     makeBytes = () => crypto.getRandomValues(new Uint8Array(16)),
     locks = typeof navigator !== 'undefined' ? navigator.locks : null,
   } = {},
 ) {
-  if (!memberId) throw new Error('ensureTreeIdentity needs a memberId');
-  const existing = read(storage, memberId);
+  if (!accountMemberId) throw new Error('ensureTreeIdentity needs an account member ID');
+  const existing = read(storage, accountMemberId);
   if (existing) return existing;
 
-  // Mint under a per-member cross-tab lock; re-read inside it so a tab that lost the race adopts
+  // Mint under a per-account cross-tab lock; re-read inside it so a tab that lost the race adopts
   // the winner's id rather than minting a second one.
   const mint = () => {
-    const again = read(storage, memberId);
+    const again = read(storage, accountMemberId);
     if (again) return again;
     const bytes = makeBytes();
     if (bytes.length !== 16) throw new Error('tree seam id must be 16 bytes');
     const uuid = treeIdToUuid(bytes);
-    write(storage, memberId, bytes, uuid);
+    write(storage, accountMemberId, bytes, uuid);
     return { bytes, uuid };
   };
-  if (locks?.request) return locks.request(`openom.tree.mint.${memberId}`, mint);
+  if (locks?.request) return locks.request(`openom.tree.mint.${accountMemberId}`, mint);
   return mint(); // no navigator.locks (tests / older browsers): best-effort, single-tab-safe
 }
 
 /**
- * Seed a member's tree identity from an invite: the invitee ADOPTS the owner's tree id (learned from the
+ * Seed an account's tree identity from an invite: the invitee ADOPTS the owner's tree id (learned from the
  * link) rather than minting a fresh one — without this, `ensureTreeIdentity` would mint a random tree and
- * the member would never sync the owner's. Idempotent; a conflicting existing identity for this member is
- * a bug and is surfaced. (V1 is one active tree per member; the multi-tree registry is separate future work.)
- * @param {string} memberId
+ * account would never sync the owner's. Idempotent; a conflicting existing identity for this account is
+ * a bug and is surfaced. (V1 is one selected tree per account; the multi-tree registry is separate future work.)
+ * @param {string} accountMemberId durable AccountSession member ID
  * @param {{ bytes: Uint8Array, uuid: string }} identity  bytes = uuidToTreeId(uuid) — the 16 seam bytes
  * @returns {{ bytes: Uint8Array, uuid: string }}
  */
-export function seedTreeIdentity(memberId, { bytes, uuid }, { storage = defaultStorage() } = {}) {
-  if (!memberId) throw new Error('seedTreeIdentity needs a memberId');
+export function seedTreeIdentity(accountMemberId, { bytes, uuid }, { storage = defaultStorage() } = {}) {
+  if (!accountMemberId) throw new Error('seedTreeIdentity needs an account member ID');
   if (!bytes || bytes.length !== 16 || !uuid) throw new Error('seedTreeIdentity needs { bytes(16 B), uuid }');
-  const existing = read(storage, memberId);
+  const existing = read(storage, accountMemberId);
   if (existing && existing.uuid !== uuid) {
-    throw new Error('seedTreeIdentity: this member already holds a different tree identity');
+    throw new Error('seedTreeIdentity: this account already holds a different tree identity');
   }
-  write(storage, memberId, bytes, uuid);
+  write(storage, accountMemberId, bytes, uuid);
   return { bytes, uuid };
 }

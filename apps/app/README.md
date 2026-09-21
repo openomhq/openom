@@ -59,8 +59,10 @@ claim-model engine (an openom-data-crdt set-union fold + an openom-data-projecti
 the former treelog engine at the claim-model cutover.
 
 The production web path hosts one unlocked durable account inside `appCore.worker.js`; the native path mirrors
-that ownership inside `openom-app-core-host`. The opaque wrapped keystore and generation are persisted once per
-profile (IndexedDB on web, native SQLite under Tauri), while tree keyrings, watermarks, and logs stay
+that ownership inside `openom-app-core-host`. `accountSession.js` is the sole app-level source of cryptographic
+identity (`member_id`); `session.js` is only the provider-auth seam (`sub`/auth subject). The opaque wrapped
+keystore and generation are persisted once per profile (IndexedDB on web, native SQLite under Tauri), while
+tree keyrings, watermarks, and logs stay
 per document. Owned and joined trees both borrow that account handle; joined-tree reopen selects the founder or
 member path from the already-trusted keyring head rather than from a second persisted member credential.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
@@ -80,7 +82,7 @@ src/main.js            wires the store stack, the sealer/vault, the lock policy,
 
 src/core/              orchestration — no UI, no rendering.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
-  accountSession.js       account-backed identity/custody facade; Phase 1 wiring makes it the app identity source.
+  accountSession.js       account-backed identity/custody facade; the sole app-level crypto identity source.
   membership.js, sharing.js   resumable invite/claim orchestration and verified chain/DAG join bootstrap.
   store.js               DocStore contract: opaque-bytes persistence (memory / IndexedDB / Tauri).
   indexedDbStore.js       the browser DocStore implementation.
@@ -104,7 +106,7 @@ src/core/              orchestration — no UI, no rendering.
                            date parsing.
   library.js, seed.js, seedKhaldun.js, schema.js   the bundled demo datasets + custom-field defs.
   identity.js              device id + logical clock, persisted across restarts.
-  session.js               the local-only (no-account) auth stand-in.
+  session.js               provider-auth seam; local DevAuth stands in for the auth provider.
   lockPolicy.js            decides WHEN to auto-lock; platform-agnostic (calls back into the app).
   watermarks.js            anti-rollback: refuses a keyring/snapshot older than one already seen.
   blobs.js                 content-addressed file storage, alongside the document not inside it.

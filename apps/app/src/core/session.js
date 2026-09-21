@@ -1,25 +1,23 @@
-// AuthSession — the ONE seam the app's networking + composition depend on for identity.
+// AuthSession — the ONE seam the app's networking depends on for provider authentication.
 //
 // It is the forward-compat boundary (design.local-accounts-auth §1): everything below it —
-// `RemoteStore`'s bearer, the member id the vault provisions/unlocks under, the composition
-// root's tear-down-on-identity-change — talks to THIS interface and nothing else. Swapping the
+// `RemoteStore`'s bearer and provider subject talk to THIS interface and nothing else. Cryptographic
+// identity belongs to AccountSession; it is never inferred from an auth token. Swapping the
 // auth provider (DevAuth now; SupabaseAuth / ClerkAuth / any OIDC later) is a one-line change at
 // composition; no other client code moves. The wire is identical in every mode
-// (`Authorization: Bearer <token>`, `member_id` = the token's `sub`); only the token's
-// provenance differs, and it is hidden here.
+// (`Authorization: Bearer <token>`); only the token's provenance differs, and it is hidden here.
 //
 //   interface AuthSession {
 //     getAccessToken({ forceRefresh } = {}): Promise<string>  // the Bearer value; refresh behind the seam
-//     memberId(): string | null                               // the account UUID == the token's `sub`
+//     subject(): string | null                                // opaque provider subject (`sub`)
 //     signIn(opts): Promise<Account>                          // provider-specific; DevAuth = create a local account
 //     signOut(): Promise<void>
 //     onChange(cb): () => void                                // cb() on identity change; returns an unsubscribe
 //     capabilities(): { canRegister, canLogin, sync }
 //   }
 //
-// INVARIANT (enforced at the composition root, not here): memberId() === the token's `sub` ===
-// the member id passed to the vault's provision/unlock. The server ACL is keyed on the keyring
-// member ids, so a divergence 403s every request. Never generate that id independently of this seam.
+// Auth `sub` says who authenticated a request. AccountSession.memberId() says whose keys signed data.
+// `/register` binds them; client code must never equate or derive one from the other.
 
 const uuidv4 = () =>
   globalThis.crypto?.randomUUID?.() ??
@@ -114,13 +112,13 @@ export class DevAuth {
 
   // ---- the AuthSession seam ----
 
-  memberId() {
+  subject() {
     return this.activeAccount()?.id ?? null;
   }
 
   // eslint-disable-next-line no-unused-vars -- forceRefresh is a no-op for option (A); the seam for option (B).
   async getAccessToken({ forceRefresh = false } = {}) {
-    const id = this.memberId();
+    const id = this.subject();
     if (!id) throw makeError('auth_required', { cause: 'DevAuth: no active account' });
     return this.#tokenFor(id, { forceRefresh });
   }
@@ -203,7 +201,7 @@ export class DevAuth {
  *
  * Shape only (uncomment + `npm i @supabase/supabase-js` when wiring):
  *   getAccessToken() → session.access_token  (supabase-js refreshes under the hood; forceRefresh → refreshSession())
- *   memberId()       → session.user.id       (the token's `sub`)
+ *   subject()        → session.user.id       (the token's `sub`)
  *   signIn/out       → client.auth.signInWithPassword / signOut
  *   onChange         → client.auth.onAuthStateChange
  */
@@ -227,7 +225,7 @@ export class SupabaseAuth {
     return token;
   }
 
-  memberId() {
+  subject() {
     return this.#session?.user?.id ?? null;
   }
 
@@ -265,8 +263,8 @@ export class SessionController {
   getAccessToken(opts) {
     return this.#auth.getAccessToken(opts);
   }
-  memberId() {
-    return this.#auth.memberId();
+  subject() {
+    return this.#auth.subject();
   }
   signIn(opts) {
     return this.#auth.signIn(opts);
