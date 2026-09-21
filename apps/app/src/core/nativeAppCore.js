@@ -169,6 +169,8 @@ export function createNativeAppCore() {
 
     accountCreate: (passphrase) => call('account_create', { passphrase }),
     accountUnlock: (passphrase) => call('account_unlock', { passphrase }),
+    accountStatus: () => call('account_status'),
+    accountLock: () => call('account_lock'),
     accountRecover: ({ recoveryCode, newPassphrase }) =>
       call('account_recover', { recoveryCode, newPassphrase }),
     async accountChangePassphrase({ current, next }) {

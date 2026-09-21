@@ -411,7 +411,9 @@
 
         const member = spawnWorker(profile);
         await member.warm();
+        const initialAccountStatus = await member.accountStatus();
         const account = await member.accountCreate(oldPass);
+        const createdAccountStatus = await member.accountStatus();
         const first = await member.provisionCore({
           passphrase: oldPass, treeId: firstTree, memberId: 'ignored', docId: firstDoc, engine,
         });
@@ -460,9 +462,8 @@
         );
 
         await member.accountChangePassphrase({ current: oldPass, next: newPass });
-        await member.close(firstDoc);
-        await member.close(secondDoc);
-        await member.close(joinedDoc);
+        await member.accountLock();
+        const lockedAccountStatus = await member.accountStatus();
 
         let oldPassRejected = false;
         try {
@@ -488,6 +489,7 @@
           oldPassRejected,
           registrationProofLength: registrationProof.length,
           rotatedRecoveryCodeLength: rotated.recoveryCode.length,
+          accountStatuses: [initialAccountStatus, createdAccountStatus, lockedAccountStatus],
         };
       },
 

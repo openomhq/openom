@@ -600,6 +600,23 @@ const api = {
     }
   },
 
+  /** Report profile account custody without exposing wrapped or secret material. */
+  async accountStatus() {
+    await ensureInit();
+    if (account) return 'unlocked';
+    return await loadAccount() ? 'locked' : 'none';
+  },
+
+  /** Drop every live tree and the resident account while retaining their encrypted persistence. */
+  async accountLock() {
+    await ensureInit();
+    for (const docId of [...cores.keys()]) await api.close(docId);
+    if (account) {
+      try { account.free(); } catch { /* already freed */ }
+      account = null;
+    }
+  },
+
   /** Recover the persisted account, rotating its recovery code and authenticated generation. */
   async accountRecover({ recoveryCode, newPassphrase }) {
     await ensureInit();

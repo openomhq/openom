@@ -7,7 +7,7 @@
 design doc of its own (wires `openom-vault-host`'s vault lifecycle + `journal`'s doc store to
 Tauri)
 
-**Last updated:** 2026-08-25
+**Last updated:** 2026-09-22
 
 ## Run / verify
 
@@ -51,6 +51,8 @@ cores. The custody boundary is the reason this crate exists as a distinct native
 tree DEKs remain inside Rust and **never cross the `invoke` boundary into the webview**. `vault.sqlite` stores
 one generation-stamped wrapped account plus per-tree keyrings/watermarks, separately from each tree's local
 blob directory so restoring tree data cannot silently roll back the custody floor.
+The `account_status` command reports `none` / `locked` / `unlocked`; `account_lock` drops all live trees and
+the resident account without deleting encrypted persistence.
 
 It is **not** where the logic or the tests live. Every `#[command]` here is a thin wrapper: it
 (de)serializes arguments, runs account create/unlock/recover/passphrase changes as `async` + `spawn_blocking`

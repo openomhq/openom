@@ -2,6 +2,8 @@
 
 The native Rust host for the application core. It owns one unlocked profile account, all live tree cores, and
 the filesystem-backed local stores used by the Tauri shell; account and tree secrets never enter the webview.
+It reports explicit `none` / `locked` / `unlocked` account custody and locks by dropping every live tree core
+plus the resident account while retaining encrypted persistence.
 
 ## What it is — and is not
 
@@ -16,6 +18,7 @@ client, and it does not persist invite-handshake resume state.
 |---|---|---|---|
 | **APP-HOST-1** | One resident account identity can own multiple trees; changing its passphrase once preserves every tree identity on both engines. | Account credentials wrap the profile root, not individual tree DEKs. | `tests::one_native_account_owns_multiple_trees_and_changes_its_passphrase_once` |
 | **APP-HOST-2** | Joined-tree reopen derives founder/member dispatch from verified keyring membership and uses the same profile account on chain and DAG. | A stored per-tree credential must not choose or authorize the reopen path. | `tests::a_member_joins_on_a_second_host_writes_and_converges_with_the_owner`, `tests::a_member_joins_a_dag_tree_by_anchor_and_converges_with_the_owner` |
+| **APP-HOST-3** | Account lock drops all resident account and tree secrets without deleting their encrypted persistence. | A locked session must not retain usable keys or destroy the data needed to unlock again. | `tests::account_status_and_lock_follow_native_custody` |
 
 ## Position
 

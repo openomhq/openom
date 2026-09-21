@@ -147,6 +147,7 @@ for (const engine of ['chain', 'dag'] as const) {
     expect(new Set(result.memberIds).size, 'owned and joined identity stays profile-stable').toBe(1);
     expect(result.registrationProofLength, 'registration proof is signed inside the worker').toBe(64);
     expect(result.rotatedRecoveryCodeLength, 'root rotation returns a replacement recovery code').toBeGreaterThan(20);
+    expect(result.accountStatuses, 'custody reports create and lock transitions').toEqual(['none', 'unlocked', 'locked']);
     expect(result.oldPassRejected, 'the old profile passphrase is revoked').toBe(true);
     expect(result.joinedDid, 'the account joined the shared tree').toBeTruthy();
     expect(result.reopenedDids.every((did: string) => did.length > 0), 'all trees reopen').toBe(true);

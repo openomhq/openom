@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AccountChanged, AccountIdentity, AccountOpened, AddedMember, AppCoreHost, BlobData, BlobMeta,
-    InviteMaterial, KeyringRevisionPayload, MemberToAdd, MemberUnlocked, Provisioned,
-    RemovedMember, RoleChanged, SyncOut, Unlocked,
+    AccountChanged, AccountIdentity, AccountOpened, AccountStatus, AddedMember, AppCoreHost,
+    BlobData, BlobMeta, InviteMaterial, KeyringRevisionPayload, MemberToAdd, MemberUnlocked,
+    Provisioned, RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -109,6 +109,16 @@ async fn account_unlock(
     })
     .await
     .map_err(join_err)?
+}
+
+#[tauri::command]
+fn account_status(state: State<'_, Host>) -> Result<AccountStatus, String> {
+    state.account_status().map_err(e)
+}
+
+#[tauri::command]
+fn account_lock(state: State<'_, Host>) {
+    state.account_lock();
 }
 
 #[tauri::command]
@@ -718,6 +728,8 @@ pub fn run() {
             core_has_keyring,
             account_create,
             account_unlock,
+            account_status,
+            account_lock,
             account_recover,
             account_change_passphrase,
             account_rotate_root,

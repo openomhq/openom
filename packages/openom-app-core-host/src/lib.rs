@@ -111,6 +111,15 @@ pub struct AccountOpened {
     pub generation: u64,
 }
 
+/// Observable custody state for the profile account. Public identity is available only while unlocked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountStatus {
+    None,
+    Locked,
+    Unlocked,
+}
+
 /// Public admission identity for the resident profile account.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -345,6 +354,42 @@ impl<St: VaultStore> AppCoreHost<St> {
             keystore: AccountKeystore::new(keystore),
             generation: AccountGeneration::new(generation),
         }
+    }
+
+    /// Report whether this profile has no account, a persisted locked account, or a resident unlocked account.
+    ///
+    /// # Errors
+    /// Returns [`HostError::Store`] when persisted account custody cannot be read.
+    pub fn account_status(&self) -> Result<AccountStatus, HostError> {
+        if self
+            .account
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(AccountStatus::Unlocked);
+        }
+        Ok(
+            if self
+                .store
+                .load_account()
+                .map_err(HostError::Store)?
+                .is_some()
+            {
+                AccountStatus::Locked
+            } else {
+                AccountStatus::None
+            },
+        )
+    }
+
+    /// Drop every live tree core and the resident profile account. Persisted ciphertext remains untouched.
+    pub fn account_lock(&self) {
+        self.lock_cores().clear();
+        *self
+            .account
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Create and persist the profile account, leaving its secrets resident for tree operations.
@@ -2121,7 +2166,7 @@ impl<St: VaultStore> AppCoreHost<St> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountRecord, AppCoreHost, HostError, TreeId, VaultStore};
+    use super::{AccountRecord, AccountStatus, AppCoreHost, HostError, TreeId, VaultStore};
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::EngineKind;
     use std::collections::HashMap;
@@ -2255,6 +2300,28 @@ mod tests {
     }
 
     const PERSON: &str = "openom.org/core/person/v1";
+
+    #[test]
+    fn account_status_and_lock_follow_native_custody() {
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let passphrase = Passphrase::new(b"profile passphrase".to_vec());
+
+        assert_eq!(host.account_status().unwrap(), AccountStatus::None);
+        host.account_create(&passphrase).unwrap();
+        assert_eq!(host.account_status().unwrap(), AccountStatus::Unlocked);
+
+        let tree_id = TreeId::new([29; 16]);
+        host.provision_tree("tree", &tree_id).unwrap();
+        host.account_lock();
+        assert!(host.core("tree").is_none());
+        assert_eq!(host.account_status().unwrap(), AccountStatus::Locked);
+
+        host.account_unlock(&passphrase).unwrap();
+        assert_eq!(host.account_status().unwrap(), AccountStatus::Unlocked);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn one_native_account_owns_multiple_trees_and_changes_its_passphrase_once() {

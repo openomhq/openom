@@ -7,7 +7,7 @@
 (the module-level `§`-refs — SERVER-DATA-FORMAT, the launch-gate design — live inline in the
 `core/` files they govern, not in one apps/app-level doc)
 
-**Last updated:** 2026-09-21
+**Last updated:** 2026-09-22
 
 ## Run / verify
 
@@ -80,6 +80,7 @@ src/main.js            wires the store stack, the sealer/vault, the lock policy,
 
 src/core/              orchestration — no UI, no rendering.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
+  accountSession.js       account-backed identity/custody facade; Phase 1 wiring makes it the app identity source.
   membership.js, sharing.js   resumable invite/claim orchestration and verified chain/DAG join bootstrap.
   store.js               DocStore contract: opaque-bytes persistence (memory / IndexedDB / Tauri).
   indexedDbStore.js       the browser DocStore implementation.
