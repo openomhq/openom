@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 
 /// How recent a member's frontier report must be to constrain gate 2 (§2.9 proposed 30d).

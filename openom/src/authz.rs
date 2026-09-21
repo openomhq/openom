@@ -10,7 +10,7 @@
 
 use uuid::Uuid;
 
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 
 // The capability→role policy is domain logic shared with the client (verify_entry enforces the same
 // mapping): it lives in `openom-roles`. This module keeps only the server-side ACL query.

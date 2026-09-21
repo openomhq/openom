@@ -22,7 +22,7 @@ export const ERROR_CODES = Object.freeze({
   email_taken: Object.freeze({ domain: 'auth', title: 'Email already registered', retriable: false, action: null, args: Object.freeze([]) }),
   recipient_pin_mismatch: Object.freeze({ domain: 'auth', title: 'This invite is for a different email', retriable: false, action: 'reauth', args: Object.freeze([]) }),
   unregistered: Object.freeze({ domain: 'auth', title: 'Account not registered', retriable: false, action: 'reauth', args: Object.freeze([]) }),
-  stale_timestamp: Object.freeze({ domain: 'auth', title: 'Registration timestamp out of window', retriable: false, action: null, args: Object.freeze([]) }),
+  stale_timestamp: Object.freeze({ domain: 'auth', title: 'Registration timestamp out of window', retriable: false, action: null, args: Object.freeze([{ name: 'server_time', type: 'u64' }]) }),
   bad_signature: Object.freeze({ domain: 'auth', title: 'Registration proof invalid', retriable: false, action: 'contact', args: Object.freeze([]) }),
   member_id_mismatch: Object.freeze({ domain: 'auth', title: 'Member id not self-certifying', retriable: false, action: 'contact', args: Object.freeze([]) }),
   identity_conflict: Object.freeze({ domain: 'auth', title: 'Identity already bound', retriable: false, action: null, args: Object.freeze([]) }),

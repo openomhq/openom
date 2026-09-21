@@ -48,7 +48,9 @@ function validate(reg) {
       fail(`code "${code}" is permanent but action is 'retry' (E4 coherence)`);
     }
     for (const a of m.args ?? []) {
-      if (!/^[a-z][a-zA-Z0-9]*$/.test(a.name)) fail(`code "${code}" arg "${a.name}" must be lowerCamel/snake`);
+      if (!/^[a-z][a-zA-Z0-9]*(?:_[a-z0-9]+)*$/.test(a.name)) {
+        fail(`code "${code}" arg "${a.name}" must be lowerCamel/snake`);
+      }
       if (!ARG_TYPES[a.type]) fail(`code "${code}" arg "${a.name}" has non-allowed type "${a.type}" (counts/limits/seconds/enums only)`);
     }
   }

@@ -15,6 +15,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -25,17 +26,16 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::auth::{Identity, RawJwt};
+use crate::error_codes as ec;
 use crate::AppState;
 
-/// The domain tag every `/register` proof-of-possession is prefixed with. A FROZEN constant: the client's
-/// signer must prepend exactly these bytes, so the author key's signature can never be confused with a
-/// keyring/attribution signature under the same key (cross-protocol separation). Never a bare concat.
 /// The replay window for the signed timestamp: ±5 minutes. Wide enough for clock skew + a slow request,
 /// narrow enough that a captured proof is useless minutes later. There is no nonce (stateless Lambda), and a
 /// replayed *successful* bind is an idempotent no-op anyway — the window only bounds a bind to a NEW
 /// (unregistered) `member_id`, which a replay can't create because the id is self-certifying.
-const REGISTER_TS_WINDOW_SECS: i64 = 300;
+const REGISTER_TS_WINDOW_SECS: u64 = 300;
 
 /// The exact bytes the client's author key signs for `POST /register` — the single source of truth shared by
 /// the server (verify) and any client/JS signer (produce). **Domain-tagged + length-framed**, never a bare
@@ -65,11 +65,14 @@ fn now_unix() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// A `{ "error": "<code>" }` body at `status`. The register/keystore codes are server-local (they are not in
-/// the generated client error registry yet — that is the T3 client-seam follow-up); the wire is a plain JSON
-/// object so a client can branch on the code without RFC-9457 machinery.
-fn err(status: StatusCode, code: &str) -> Response {
-    (status, Json(json!({ "error": code }))).into_response()
+fn invalid_json(rejection: &JsonRejection) -> ApiError {
+    ApiError::coded(rejection.status(), ec::INVALID_REQUEST, "invalid JSON request")
+}
+
+// A value-to-value conversion used as a `.map_err(fn)` argument.
+#[allow(clippy::needless_pass_by_value)]
+fn internal(error: sqlx::Error) -> ApiError {
+    ApiError::Internal(error.to_string())
 }
 
 fn b64_decode(s: &str) -> Option<Vec<u8>> {
@@ -97,30 +100,50 @@ pub struct RegisterBody {
 /// # Errors
 /// `400 invalid_request` (bad body / key / signature length), `401 stale_timestamp`, `400 member_id_mismatch`
 /// (id not self-certifying), `401 bad_signature`, `409 identity_conflict` (this `sub` — or this `member_id` —
-/// is already bound differently), `500 internal`.
+/// is already bound differently), `500 unavailable`. Every failure uses the shared RFC 9457 problem-details
+/// contract and a code from [`crate::error_codes`].
 pub async fn register(
     State(state): State<AppState>,
     raw: RawJwt,
-    Json(body): Json<RegisterBody>,
-) -> Response {
+    body: Result<Json<RegisterBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|rejection| invalid_json(&rejection))?;
     // (1) decode + length-check the key material.
     let Some(pubkey) = b64_decode(&body.author_pubkey).filter(|b| b.len() == 32) else {
-        return err(StatusCode::BAD_REQUEST, "invalid_request");
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            ec::INVALID_REQUEST,
+            "registration key is not valid base64 Ed25519 material",
+        ));
     };
     let Some(sig_bytes) = b64_decode(&body.signature).filter(|b| b.len() == 64) else {
-        return err(StatusCode::BAD_REQUEST, "invalid_request");
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            ec::INVALID_REQUEST,
+            "registration signature is not valid base64 Ed25519 material",
+        ));
     };
 
     // (2) replay window — a captured PoP is useless outside ±5 min.
-    if (now_unix() - body.ts).abs() > REGISTER_TS_WINDOW_SECS {
-        return err(StatusCode::UNAUTHORIZED, "stale_timestamp");
+    let server_time = now_unix();
+    if server_time.abs_diff(body.ts) > REGISTER_TS_WINDOW_SECS {
+        return Err(ApiError::coded_with_args(
+            StatusCode::UNAUTHORIZED,
+            ec::STALE_TIMESTAMP,
+            "registration timestamp is outside the accepted window",
+            json!({ "server_time": u64::try_from(server_time).unwrap_or_default() }),
+        ));
     }
 
     // (3) self-certifying: the id MUST be the hash of the presented key, so a squatter can't bind an id they
     // don't hold the key for (and can't diverge the two).
     let derived = derive_member_id(&pubkey);
     if Uuid::parse_str(&derived) != Ok(body.member_id) {
-        return err(StatusCode::BAD_REQUEST, "member_id_mismatch");
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            ec::MEMBER_ID_MISMATCH,
+            "member id does not derive from the supplied author key",
+        ));
     }
 
     // (4) proof-of-possession: the author key signed THIS (iss, sub, member_id, ts) — domain-tagged + framed.
@@ -129,14 +152,26 @@ pub async fn register(
         <[u8; 32]>::try_from(pubkey.as_slice()),
         <[u8; 64]>::try_from(sig_bytes.as_slice()),
     ) else {
-        return err(StatusCode::BAD_REQUEST, "invalid_request");
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            ec::INVALID_REQUEST,
+            "registration key material has an invalid length",
+        ));
     };
     let Ok(vk) = edsign::VerifyingKey::from_bytes(&pubkey_arr) else {
-        return err(StatusCode::BAD_REQUEST, "invalid_request"); // not a valid curve point
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            ec::INVALID_REQUEST,
+            "registration key is not a valid Ed25519 point",
+        ));
     };
     let msg = register_signing_bytes(raw.iss.as_deref().unwrap_or(""), &raw.sub, body.member_id, body.ts);
     if vk.verify(&msg, &edsign::Signature::from_bytes(&sig_arr)).is_err() {
-        return err(StatusCode::UNAUTHORIZED, "bad_signature");
+        return Err(ApiError::coded(
+            StatusCode::UNAUTHORIZED,
+            ec::BAD_SIGNATURE,
+            "registration proof signature is invalid",
+        ));
     }
 
     // (5) insert-then-reread. The speculative free-tier `accounts` row is rolled back if the `identities`
@@ -146,16 +181,16 @@ pub async fn register(
             // Positive-cache the immutable mapping so the caller's very next request skips the DB.
             state.identity_cache.write().await.insert(raw.sub.clone(), body.member_id);
             tracing::info!(event = "identity_registered", sub = %raw.sub, member = %body.member_id);
-            (StatusCode::OK, Json(json!({ "member_id": body.member_id }))).into_response()
+            Ok((StatusCode::OK, Json(json!({ "member_id": body.member_id }))).into_response())
         }
         Ok(BindOutcome::Conflict) => {
             tracing::info!(event = "identity_conflict", sub = %raw.sub, member = %body.member_id);
-            err(StatusCode::CONFLICT, "identity_conflict")
+            Err(ApiError::conflict(
+                ec::IDENTITY_CONFLICT,
+                "subject or member id is already bound differently",
+            ))
         }
-        Err(e) => {
-            tracing::warn!(%e, "register bind failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "internal")
-        }
+        Err(error) => Err(ApiError::Internal(error.to_string())),
     }
 }
 
@@ -215,29 +250,23 @@ async fn bind_identity(
 /// `GET /me` — the caller's `member_id`, their stored E2E keystore backup (if any), and its generation.
 ///
 /// # Errors
-/// `500 internal` on a DB failure.
-pub async fn me(State(state): State<AppState>, id: Identity) -> Response {
+/// `500 unavailable` on a DB failure.
+pub async fn me(State(state): State<AppState>, id: Identity) -> Result<Response, ApiError> {
     let row: Option<(Option<Vec<u8>>, i64)> =
-        match sqlx::query_as("SELECT keystore, generation FROM identities WHERE member_id = $1")
+        sqlx::query_as("SELECT keystore, generation FROM identities WHERE member_id = $1")
             .bind(id.member_id)
             .fetch_optional(&state.db)
             .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(%e, "GET /me read failed");
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-            }
-        };
+            .map_err(internal)?;
     // A dev-auth caller (or a jwt caller resolved via a mapping but with no backup yet) has no keystore row:
     // report member_id with a null backup + generation 0.
     let (keystore, generation) = row.unwrap_or((None, 0));
-    Json(json!({
+    Ok(Json(json!({
         "member_id": id.member_id,
         "keystore": keystore.as_deref().map(b64_encode),
         "generation": generation,
     }))
-    .into_response()
+    .into_response())
 }
 
 /// `PUT /account/keystore` body: the E2E-wrapped keystore blob (base64) + its monotonic generation.
@@ -259,17 +288,22 @@ pub struct KeystoreBody {
 ///
 /// # Errors
 /// `400 invalid_request`, `403 unregistered` (no `identities` row — dev auth, or a `member_id` that never
-/// registered a backup target), `409 generation_rollback`, `500 internal`.
+/// registered a backup target), `409 generation_rollback`, `500 unavailable`.
 pub async fn put_keystore(
     State(state): State<AppState>,
     id: Identity,
-    Json(body): Json<KeystoreBody>,
-) -> Response {
+    body: Result<Json<KeystoreBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|rejection| invalid_json(&rejection))?;
     let Some(blob) = b64_decode(&body.keystore) else {
-        return err(StatusCode::BAD_REQUEST, "invalid_request");
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            ec::INVALID_REQUEST,
+            "keystore is not valid base64",
+        ));
     };
     // Conditional on the floor: only advance when the incoming generation is >= the stored one.
-    let updated = match sqlx::query(
+    let updated = sqlx::query(
         "UPDATE identities SET keystore = $1, generation = $2, updated_at = now()
          WHERE member_id = $3 AND generation <= $2",
     )
@@ -278,51 +312,49 @@ pub async fn put_keystore(
     .bind(id.member_id)
     .execute(&state.db)
     .await
-    {
-        Ok(r) => r.rows_affected(),
-        Err(e) => {
-            tracing::warn!(%e, "keystore PUT failed");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-        }
-    };
+    .map_err(internal)?
+    .rows_affected();
     if updated == 1 {
-        return Json(json!({ "generation": body.generation })).into_response();
+        return Ok(Json(json!({ "generation": body.generation })).into_response());
     }
     // 0 rows: either no identities row (unregistered) or the floor rejected a rollback. Disambiguate.
     let stored: Option<i64> = sqlx::query_scalar("SELECT generation FROM identities WHERE member_id = $1")
         .bind(id.member_id)
         .fetch_optional(&state.db)
         .await
-        .unwrap_or(None);
+        .map_err(internal)?;
     match stored {
-        Some(_) => err(StatusCode::CONFLICT, "generation_rollback"),
-        None => err(StatusCode::FORBIDDEN, "unregistered"),
+        Some(_) => Err(ApiError::conflict(
+            ec::GENERATION_ROLLBACK,
+            "keystore generation is below the server floor",
+        )),
+        None => Err(ApiError::forbidden(
+            ec::UNREGISTERED,
+            "account identity is not registered",
+        )),
     }
 }
 
 /// `GET /account/keystore` — the stored E2E keystore backup + its generation.
 ///
 /// # Errors
-/// `403 unregistered` (no `identities` row), `500 internal`.
-pub async fn get_keystore(State(state): State<AppState>, id: Identity) -> Response {
+/// `403 unregistered` (no `identities` row), `500 unavailable`.
+pub async fn get_keystore(State(state): State<AppState>, id: Identity) -> Result<Response, ApiError> {
     let row: Option<(Option<Vec<u8>>, i64)> =
-        match sqlx::query_as("SELECT keystore, generation FROM identities WHERE member_id = $1")
+        sqlx::query_as("SELECT keystore, generation FROM identities WHERE member_id = $1")
             .bind(id.member_id)
             .fetch_optional(&state.db)
             .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(%e, "keystore GET failed");
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-            }
-        };
+            .map_err(internal)?;
     match row {
-        Some((keystore, generation)) => Json(json!({
+        Some((keystore, generation)) => Ok(Json(json!({
             "keystore": keystore.as_deref().map(b64_encode),
             "generation": generation,
         }))
-        .into_response(),
-        None => err(StatusCode::FORBIDDEN, "unregistered"),
+        .into_response()),
+        None => Err(ApiError::forbidden(
+            ec::UNREGISTERED,
+            "account identity is not registered",
+        )),
     }
 }

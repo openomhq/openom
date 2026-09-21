@@ -6,6 +6,7 @@
 //! binary ([`main`](../main.rs)) is a thin shell: tracing + serve/Lambda selection.
 
 pub mod access;
+pub mod api_error;
 pub mod account;
 pub mod auth;
 pub mod authz;

@@ -63,6 +63,30 @@ async fn send(app: &Router, req: Request<Body>) -> (StatusCode, HeaderMap, Vec<u
     (status, headers, body)
 }
 
+fn assert_problem(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+    expected_status: StatusCode,
+    expected_code: &str,
+) -> Value {
+    assert_eq!(status, expected_status);
+    assert_eq!(
+        headers.get("content-type").and_then(|value| value.to_str().ok()),
+        Some("application/problem+json")
+    );
+    assert!(
+        openom::error_codes::ERROR_CODES
+            .iter()
+            .any(|metadata| metadata.code == expected_code),
+        "{expected_code} must exist in the generated error registry"
+    );
+    let problem: Value = serde_json::from_slice(body).expect("problem body must be JSON");
+    assert_eq!(problem["status"], expected_status.as_u16());
+    assert_eq!(problem["code"], expected_code);
+    problem
+}
+
 fn b64(bytes: impl AsRef<[u8]>) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -3290,9 +3314,37 @@ async fn register_rejects_a_stale_timestamp() {
 
     // ts an hour in the past -> outside the +/-5 min window (replay protection with no server state).
     let stale = register_body(&sub, &sk, member_id, now_secs() - 3600);
-    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &stale)).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
-    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "stale_timestamp");
+    let (status, headers, body) = send(&app, post_json_jwt("/v1/register", &token, &stale)).await;
+    let problem = assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::UNAUTHORIZED,
+        openom::error_codes::STALE_TIMESTAMP,
+    );
+    assert!(problem["args"]["server_time"].as_u64().is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn register_rejects_invalid_key_material_as_a_registered_problem() {
+    let app = jwt_router().await;
+    let sub = Uuid::new_v4().to_string();
+    let token = hs_jwt(&sub);
+    let body = serde_json::json!({
+        "member_id": Uuid::new_v4(),
+        "author_pubkey": "not-base64",
+        "signature": "not-base64",
+        "ts": now_secs(),
+    });
+    let (status, headers, body) = send(&app, post_json_jwt("/v1/register", &token, &body)).await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::BAD_REQUEST,
+        openom::error_codes::INVALID_REQUEST,
+    );
 }
 
 #[tokio::test]
@@ -3306,9 +3358,14 @@ async fn register_rejects_a_member_id_that_is_not_the_key_hash() {
     // Claim a member_id that is NOT derive(pubkey) - even with an otherwise-valid PoP over it, the
     // self-certifying check refuses (a squatter can't bind an id whose key they don't hold).
     let forged = Uuid::new_v4();
-    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, forged, now_secs()))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "member_id_mismatch");
+    let (status, headers, body) = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, forged, now_secs()))).await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::BAD_REQUEST,
+        openom::error_codes::MEMBER_ID_MISMATCH,
+    );
 }
 
 #[tokio::test]
@@ -3335,9 +3392,14 @@ async fn register_rejects_a_bare_concat_pop() {
         "signature": b64(sig.to_bytes()),
         "ts": ts,
     });
-    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &body)).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
-    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "bad_signature");
+    let (status, headers, body) = send(&app, post_json_jwt("/v1/register", &token, &body)).await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::UNAUTHORIZED,
+        openom::error_codes::BAD_SIGNATURE,
+    );
 }
 
 #[tokio::test]
@@ -3373,9 +3435,14 @@ async fn register_conflicts_when_another_sub_claims_the_same_member_id() {
     // -> the squat gate (member_id UNIQUE) refuses with 409, no orphan account left behind.
     let sub2 = Uuid::new_v4().to_string();
     let t2 = hs_jwt(&sub2);
-    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &t2, &register_body(&sub2, &sk, member_id, now_secs()))).await;
-    assert_eq!(s, StatusCode::CONFLICT);
-    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "identity_conflict");
+    let (status, headers, body) = send(&app, post_json_jwt("/v1/register", &t2, &register_body(&sub2, &sk, member_id, now_secs()))).await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::CONFLICT,
+        openom::error_codes::IDENTITY_CONFLICT,
+    );
 }
 
 #[tokio::test]
@@ -3386,12 +3453,52 @@ async fn identity_extractor_403s_an_unregistered_sub_distinctly_from_a_bad_token
     // A valid token whose sub was never registered: the signature is fine (not a 401) but there is no
     // mapping -> a DISTINCT 403 "unregistered", the fail-closed shape the client branches on.
     let unregistered = hs_jwt(&Uuid::new_v4().to_string());
-    let (s, _, _) = send(&app, get_jwt("/v1/whoami", &unregistered)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "unregistered sub is fail-closed 403, not 401");
+    let (status, headers, body) = send(&app, get_jwt("/v1/me", &unregistered)).await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::FORBIDDEN,
+        openom::error_codes::UNREGISTERED,
+    );
+
+    // The same shared Identity extractor protects tree routes, so they expose exactly the same contract.
+    let tree = Uuid::new_v4();
+    let (status, headers, body) = send(
+        &app,
+        post_json_jwt(&format!("/v1/trees/{tree}"), &unregistered, &serde_json::json!({})),
+    )
+    .await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::FORBIDDEN,
+        openom::error_codes::UNREGISTERED,
+    );
 
     // A garbage token (bad signature) is a 401 - the two failure modes stay distinct.
-    let (s, _, _) = send(&app, get_jwt("/v1/whoami", "not-a-jwt")).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "bad token is 401");
+    let (status, headers, body) = send(&app, get_jwt("/v1/whoami", "not-a-jwt")).await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::UNAUTHORIZED,
+        openom::error_codes::AUTH_REQUIRED,
+    );
+
+    let (status, headers, body) = send(
+        &app,
+        Request::builder().uri("/v1/whoami").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::UNAUTHORIZED,
+        openom::error_codes::AUTH_REQUIRED,
+    );
 
     // After registering, the same sub resolves and a tree create (Identity-guarded) succeeds as the owner.
     let sub = Uuid::new_v4().to_string();
@@ -3438,9 +3545,14 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
 
     // A rollback PUT (gen 1, below the stored 2) is refused - the load-bearing anti-rollback (a stale blob
     // can't re-arm a revoked recovery code).
-    let (s, _, body) = send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await;
-    assert_eq!(s, StatusCode::CONFLICT);
-    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "generation_rollback");
+    let (status, headers, body) = send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::CONFLICT,
+        openom::error_codes::GENERATION_ROLLBACK,
+    );
 
     // The stored blob is unchanged (still B @ gen 2); an equal-generation re-PUT is allowed (idempotent).
     let (_, _, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;

@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 
 /// Who a charge is attributed to: the `account` that pays (the tree owner, owner-pays §17), the `tree`, and
 /// the `member` who drove the op.

@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::authz::Access;
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 
 /// Keyrings are small (a handful of members/epochs). A hard ceiling stops a hostile client forcing

@@ -25,7 +25,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::Identity;
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 
 // A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.

@@ -19,7 +19,17 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{request::Parts, StatusCode};
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
+use crate::error_codes as ec;
 use crate::AppState;
+
+fn auth_required(detail: &'static str) -> ApiError {
+    ApiError::coded(StatusCode::UNAUTHORIZED, ec::AUTH_REQUIRED, detail)
+}
+
+fn internal(detail: &'static str) -> ApiError {
+    ApiError::Internal(detail.into())
+}
 
 /// The authenticated caller: the account id, plus the provider-VERIFIED email when one is present (OPE-451).
 /// `verified_email` is `Some` only when the JWT carried `email_verified == true` (or, in dev, an explicit
@@ -80,7 +90,7 @@ pub(crate) async fn resolve_member(
 }
 
 impl FromRequestParts<AppState> for Identity {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -97,31 +107,30 @@ impl FromRequestParts<AppState> for Identity {
             // OPE-335: a fresh dev UUID has no `accounts` row, so its first `PUT /trees` would 403
             // (FK + per-owner quota gate). Provision it idempotently here — the one place every
             // dev-authed path passes through — so every dev account works.
-            crate::provision_dev_account(&state.db, id).await.map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "dev account provisioning failed",
-                )
-            })?;
+            crate::provision_dev_account(&state.db, id)
+                .await
+                .map_err(|_| internal("dev account provisioning failed"))?;
             return Ok(Self { member_id: id, verified_email: dev_verified_email(parts) });
         }
 
-        let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-        let verifier = state.jwt_verifier.as_ref().ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "jwt verifier not configured",
-        ))?;
-        let claims = verifier
-            .verify(token)
-            .await
-            .map_err(|msg| (StatusCode::UNAUTHORIZED, msg))?;
+        let token = bearer.ok_or_else(|| auth_required("missing bearer token"))?;
+        let verifier = state
+            .jwt_verifier
+            .as_ref()
+            .ok_or_else(|| internal("jwt verifier not configured"))?;
+        let claims = verifier.verify(token).await.map_err(|message| {
+            tracing::warn!(error = %message, "JWT verification failed");
+            auth_required("bearer token is invalid")
+        })?;
         // OPE-545: map the verified `sub` onto the client's self-certifying member id. A `sub` with no
         // `identities` row is unregistered — fail closed with a DISTINCT 403 (not the 401 a bad signature
         // gets) so the client knows to prompt sign-in/register rather than re-authenticate.
         let member_id = resolve_member(state, &claims.sub)
             .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "identity lookup failed"))?
-            .ok_or((StatusCode::FORBIDDEN, "unregistered"))?;
+            .map_err(|_| internal("identity lookup failed"))?
+            .ok_or_else(|| {
+                ApiError::forbidden(ec::UNREGISTERED, "account identity is not registered")
+            })?;
         Ok(Self { member_id, verified_email: claims.verified_email })
     }
 }
@@ -145,7 +154,7 @@ pub struct RawJwt {
 }
 
 impl FromRequestParts<AppState> for RawJwt {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -163,15 +172,15 @@ impl FromRequestParts<AppState> for RawJwt {
             return Ok(Self { sub, iss: None, verified_email: dev_verified_email(parts) });
         }
 
-        let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-        let verifier = state.jwt_verifier.as_ref().ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "jwt verifier not configured",
-        ))?;
-        let claims = verifier
-            .verify(token)
-            .await
-            .map_err(|msg| (StatusCode::UNAUTHORIZED, msg))?;
+        let token = bearer.ok_or_else(|| auth_required("missing bearer token"))?;
+        let verifier = state
+            .jwt_verifier
+            .as_ref()
+            .ok_or_else(|| internal("jwt verifier not configured"))?;
+        let claims = verifier.verify(token).await.map_err(|message| {
+            tracing::warn!(error = %message, "JWT verification failed");
+            auth_required("bearer token is invalid")
+        })?;
         Ok(Self { sub: claims.sub, iss: claims.iss, verified_email: claims.verified_email })
     }
 }

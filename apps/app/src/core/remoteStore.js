@@ -72,19 +72,6 @@ function statusFallbackCode(status) {
   return 'invalid_request';
 }
 
-/** An ACCOUNT-route error RESPONSE → AppError. The register/keystore handlers return a PLAIN `{ error: code }`
- *  body (not RFC 9457), so read `error` — including the register-only PoP codes (stale_timestamp/bad_signature,
- *  which ride a 401 that is NOT a token problem). Falls back to a status-derived code for a bodyless/infra failure. */
-async function accountAppError(res) {
-  let body = null;
-  try { body = await res.json(); } catch { /* infra / non-JSON body */ }
-  const code = body?.error;
-  if (code && Object.prototype.hasOwnProperty.call(ERROR_CODES, code)) {
-    return makeError(code, { httpStatus: res.status });
-  }
-  return makeError(statusFallbackCode(res.status), { httpStatus: res.status });
-}
-
 export class RemoteStore {
   #baseUrl;
   #fetch;
@@ -636,8 +623,8 @@ export class RemoteStore {
   //
   // ACCOUNT-scoped, not tree-scoped: the durable-identity binding. `/register` maps this session's JWT subject
   // to the client's SELF-CERTIFYING member_id (== uuid8(SHA-256(author_pubkey))); the keystore routes back up the
-  // E2E-wrapped account keystore under a server-enforced monotonic generation floor. These handlers return a
-  // PLAIN { error: code } body (not RFC 9457), so they map through `accountAppError`.
+  // E2E-wrapped account keystore under a server-enforced monotonic generation floor. Account and tree handlers
+  // share the registry-backed RFC 9457 contract, so every failure maps through `httpAppError`.
 
   /**
    * Bind this session's JWT subject to the account's self-certifying member_id (the sole binder). `proof` is the
@@ -664,7 +651,7 @@ export class RemoteStore {
     } catch (e) {
       throw netAppError(e);
     }
-    if (!res.ok) throw await accountAppError(res);
+    if (!res.ok) throw await httpAppError(res);
     const b = await res.json().catch(() => ({}));
     return { memberId: b.member_id ?? memberId };
   }
@@ -681,7 +668,7 @@ export class RemoteStore {
     } catch (e) {
       throw netAppError(e);
     }
-    if (!res.ok) throw await accountAppError(res);
+    if (!res.ok) throw await httpAppError(res);
     const b = await res.json();
     return {
       memberId: b.member_id,
@@ -699,7 +686,7 @@ export class RemoteStore {
     } catch (e) {
       throw netAppError(e);
     }
-    if (!res.ok) throw await accountAppError(res);
+    if (!res.ok) throw await httpAppError(res);
     const b = await res.json();
     return { keystore: b.keystore ? b64decode(b.keystore) : null, generation: b.generation ?? 0 };
   }
@@ -720,7 +707,7 @@ export class RemoteStore {
     } catch (e) {
       throw netAppError(e);
     }
-    if (!res.ok) throw await accountAppError(res);
+    if (!res.ok) throw await httpAppError(res);
     const b = await res.json().catch(() => ({}));
     return { generation: b.generation ?? generation };
   }

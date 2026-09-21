@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::authz::Access;
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 
 /// Absolute per-proposal ceiling regardless of plan — a bundle near this should be a snapshot, not a

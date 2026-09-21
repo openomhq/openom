@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::authz::Access;
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 
 /// Hard caps on a report — a member's own frontier is small (one entry per replica it knows of); these

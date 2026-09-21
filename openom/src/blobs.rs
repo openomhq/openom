@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::auth::Identity;
 use crate::authz::Access;
 use crate::meter::{MeterCtx, WriteAxis};
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 
 /// A `sub` key's segment/length bounds — defensive validation before it ever touches R2 or Neon,

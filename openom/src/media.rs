@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::authz::Access;
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 
 /// Client upload window. Long enough for a large media PUT, short enough that a

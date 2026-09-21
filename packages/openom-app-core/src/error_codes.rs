@@ -101,3 +101,8 @@ pub struct QuotaExceededArgs {
     pub used: u64,
 }
 
+/// Interpolation args for `stale_timestamp`.
+pub struct StaleTimestampArgs {
+    pub server_time: u64,
+}
+

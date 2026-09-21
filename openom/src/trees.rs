@@ -6,11 +6,11 @@
 //! and makes the caller owner. The server never decrypts — it only owns the row.
 
 use axum::extract::{Path, State};
-use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::auth::Identity;
 use crate::AppState;
 
@@ -123,140 +123,4 @@ pub async fn create_tree(
 #[allow(clippy::needless_pass_by_value)]
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
-}
-
-/// Handler error → HTTP status. Internal causes are logged, never leaked.
-pub enum ApiError {
-    Forbidden,
-    NotFound,
-    Conflict,
-    QuotaExceeded,
-    /// Append rate exceeded (abuse gate). Carries a Retry-After hint in seconds. A
-    /// 429 — distinct from `QuotaExceeded`'s 403 — because it's transient: the client
-    /// should back off and retry, not treat it as a plan limit (§17).
-    TooManyRequests(u64),
-    /// The requested log tail is no longer retained — the client must bootstrap from a snapshot.
-    Gone(String),
-    BadRequest(String),
-    /// An RFC 9457-shaped error carrying a typed, machine-readable `code`
-    /// (`plan/sync/design.http-error-model.md`). The GC / metering paths (OPE-409) need a discriminator
-    /// beyond the coarse status — a below-floor write and a reaped read are both about the GC ratchet but
-    /// differ by `(status, code)` (`409 below_gc_floor`, `410 below_gc_floor`, `409 covered_anomaly`, …).
-    /// Rendered as `application/problem+json`; `code` is a stable `&'static str` from the closed registry
-    /// (`error_codes.rs`). Every `ApiError` variant now renders through this same 9457 body.
-    Coded {
-        status: StatusCode,
-        code: &'static str,
-        detail: String,
-        /// Optional RFC 9457 extension member rendered under `args` — a JSON object of typed interpolation
-        /// values (e.g. `quota_exceeded`'s role-gated `{limit, used}`). `Null` for the common no-args case.
-        args: serde_json::Value,
-    },
-    Internal(String),
-}
-
-impl ApiError {
-    /// A `409 Conflict` with a typed `code` — the GC write-guards (below-floor log/snapshot writes, over-claim,
-    /// monotonicity). See `plan/sync/design.http-error-model.md`.
-    #[must_use]
-    pub fn conflict(code: &'static str, detail: impl Into<String>) -> Self {
-        Self::Coded {
-            status: StatusCode::CONFLICT,
-            code,
-            detail: detail.into(),
-            args: serde_json::Value::Null,
-        }
-    }
-
-    /// A `403 Forbidden` with a typed `code` — a denial the client should discriminate on (e.g. a pinned
-    /// invite claimed by the wrong verified email, `recipient_pin_mismatch`).
-    #[must_use]
-    pub fn forbidden(code: &'static str, detail: impl Into<String>) -> Self {
-        Self::Coded {
-            status: StatusCode::FORBIDDEN,
-            code,
-            detail: detail.into(),
-            args: serde_json::Value::Null,
-        }
-    }
-
-    /// A `410 Gone` with a typed `code` — a reaped (GC-reclaimed) blob (`below_gc_floor`, action BOOTSTRAP).
-    #[must_use]
-    pub fn reaped(detail: impl Into<String>) -> Self {
-        Self::Coded {
-            status: StatusCode::GONE,
-            code: crate::error_codes::BELOW_GC_FLOOR,
-            detail: detail.into(),
-            args: serde_json::Value::Null,
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        use crate::error_codes as ec;
-        // EVERY variant renders one uniform RFC 9457 `application/problem+json` body carrying a stable,
-        // machine-readable `code` from the closed registry (`error_codes.rs`) — so an openom-free client
-        // localizes on `code`, never the prose. `title`/`detail` are operator-controlled (never request
-        // bytes or backend causes — zero-knowledge). A 429 additionally carries Retry-After. Internal causes
-        // are logged, never sent. (QuotaExceeded stays a 403 — entitlement is an authorization decision,
-        // not a payment handshake, §9.9 — but now also a machine code.)
-        let null = serde_json::Value::Null;
-        let (status, code, detail, retry_after, args): (StatusCode, &'static str, String, Option<u64>, serde_json::Value) =
-            match self {
-                Self::Forbidden => (StatusCode::FORBIDDEN, ec::ACCESS_DENIED, "forbidden".into(), None, null),
-                Self::NotFound => (StatusCode::NOT_FOUND, ec::NOT_FOUND, "not found".into(), None, null),
-                Self::Conflict => (
-                    StatusCode::CONFLICT,
-                    ec::VERSION_CONFLICT,
-                    "version conflict — pull the current snapshot and retry".into(),
-                    None,
-                    null,
-                ),
-                Self::QuotaExceeded => (
-                    StatusCode::FORBIDDEN,
-                    ec::QUOTA_EXCEEDED,
-                    "account resource limit reached".into(),
-                    None,
-                    null,
-                ),
-                Self::TooManyRequests(secs) => (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    ec::RATE_LIMITED,
-                    "append rate exceeded — retry after the indicated delay".into(),
-                    Some(secs),
-                    null,
-                ),
-                Self::Gone(m) => (StatusCode::GONE, ec::BELOW_GC_FLOOR, m, None, null),
-                Self::BadRequest(m) => (StatusCode::BAD_REQUEST, ec::INVALID_REQUEST, m, None, null),
-                Self::Coded { status, code, detail, args } => (status, code, detail, None, args),
-                Self::Internal(m) => {
-                    tracing::error!(error = %m, "tree handler internal error");
-                    (StatusCode::INTERNAL_SERVER_ERROR, ec::UNAVAILABLE, "internal error".into(), None, null)
-                }
-            };
-        // RFC 9457: `title` is the STABLE per-type summary (from the registry), `detail` the per-occurrence
-        // explanation; `args` (a typed object) rides as an extension member only when present.
-        let mut body = serde_json::json!({
-            "type": format!("/errors/{code}"),
-            "title": ec::title_for(code),
-            "status": status.as_u16(),
-            "code": code,
-            "detail": detail,
-        });
-        if !args.is_null() {
-            body["args"] = args;
-        }
-        let mut resp = (status, axum::Json(body)).into_response();
-        resp.headers_mut().insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/problem+json"),
-        );
-        if let Some(secs) = retry_after {
-            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
-                resp.headers_mut().insert(RETRY_AFTER, v);
-            }
-        }
-        resp
-    }
 }

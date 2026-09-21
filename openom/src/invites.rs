@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::auth::Identity;
 use crate::authz::{authorize, Access};
-use crate::trees::ApiError;
+use crate::api_error::ApiError;
 use crate::AppState;
 use openom_roles::{ROLE_CO_OWNER, ROLE_EDITOR, ROLE_MAINTAINER, ROLE_OWNER, ROLE_VIEWER};
 

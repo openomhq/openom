@@ -96,7 +96,8 @@ src/core/              orchestration — no UI, no rendering.
   sync.js                 SyncController: client half of the delta-log sync protocol.
   syncedDeltaSync.js       wires SyncController together with landed-entry verification (§B3).
   replicator.js            drives a SyncStore to convergence: pull/push + the plaintext merge loop.
-  remoteStore.js           DocStore over HTTP to the openom server (opaque bytes, no crypto).
+  remoteStore.js           DocStore over HTTP to the openom server (opaque bytes, no crypto); normalizes the
+                           shared, registry-backed RFC 9457 error contract for account and tree routes.
   familyTree.js            the opened tree, backed by the openom-data-tree claim engine (wasm). The engine
                            owns a monotonic HLC and stamps each op's createdAt itself (no JS clock).
   tree/                    the web shim over packages/openom-data-tree (wasm): index.js wraps the engine.

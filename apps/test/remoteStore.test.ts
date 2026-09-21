@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
+import { ERROR_CODES } from '../app/src/core/errorCodes.generated.js';
 import { ConflictError } from '../app/src/core/store.js';
 
 // A minimal fetch Response stand-in.
@@ -174,13 +175,20 @@ describe('RemoteStore membership summary (/access)', () => {
 });
 
 describe('RemoteStore account surface (/register, /me, /account/keystore)', () => {
-  // JSON Response stand-in with a plain `{ error: code }` body (what the account handlers return, not RFC 9457).
   const jres = ({ status = 200, json = {} as any } = {}) => ({
     status,
     ok: status >= 200 && status < 300,
     headers: { get: () => null },
     json: async () => json,
     text: async () => JSON.stringify(json),
+  });
+  const problem = (status: number, code: keyof typeof ERROR_CODES, args?: Record<string, unknown>) => ({
+    type: `/errors/${code}`,
+    title: ERROR_CODES[code].title,
+    status,
+    code,
+    detail: 'safe detail',
+    ...(args ? { args } : {}),
   });
 
   it('register sends the snake_case PoP body and returns { memberId }', async () => {
@@ -205,20 +213,41 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
   });
 
   it('register does NOT auth-retry a 401 PoP failure — it maps the body code, not auth_required', async () => {
-    const fetch = vi.fn(async () => jres({ status: 401, json: { error: 'stale_timestamp' } }));
+    const fetch = vi.fn(async () => jres({
+      status: 401,
+      json: problem(401, 'stale_timestamp', { server_time: 1_700_000_000 }),
+    }));
     const auth = { getAccessToken: vi.fn(async () => 'jwt') };
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
     const err = await store
       .register({ memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 })
       .catch((e: any) => e);
     expect(err.code).toBe('stale_timestamp');
+    expect(err.args).toEqual({ server_time: 1_700_000_000 });
     expect(fetch).toHaveBeenCalledTimes(1); // NO forced-refresh retry, despite the seam being present
+  });
+
+  it.each([
+    [400, 'invalid_request'],
+    [400, 'member_id_mismatch'],
+    [401, 'bad_signature'],
+  ] as const)('register maps %s %s through the shared problem registry', async (status, code) => {
+    expect(ERROR_CODES[code]).toBeDefined();
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ status, json: problem(status, code) }),
+      auth: async () => 'jwt',
+    });
+    const error = await store
+      .register({ memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 })
+      .catch((caught: any) => caught);
+    expect(error.code).toBe(code);
   });
 
   it('register maps a 409 to identity_conflict', async () => {
     const store = new RemoteStore({
       baseUrl: 'http://x',
-      fetch: async () => jres({ status: 409, json: { error: 'identity_conflict' } }),
+      fetch: async () => jres({ status: 409, json: problem(409, 'identity_conflict') }),
       auth: async () => 'jwt',
     });
     const err = await store
@@ -260,7 +289,7 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
 
     const unreg = new RemoteStore({
       baseUrl: 'http://x',
-      fetch: async () => jres({ status: 403, json: { error: 'unregistered' } }),
+      fetch: async () => jres({ status: 403, json: problem(403, 'unregistered') }),
       auth: async () => 'jwt',
     });
     const err = await unreg.getKeystore().catch((e: any) => e);
@@ -281,7 +310,7 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
   it('putKeystore maps a 409 to generation_rollback', async () => {
     const store = new RemoteStore({
       baseUrl: 'http://x',
-      fetch: async () => jres({ status: 409, json: { error: 'generation_rollback' } }),
+      fetch: async () => jres({ status: 409, json: problem(409, 'generation_rollback') }),
       auth: async () => 'jwt',
     });
     const err = await store.putKeystore(new Uint8Array([1]), 1).catch((e: any) => e);
