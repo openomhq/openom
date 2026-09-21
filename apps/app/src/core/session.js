@@ -10,8 +10,6 @@
 //   interface AuthSession {
 //     getAccessToken({ forceRefresh } = {}): Promise<string>  // the Bearer value; refresh behind the seam
 //     subject(): string | null                                // opaque provider subject (`sub`)
-//     signIn(opts): Promise<Account>                          // provider-specific; DevAuth = create a local account
-//     signOut(): Promise<void>
 //     onChange(cb): () => void                                // cb() on identity change; returns an unsubscribe
 //     capabilities(): { canRegister, canLogin, sync }
 //   }
@@ -19,152 +17,42 @@
 // Auth `sub` says who authenticated a request. AccountSession.memberId() says whose keys signed data.
 // `/register` binds them; client code must never equate or derive one from the other.
 
-const uuidv4 = () =>
-  globalThis.crypto?.randomUUID?.() ??
-  // Fallback for a crypto-less context (should not happen in a browser / Node 18+).
-  'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-  });
-
 /**
- * DevAuth — the local, self-serve, MULTI-account provider (design §6). A "local account" is just
- * `{ id: <uuid v4>, label: <display name> }`; there is no server user store, no email/password —
- * locally an account IS a UUID. The account list + the active id live in localStorage, so two tabs
- * of the same origin are two independent users, and a `storage` event makes a create/switch/sign-out
- * in one tab fan out to the others.
- *
- * localStorage is the single source of truth (read on every access) so cross-tab state never drifts;
- * writes go to storage first, then notify local subscribers (the `storage` event fires only in OTHER
- * tabs, so same-tab changes are announced directly).
- *
- * The bearer is minted by `#tokenFor(id)`. Today it returns the raw account UUID — option (A) in the
- * design: the server under `AUTH=dev` accepts a `Bearer <uuid>`. The `#tokenFor` seam is the single
- * place option (B) plugs in later: call a local-only `/dev/auth/token` route, mint/cache a real HS256 JWT
- * (`sub=<uuid>`), and honour `forceRefresh` to exercise the production verify path — no other change.
+ * DevAuth — the singleton development auth provider. It persists no parallel account or identity:
+ * availability follows the profile's AccountSession, and the dev server accepts its durable member ID
+ * as a raw bearer. Production providers retain their own opaque subjects and are bound in Phase 2.
  */
 import { makeError } from './errorModel.js';
 
 export class DevAuth {
-  #storage;
-  #broadcast;
-  #makeId;
+  #account;
   #subs = new Set();
-  #onStorage;
+  #unsubscribeAccount;
 
-  static ACCOUNTS_KEY = 'openom.auth.accounts';
-  static ACTIVE_KEY = 'openom.auth.activeId';
-
-  /**
-   * @param {object} [deps]
-   * @param {Storage} [deps.storage]      a localStorage-like store (get/set/removeItem); injected for tests
-   * @param {EventTarget} [deps.broadcast] where cross-tab `storage` events arrive (the `window`); injected for tests
-   * @param {() => string} [deps.makeId]  uuid v4 factory (injected for deterministic tests)
-   */
-  constructor({ storage = globalThis.localStorage, broadcast = globalThis, makeId = uuidv4 } = {}) {
-    this.#storage = storage;
-    this.#broadcast = broadcast;
-    this.#makeId = makeId;
-    // Cross-tab: another tab's create/switch/sign-out mutates the shared localStorage and fires a
-    // `storage` event HERE. Re-read (storage is the source of truth) and notify — two tabs, two users.
-    this.#onStorage = (e) => {
-      if (!e || (e.key !== DevAuth.ACCOUNTS_KEY && e.key !== DevAuth.ACTIVE_KEY)) return;
-      this.#notify();
-    };
-    this.#broadcast?.addEventListener?.('storage', this.#onStorage);
-  }
-
-  // ---- persistence (localStorage is the source of truth) ----
-
-  #readJson(key, fallback) {
-    try {
-      const raw = this.#storage?.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch {
-      return fallback;
+  constructor(accountSession) {
+    if (typeof accountSession?.memberId !== 'function' || typeof accountSession?.onChange !== 'function') {
+      throw new Error('DevAuth needs an AccountSession');
     }
-  }
-  #write(key, value) {
-    try {
-      this.#storage?.setItem(key, value);
-    } catch {
-      /* ephemeral (private mode / no storage) — dev only */
-    }
-  }
-
-  /** All local accounts, `[{ id, label }]`. */
-  list() {
-    const accs = this.#readJson(DevAuth.ACCOUNTS_KEY, []);
-    return Array.isArray(accs) ? accs : [];
-  }
-
-  /** The active account `{ id, label }`, or null when signed out. */
-  activeAccount() {
-    let activeId;
-    try {
-      activeId = this.#storage?.getItem(DevAuth.ACTIVE_KEY) ?? null;
-    } catch {
-      activeId = null;
-    }
-    if (!activeId) return null;
-    return this.list().find((a) => a.id === activeId) ?? null;
+    this.#account = accountSession;
+    this.#unsubscribeAccount = this.#account.onChange(() => this.#notify());
   }
 
   // ---- the AuthSession seam ----
 
   subject() {
-    return this.activeAccount()?.id ?? null;
+    return this.#account.memberId();
   }
 
   // eslint-disable-next-line no-unused-vars -- forceRefresh is a no-op for option (A); the seam for option (B).
   async getAccessToken({ forceRefresh = false } = {}) {
     const id = this.subject();
-    if (!id) throw makeError('auth_required', { cause: 'DevAuth: no active account' });
+    if (!id) throw makeError('auth_required', { cause: 'DevAuth: profile account is locked' });
     return this.#tokenFor(id, { forceRefresh });
   }
 
-  // The single swap point between option (A) raw-uuid bearer (today) and option (B) a minted +
-  // cached HS256 JWT from a local-only `/dev/auth/token`. Today the uuid IS the bearer; a later option-B
-  // mode replaces the body here (fetch/cache a JWT, refetch on `forceRefresh`) with nothing above it changing.
-  async #tokenFor(id, _opts = {}) {
-    return id;
-  }
-
-  /**
-   * Create a new local account and make it active (the dev equivalent of "sign in"). The production
-   * auth-gate calls `signIn`; only this "create a local account" body is dev-specific.
-   * @param {{ label?: string }} [opts]
-   * @returns {Promise<{ id: string, label: string }>}
-   */
-  async signIn({ label } = {}) {
-    return this.createAccount(label);
-  }
-
-  createAccount(label) {
-    const account = { id: this.#makeId(), label: label || 'Local account' };
-    const accounts = [...this.list(), account];
-    this.#write(DevAuth.ACCOUNTS_KEY, JSON.stringify(accounts));
-    this.#write(DevAuth.ACTIVE_KEY, account.id);
-    this.#notify();
-    return account;
-  }
-
-  /** Switch the active account by id. Unknown id → no-op. */
-  switchTo(id) {
-    if (!this.list().some((a) => a.id === id)) return null;
-    this.#write(DevAuth.ACTIVE_KEY, id);
-    this.#notify();
-    return this.activeAccount();
-  }
-
-  /** Sign out (clear the active account; the account list is kept for switching back). */
-  async signOut() {
-    try {
-      this.#storage?.removeItem(DevAuth.ACTIVE_KEY);
-    } catch {
-      /* ephemeral */
-    }
-    this.#notify();
+  async #tokenFor(memberId, _opts = {}) {
+    // Dev convenience only: mint the auth subject (`sub`) as the durable account member ID.
+    return memberId;
   }
 
   onChange(cb) {
@@ -173,8 +61,7 @@ export class DevAuth {
   }
 
   capabilities() {
-    // Local accounts are self-serve: create ("register"), switch ("login"), and they sync.
-    return { canRegister: true, canLogin: true, sync: true };
+    return { canRegister: false, canLogin: false, sync: true };
   }
 
   #notify() {
@@ -187,9 +74,10 @@ export class DevAuth {
     }
   }
 
-  /** Detach the cross-tab listener (tests / teardown). */
+  /** Detach from account-custody changes (worker replacement / tests). */
   dispose() {
-    this.#broadcast?.removeEventListener?.('storage', this.#onStorage);
+    this.#unsubscribeAccount?.();
+    this.#unsubscribeAccount = null;
     this.#subs.clear();
   }
 }
@@ -266,12 +154,6 @@ export class SessionController {
   subject() {
     return this.#auth.subject();
   }
-  signIn(opts) {
-    return this.#auth.signIn(opts);
-  }
-  signOut() {
-    return this.#auth.signOut();
-  }
   onChange(cb) {
     return this.#auth.onChange(cb);
   }
@@ -279,8 +161,7 @@ export class SessionController {
     return this.#auth.capabilities();
   }
 
-  /** The underlying provider (for provider-specific dev affordances: DevAuth.list/switchTo/createAccount). */
-  get backend() {
-    return this.#auth;
+  dispose() {
+    return this.#auth.dispose?.();
   }
 }

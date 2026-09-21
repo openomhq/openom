@@ -126,9 +126,15 @@ class App {
     const { blobs, kind: blobKind } = createBlobStore();
     this.blobs = blobs;
     this.blobKind = blobKind;
-    // Provider-auth seam. Cryptographic identity comes separately from AccountSession after account unlock.
-    this.auth = new SessionController(new DevAuth());
     this.locale = 'en';
+  }
+
+  async bindAccountSession() {
+    this.auth?.dispose?.();
+    this.account = new AccountSession(this.worker);
+    await this.account.initialize();
+    this.auth = new SessionController(new DevAuth(this.account));
+    this.auth.onChange(() => this.onAuthChange());
   }
 
   async boot() {
@@ -155,13 +161,9 @@ class App {
     this.demoEnabled = landing === 'demo' || landing === 'test';
     this.startEnabled = landing !== 'demo'; // 'live' or 'test' (and the safe default when unset)
     this.serverUrl = readServerUrl(); // null ⇒ local-only (sync stays off; no account wall)
-    // Provider auth is independent of local account custody. Signing out stops remote sync but never locks
-    // local data; signing in restarts sync without changing the account identity.
-    this.auth.onChange(() => this.onAuthChange());
     this.worker = appCoreWorker();
     await this.worker.warm();
-    this.account = new AccountSession(this.worker);
-    await this.account.initialize();
+    await this.bindAccountSession();
     if (this.demoEnabled && new URLSearchParams(location.search).get('demo') === '1') {
       await this.startDemo();
       return;
@@ -464,7 +466,7 @@ class App {
    */
   async inviteMember(role, { recipientPin = null } = {}) {
     const remote = this.#membershipRemote();
-    if (!remote) throw new Error('sharing needs a configured backend and an active account');
+    if (!remote) throw new Error('sharing needs a configured backend and an active provider session');
     return mInviteMember({ worker: this.worker, remote }, {
       docId: this.realDoc, treeId: this.realTreeId, role, recipientPin,
     });
@@ -473,7 +475,7 @@ class App {
   /** Owner: the active tree's pending invites + any submitted claims (each ready-to-admit item has a `claim`). */
   async pendingInvites() {
     const remote = this.#membershipRemote();
-    if (!remote) throw new Error('sharing needs a configured backend and an active account');
+    if (!remote) throw new Error('sharing needs a configured backend and an active provider session');
     return mPendingInvites({ remote }, { docId: this.realDoc });
   }
 
@@ -484,7 +486,7 @@ class App {
    */
   async admitMember(inviteId, claim, ownerPassphrase) {
     const remote = this.#membershipRemote();
-    if (!remote) throw new Error('sharing needs a configured backend and an active account');
+    if (!remote) throw new Error('sharing needs a configured backend and an active provider session');
     return mAdmitMember({ worker: this.worker, remote }, {
       docId: this.realDoc, treeId: this.realTreeId, ownerMemberId: this.accountMemberId(),
       passphrase: ownerPassphrase, inviteId, claim,
@@ -494,11 +496,12 @@ class App {
   /**
    * Invitee (signed into their OWN account): join a shared tree from an invite `link`. Throws
    * `WaitingForApproval` (carrying `.context`) while the owner hasn't admitted yet — poll `completeJoin(context)`.
-   * On success the member core is open; the caller then `enterApp`s it. Requires an active account + backend.
+   * On success the member core is open; the caller then `enterApp`s it. Requires an unlocked account plus an
+   * active provider session and backend.
    */
   async joinTree(link, passphrase) {
     const remote = this.#membershipRemote();
-    if (!remote) throw new Error('joining needs a configured backend and an active account');
+    if (!remote) throw new Error('joining needs a configured backend and an active provider session');
     return mJoinTree({ worker: this.worker, remote, attachTransport: this.#attachTransport(remote) }, {
       link, passphrase, memberId: this.accountMemberId(),
     });
@@ -507,7 +510,7 @@ class App {
   /** Invitee: resume a pending join (poll after `WaitingForApproval`) with the `context` it carried. */
   async completeJoin(context) {
     const remote = this.#membershipRemote();
-    if (!remote) throw new Error('joining needs a configured backend and an active account');
+    if (!remote) throw new Error('joining needs a configured backend and an active provider session');
     return mCompleteJoin({ worker: this.worker, remote, attachTransport: this.#attachTransport(remote) }, context);
   }
 
@@ -541,7 +544,7 @@ class App {
     this.gate = null;
     // Start the idle clock only for the real, lockable session.
     if (lockable) this.lockPolicy?.arm();
-    // Turn on synced mode for the real tree (gated on a configured backend + an active account).
+    // Turn on synced mode for the real tree (gated on a configured backend + an active provider session).
     this.startSync();
     this.render();
   }
@@ -616,8 +619,7 @@ class App {
       try {
         this.worker = appCoreWorker();
         await this.worker.warm();
-        this.account = new AccountSession(this.worker);
-        await this.account.initialize();
+        await this.bindAccountSession();
       } catch (e) {
         console.error('[openom] could not rebuild app-core worker', e);
       }

@@ -1,150 +1,103 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DevAuth, SessionController } from '../app/src/core/session.js';
 
-// A localStorage-like fake (shared between "tabs" to model cross-origin-tab sharing).
-class FakeStorage {
-  #m = new Map();
-  getItem(k) { return this.#m.has(k) ? this.#m.get(k) : null; }
-  setItem(k, v) { this.#m.set(k, String(v)); }
-  removeItem(k) { this.#m.delete(k); }
+function fakeAccountSession(initial = null) {
+  let memberId = initial;
+  const subscribers = new Set();
+  return {
+    memberId: () => memberId,
+    onChange(callback) {
+      subscribers.add(callback);
+      return () => subscribers.delete(callback);
+    },
+    setMemberId(next) {
+      memberId = next;
+      for (const callback of subscribers) callback();
+    },
+    subscriberCount() {
+      return subscribers.size;
+    },
+  };
 }
 
-// A deterministic uuid factory so account ids are predictable in assertions.
-function seqIds() {
-  let n = 0;
-  return () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
-}
+const mk = (memberId = null) => {
+  const account = fakeAccountSession(memberId);
+  return { account, auth: new DevAuth(account) };
+};
 
-// Fire a synthetic cross-tab `storage` event on a broadcast target (what a real browser does to
-// OTHER tabs when localStorage changes).
-function fireStorage(broadcast, key) {
-  const e = new Event('storage');
-  e.key = key;
-  broadcast.dispatchEvent(e);
-}
-
-const mk = (over = {}) =>
-  new DevAuth({ storage: new FakeStorage(), broadcast: new EventTarget(), makeId: seqIds(), ...over });
-
-describe('DevAuth — multi-account', () => {
-  it('starts signed out: no accounts, null auth subject, getAccessToken throws', async () => {
-    const auth = mk();
-    expect(auth.list()).toEqual([]);
+describe('DevAuth — account-backed development provider', () => {
+  it('rejects access while the account is locked or absent', async () => {
+    const { auth } = mk();
     expect(auth.subject()).toBeNull();
-    expect(auth.memberId).toBeUndefined();
-    expect(auth.activeAccount()).toBeNull();
-    // Signed out → the auth seam rejects with the unified `auth_required` AppError (OPE-419), not a raw
-    // Error; the driver routes that code to re-gate rather than treating it as a transient offline blip.
     await expect(auth.getAccessToken()).rejects.toMatchObject({ code: 'auth_required', retriable: false });
+
+    expect(auth.list).toBeUndefined();
+    expect(auth.switchTo).toBeUndefined();
+    expect(auth.createAccount).toBeUndefined();
+    expect(auth.memberId).toBeUndefined();
   });
 
-  it('signIn creates a local account, activates it, and makes its UUID the auth subject', async () => {
-    const auth = mk();
-    const acc = await auth.signIn({ label: 'Alice' });
-    expect(acc.label).toBe('Alice');
-    expect(acc.id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(auth.subject()).toBe(acc.id);
-    expect(auth.list()).toEqual([acc]);
+  it('uses the durable account member ID as subject and raw development bearer', async () => {
+    const { auth, account } = mk('member-durable-1');
+    expect(auth.subject()).toBe('member-durable-1');
+    expect(await auth.getAccessToken()).toBe('member-durable-1');
+    expect(await auth.getAccessToken({ forceRefresh: true })).toBe('member-durable-1');
+
+    account.setMemberId('member-durable-2');
+    expect(auth.subject()).toBe('member-durable-2');
+    expect(await auth.getAccessToken()).toBe('member-durable-2');
   });
 
-  it('holds MULTIPLE accounts and switches the active one', async () => {
-    const auth = mk();
-    const alice = await auth.createAccount('Alice');
-    const bob = await auth.createAccount('Bob'); // creating also activates
-    expect(auth.list().map((a) => a.label)).toEqual(['Alice', 'Bob']);
-    expect(auth.subject()).toBe(bob.id);
-    auth.switchTo(alice.id);
-    expect(auth.subject()).toBe(alice.id);
-    expect(auth.switchTo('unknown-id')).toBeNull(); // no-op
-    expect(auth.subject()).toBe(alice.id);
+  it('advertises account-backed development capabilities', () => {
+    const { auth } = mk();
+    expect(auth.capabilities()).toEqual({ canRegister: false, canLogin: false, sync: true });
   });
 
-  it('getAccessToken returns the active uuid as the bearer (option A) and accepts forceRefresh', async () => {
-    const auth = mk();
-    const acc = await auth.signIn({ label: 'Alice' });
-    expect(await auth.getAccessToken()).toBe(acc.id); // dev convenience: token subject equals the local account UUID
-    expect(await auth.getAccessToken({ forceRefresh: true })).toBe(acc.id); // seam accepts it (no-op today)
-    expect(await auth.getAccessToken()).toBe(auth.subject());
-  });
+  it('fans out account changes and stops after unsubscribe', () => {
+    const { auth, account } = mk();
+    const callback = vi.fn();
+    const off = auth.onChange(callback);
 
-  it('signOut clears the active account but keeps the list for switching back', async () => {
-    const auth = mk();
-    const alice = await auth.signIn({ label: 'Alice' });
-    await auth.signOut();
-    expect(auth.subject()).toBeNull();
-    expect(auth.list()).toEqual([alice]); // preserved
-    auth.switchTo(alice.id);
-    expect(auth.subject()).toBe(alice.id);
-  });
-
-  it('capabilities: local accounts are self-serve (register/login/sync all true)', () => {
-    expect(mk().capabilities()).toEqual({ canRegister: true, canLogin: true, sync: true });
-  });
-});
-
-describe('DevAuth — onChange', () => {
-  it('fires on create, switch, and sign-out; unsubscribe stops it', async () => {
-    const auth = mk();
-    const cb = vi.fn();
-    const off = auth.onChange(cb);
-    const a = await auth.createAccount('Alice');
-    const b = await auth.createAccount('Bob');
-    auth.switchTo(a.id);
-    await auth.signOut();
-    expect(cb).toHaveBeenCalledTimes(4); // create, create, switch, signOut
+    account.setMemberId('member-1');
+    expect(callback).toHaveBeenCalledTimes(1);
     off();
-    await auth.createAccount('Carol');
-    expect(cb).toHaveBeenCalledTimes(4); // no more after unsubscribe
+    account.setMemberId(null);
+    expect(callback).toHaveBeenCalledTimes(1);
   });
 
-  it('cross-tab: a storage event from another tab re-reads state and notifies (two tabs, two users)', async () => {
-    const storage = new FakeStorage();
-    const broadcast = new EventTarget();
-    const ids = seqIds();
-    const tabA = new DevAuth({ storage, broadcast, makeId: ids });
-    const tabB = new DevAuth({ storage, broadcast, makeId: ids });
-    const onB = vi.fn();
-    tabB.onChange(onB);
+  it('disposes its account subscription and local subscribers', () => {
+    const { auth, account } = mk('member-1');
+    const callback = vi.fn();
+    auth.onChange(callback);
+    expect(account.subscriberCount()).toBe(1);
 
-    // tabA creates + activates an account (writes shared storage). The browser then fires a
-    // `storage` event on the OTHER tab (tabB) — simulate it.
-    const acc = await tabA.createAccount('Alice');
-    fireStorage(broadcast, DevAuth.ACTIVE_KEY);
-
-    expect(onB).toHaveBeenCalled();
-    expect(tabB.subject()).toBe(acc.id); // tabB now sees the shared active account
-    expect(tabB.subject()).toBe(tabA.subject());
-  });
-
-  it('ignores storage events for unrelated keys', async () => {
-    const storage = new FakeStorage();
-    const broadcast = new EventTarget();
-    const auth = new DevAuth({ storage, broadcast, makeId: seqIds() });
-    const cb = vi.fn();
-    auth.onChange(cb);
-    fireStorage(broadcast, 'some.other.key');
-    expect(cb).not.toHaveBeenCalled();
+    auth.dispose();
+    expect(account.subscriberCount()).toBe(0);
+    account.setMemberId('member-2');
+    expect(callback).not.toHaveBeenCalled();
   });
 });
 
-describe('SessionController — delegates the AuthSession seam', () => {
-  it('forwards auth subject / getAccessToken / capabilities / onChange to the backend', async () => {
-    const backend = mk();
-    const ctrl = new SessionController(backend);
-    const acc = await ctrl.signIn({ label: 'Alice' });
-    expect(ctrl.subject()).toBe(acc.id);
-    expect(ctrl.memberId).toBeUndefined();
-    expect(await ctrl.getAccessToken()).toBe(acc.id);
-    expect(ctrl.capabilities()).toEqual({ canRegister: true, canLogin: true, sync: true });
-    expect(ctrl.backend).toBe(backend);
+describe('SessionController — delegates the provider-auth seam', () => {
+  it('forwards subject, token, capabilities, and changes without exposing account identity accessors', async () => {
+    const { auth, account } = mk('member-controller');
+    const controller = new SessionController(auth);
+    expect(controller.subject()).toBe('member-controller');
+    expect(await controller.getAccessToken()).toBe('member-controller');
+    expect(controller.capabilities()).toEqual({ canRegister: false, canLogin: false, sync: true });
+    expect(controller.memberId).toBeUndefined();
+    expect(controller.signIn).toBeUndefined();
+    expect(controller.signOut).toBeUndefined();
 
-    const cb = vi.fn();
-    ctrl.onChange(cb);
-    await ctrl.signIn({ label: 'Bob' });
-    expect(cb).toHaveBeenCalledTimes(1);
+    const callback = vi.fn();
+    const off = controller.onChange(callback);
+    account.setMemberId('member-controller-2');
+    expect(callback).toHaveBeenCalledTimes(1);
+    off();
   });
 
   it('requires a backend', () => {
     expect(() => new SessionController(null)).toThrow();
+    expect(() => new DevAuth(null)).toThrow('needs an AccountSession');
   });
 });

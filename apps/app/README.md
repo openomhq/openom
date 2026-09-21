@@ -62,9 +62,10 @@ The production web path hosts one unlocked durable account inside `appCore.worke
 that ownership inside `openom-app-core-host`. `accountSession.js` is the sole app-level source of cryptographic
 identity (`member_id`); `session.js` is only the provider-auth seam (`sub`/auth subject). The opaque wrapped
 keystore and generation are persisted once per profile (IndexedDB on web, native SQLite under Tauri), while
-tree keyrings, watermarks, and logs stay
-per document. Owned and joined trees both borrow that account handle; joined-tree reopen selects the founder or
-member path from the already-trusted keyring head rather than from a second persisted member credential.
+tree keyrings, watermarks, and logs stay per document. Owned and joined trees both borrow that account handle;
+joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
+from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle
+and exposes its durable member ID only as the raw development bearer; it does not own accounts.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
 passphrase, rotate root, public identity, and registration proof), while keeping every secret handle in Rust/wasm.
 
@@ -106,7 +107,8 @@ src/core/              orchestration — no UI, no rendering.
                            date parsing.
   library.js, seed.js, seedKhaldun.js, schema.js   the bundled demo datasets + custom-field defs.
   identity.js              device id + logical clock, persisted across restarts.
-  session.js               provider-auth seam; local DevAuth stands in for the auth provider.
+  session.js               provider-auth seam; singleton DevAuth derives only a dev bearer subject
+                           from the unlocked AccountSession (no local account list or switcher).
   lockPolicy.js            decides WHEN to auto-lock; platform-agnostic (calls back into the app).
   watermarks.js            anti-rollback: refuses a keyring/snapshot older than one already seen.
   blobs.js                 content-addressed file storage, alongside the document not inside it.
