@@ -52,6 +52,12 @@ import init, {
   keyringHasBeenShared as wasmKeyringHasBeenShared,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
+import {
+  createAccountRecord,
+  effectiveAccountFloor,
+  replaceAccountIdentity,
+} from './accountRecord.js';
+import { AccountRecordCoordinator } from './accountRecordStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
 import {
   joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl,
@@ -99,26 +105,14 @@ async function loadWatermark(docId) {
   return s ? s.bytes : new Uint8Array(0);
 }
 
-// One account record per browser profile. Tree keyrings, watermarks, and logs remain per document; only the
-// encrypted account keystore and its highest-seen generation are profile-scoped. Keeping blob + floor in one
-// CAS record prevents a credential update from advancing one without the other.
+// One account record per browser profile. Tree keyrings, watermarks, and logs remain per document. The
+// complete identity-scoped custody/sync record is committed under one portable revision while IndexedDB's
+// snapshot version remains an opaque CAS token.
 const accountProfile = new URL(globalThis.location?.href ?? 'http://localhost/').searchParams.get('accountProfile') ?? 'default';
-const ACCOUNT_KEY = `profile::account::${accountProfile}`;
-async function saveAccount(keystore, generation) {
-  const bytes = new TextEncoder().encode(JSON.stringify({ generation, keystore: Array.from(keystore) }));
-  const prev = await store().readSnapshot(ACCOUNT_KEY);
-  await store().putSnapshot(ACCOUNT_KEY, bytes, prev?.version ?? null);
-  const saved = await store().readSnapshot(ACCOUNT_KEY);
-  if (!saved || saved.bytes.length !== bytes.length || saved.bytes.some((byte, index) => byte !== bytes[index])) {
-    throw new Error('account persistence verification failed');
-  }
-}
-async function loadAccount() {
-  const saved = await store().readSnapshot(ACCOUNT_KEY);
-  if (!saved) return null;
-  const record = JSON.parse(new TextDecoder().decode(saved.bytes));
-  return { generation: record.generation, keystore: Uint8Array.from(record.keystore) };
-}
+let accountRecords = null;
+const accountRecordStore = () => (
+  accountRecords ??= new AccountRecordCoordinator(store(), { profile: accountProfile })
+);
 
 // OPE-407 (explicit create-tree): a DURABLE per-doc marker that this device provisioned a NEW tree whose
 // server `trees` row may not exist yet. Set at provision, consumed + cleared on the first sync tick that
@@ -158,6 +152,8 @@ const cores = new Map();
 
 /** The profile's one unlocked account. Every owned and joined tree borrows this wasm handle. */
 let account = null;
+/** Exact persisted blob version from which the resident account was opened. */
+let accountSourceVersion = null;
 
 /** docId -> network transport. Keyed here (not on the Core) so a member JOIN can fetch the keyring history
  * BEFORE its core exists. Set by `attachTransport`, read by the sync tick + join. */
@@ -449,38 +445,55 @@ function storageError(e) {
   return makeError('storage_blocked', { cause: String(e?.message ?? e) });
 }
 
-function replaceAccount(next) {
+function replaceAccount(next, sourceVersion) {
   if (account && account !== next) {
     try { account.free(); } catch { /* already freed */ }
   }
   account = next;
+  accountSourceVersion = sourceVersion;
 }
 
 async function ensureAccount(passphrase, createIfMissing = false) {
   if (account) return { created: false, recoveryCode: '' };
-  const saved = await loadAccount();
-  if (saved) {
+  return accountRecordStore().runExclusive(async (tx) => {
+    const saved = tx.record();
+    if (saved) {
+      let unlocked;
+      try {
+        unlocked = wasmAccountUnlock(
+          passphrase,
+          saved.identity.keystore,
+          effectiveAccountFloor(saved),
+        );
+        replaceAccount(unlocked, saved.identity.version);
+        unlocked = null;
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        unlocked?.free();
+      }
+      return { created: false, recoveryCode: '' };
+    }
+    if (!createIfMissing) throw new Error('no account keystore stored for this profile');
+    let created;
+    let handle;
     try {
-      replaceAccount(wasmAccountUnlock(passphrase, saved.keystore, saved.generation));
+      created = wasmAccountCreate(passphrase);
+      handle = created.takeHandle();
+      const identity = publicAccountIdentityFor(handle);
+      const record = await createAccountRecord(accountSnapshotInput(created, identity.memberId));
+      const committed = await tx.commit(record);
+      replaceAccount(handle, committed.identity.version);
+      handle = null;
+      const storagePersistence = await accountRecordStore().requestPersistentStorage();
+      return { created: true, recoveryCode: created.recoveryCode, storagePersistence };
     } catch (e) {
       throw vaultError(e);
+    } finally {
+      handle?.free();
+      created?.free();
     }
-    return { created: false, recoveryCode: '' };
-  }
-  if (!createIfMissing) throw new Error('no account keystore stored for this profile');
-  let created;
-  try {
-    created = wasmAccountCreate(passphrase);
-  } catch (e) {
-    throw vaultError(e);
-  }
-  try {
-    await saveAccount(created.keystore, created.generation);
-    replaceAccount(created.takeHandle());
-    return { created: true, recoveryCode: created.recoveryCode };
-  } finally {
-    created.free();
-  }
+  });
 }
 
 function requireAccount() {
@@ -488,8 +501,8 @@ function requireAccount() {
   return account;
 }
 
-function publicAccountIdentity() {
-  const identity = wasmAccountPublicIdentity(requireAccount());
+function publicAccountIdentityFor(handle) {
+  const identity = wasmAccountPublicIdentity(handle);
   try {
     return {
       memberId: identity.memberId,
@@ -501,16 +514,46 @@ function publicAccountIdentity() {
   }
 }
 
+function publicAccountIdentity() {
+  return publicAccountIdentityFor(requireAccount());
+}
+
+function accountSnapshotInput(snapshot, memberId) {
+  return {
+    memberId,
+    keystore: snapshot.keystore,
+    generation: snapshot.generation,
+    blobHash: snapshot.blobHash,
+  };
+}
+
+async function commitAccountSnapshot(tx, current, handle, snapshot) {
+  const identity = publicAccountIdentityFor(handle);
+  const input = accountSnapshotInput(snapshot, identity.memberId);
+  const next = current
+    ? await replaceAccountIdentity(current, input)
+    : await createAccountRecord(input);
+  const committed = await tx.commit(next);
+  return { committed, identity };
+}
+
 async function verifyAccountPassphrase(passphrase) {
-  const saved = await loadAccount();
-  if (!saved) throw new Error('no account keystore stored for this profile');
-  let verified;
-  try {
-    verified = wasmAccountUnlock(passphrase, saved.keystore, saved.generation);
-  } catch (e) {
-    throw vaultError(e);
-  }
-  verified.free();
+  return accountRecordStore().runExclusive(async (tx) => {
+    const saved = tx.record();
+    if (!saved) throw new Error('no account keystore stored for this profile');
+    let verified;
+    try {
+      verified = wasmAccountUnlock(
+        passphrase,
+        saved.identity.keystore,
+        effectiveAccountFloor(saved),
+      );
+    } catch (e) {
+      throw vaultError(e);
+    } finally {
+      verified?.free();
+    }
+  });
 }
 
 async function openStoredTree({ treeId, docId, engine = KEYRING_ENGINE }) {
@@ -567,47 +610,62 @@ const api = {
   /** Create and durably persist this browser profile's singleton account. */
   async accountCreate(passphrase) {
     await ensureInit();
-    if (account || await loadAccount()) throw new Error('profile account already exists');
-    let created;
-    try {
-      created = wasmAccountCreate(passphrase);
-      await saveAccount(created.keystore, created.generation);
-      replaceAccount(created.takeHandle());
-      return {
-        ...publicAccountIdentity(),
-        recoveryCode: created.recoveryCode,
-        generation: created.generation,
-      };
-    } catch (e) {
-      throw vaultError(e);
-    } finally {
-      created?.free();
-    }
+    return accountRecordStore().runExclusive(async (tx) => {
+      if (account || tx.record()) throw new Error('profile account already exists');
+      let created;
+      let handle;
+      try {
+        created = wasmAccountCreate(passphrase);
+        handle = created.takeHandle();
+        const { committed, identity } = await commitAccountSnapshot(tx, null, handle, created);
+        replaceAccount(handle, committed.identity.version);
+        handle = null;
+        const storagePersistence = await accountRecordStore().requestPersistentStorage();
+        return {
+          ...identity,
+          recoveryCode: created.recoveryCode,
+          generation: created.generation,
+          storagePersistence,
+        };
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        handle?.free();
+        created?.free();
+      }
+    });
   },
 
   /** Unlock the persisted singleton account and retain its secrets inside this worker. */
   async accountUnlock(passphrase) {
     await ensureInit();
-    const saved = await loadAccount();
-    if (!saved) throw new Error('no account keystore stored for this profile');
-    let unlocked;
-    try {
-      unlocked = wasmAccountUnlock(passphrase, saved.keystore, saved.generation);
-      replaceAccount(unlocked);
-      unlocked = null;
-      return publicAccountIdentity();
-    } catch (e) {
-      throw vaultError(e);
-    } finally {
-      unlocked?.free();
-    }
+    return accountRecordStore().runExclusive(async (tx) => {
+      const saved = tx.record();
+      if (!saved) throw new Error('no account keystore stored for this profile');
+      let unlocked;
+      try {
+        unlocked = wasmAccountUnlock(
+          passphrase,
+          saved.identity.keystore,
+          effectiveAccountFloor(saved),
+        );
+        const identity = publicAccountIdentityFor(unlocked);
+        replaceAccount(unlocked, saved.identity.version);
+        unlocked = null;
+        return identity;
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        unlocked?.free();
+      }
+    });
   },
 
   /** Report profile account custody without exposing wrapped or secret material. */
   async accountStatus() {
     await ensureInit();
     if (account) return 'unlocked';
-    return await loadAccount() ? 'locked' : 'none';
+    return await accountRecordStore().read() ? 'locked' : 'none';
   },
 
   /** Drop every live tree and the resident account while retaining their encrypted persistence. */
@@ -617,29 +675,41 @@ const api = {
     if (account) {
       try { account.free(); } catch { /* already freed */ }
       account = null;
+      accountSourceVersion = null;
     }
   },
 
   /** Recover the persisted account, rotating its recovery code and authenticated generation. */
   async accountRecover({ recoveryCode, newPassphrase }) {
     await ensureInit();
-    const saved = await loadAccount();
-    if (!saved) throw new Error('no account keystore stored for this profile');
-    let recovered;
-    try {
-      recovered = wasmAccountRecover(recoveryCode, newPassphrase, saved.keystore, saved.generation);
-      await saveAccount(recovered.keystore, recovered.generation);
-      replaceAccount(recovered.takeHandle());
-      return {
-        ...publicAccountIdentity(),
-        recoveryCode: recovered.recoveryCode,
-        generation: recovered.generation,
-      };
-    } catch (e) {
-      throw vaultError(e);
-    } finally {
-      recovered?.free();
-    }
+    return accountRecordStore().runExclusive(async (tx) => {
+      const saved = tx.record();
+      if (!saved) throw new Error('no account keystore stored for this profile');
+      let recovered;
+      let handle;
+      try {
+        recovered = wasmAccountRecover(
+          recoveryCode,
+          newPassphrase,
+          saved.identity.keystore,
+          effectiveAccountFloor(saved),
+        );
+        handle = recovered.takeHandle();
+        const { committed, identity } = await commitAccountSnapshot(tx, saved, handle, recovered);
+        replaceAccount(handle, committed.identity.version);
+        handle = null;
+        return {
+          ...identity,
+          recoveryCode: recovered.recoveryCode,
+          generation: recovered.generation,
+        };
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        handle?.free();
+        recovered?.free();
+      }
+    });
   },
 
   /** Return the resident account snapshot and its public identity without exposing a secret handle. */
@@ -664,56 +734,73 @@ const api = {
   /** Verify a fetched account snapshot before replacing durable and resident custody. */
   async accountAdoptCandidate({ keystore, credential }) {
     await ensureInit();
-    const saved = await loadAccount();
-    const generationFloor = saved?.generation ?? 0;
-    let candidate;
-    try {
-      if (credential && typeof credential.passphrase === 'string') {
-        candidate = wasmAccountOpenCandidate(credential.passphrase, keystore, generationFloor);
-      } else if (
-        credential
-        && typeof credential.recoveryCode === 'string'
-        && typeof credential.newPassphrase === 'string'
-      ) {
-        candidate = wasmAccountRecoverCandidate(
-          credential.recoveryCode,
-          credential.newPassphrase,
-          keystore,
-          generationFloor,
-        );
-      } else {
-        throw new Error('invalid account candidate credential');
+    return accountRecordStore().runExclusive(async (tx) => {
+      const saved = tx.record();
+      const generationFloor = saved ? effectiveAccountFloor(saved) : 0;
+      let candidate;
+      let handle;
+      try {
+        if (credential && typeof credential.passphrase === 'string') {
+          candidate = wasmAccountOpenCandidate(credential.passphrase, keystore, generationFloor);
+        } else if (
+          credential
+          && typeof credential.recoveryCode === 'string'
+          && typeof credential.newPassphrase === 'string'
+        ) {
+          candidate = wasmAccountRecoverCandidate(
+            credential.recoveryCode,
+            credential.newPassphrase,
+            keystore,
+            generationFloor,
+          );
+        } else {
+          throw new Error('invalid account candidate credential');
+        }
+        handle = candidate.takeHandle();
+        const { committed, identity } = await commitAccountSnapshot(tx, saved, handle, candidate);
+        replaceAccount(handle, committed.identity.version);
+        handle = null;
+        return {
+          ...identity,
+          generation: candidate.generation,
+          blobHash: candidate.blobHash,
+          recoveryCode: candidate.recoveryCode,
+        };
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        handle?.free();
+        candidate?.free();
       }
-      await saveAccount(candidate.keystore, candidate.generation);
-      replaceAccount(candidate.takeHandle());
-      return {
-        ...publicAccountIdentity(),
-        generation: candidate.generation,
-        blobHash: candidate.blobHash,
-        recoveryCode: candidate.recoveryCode,
-      };
-    } catch (e) {
-      throw vaultError(e);
-    } finally {
-      candidate?.free();
-    }
+    });
   },
 
   /** Re-verify the current passphrase, then re-wrap only the profile account under the replacement. */
   async accountChangePassphrase({ current, next }) {
-    await api.accountUnlock(current);
-    let changed;
-    try {
-      changed = wasmAccountChangePassphrase(requireAccount(), next);
-      await saveAccount(changed.keystore, changed.generation);
-      return { generation: changed.generation };
-    } catch (e) {
-      try { account?.free(); } catch { /* already freed */ }
-      account = null;
-      throw vaultError(e);
-    } finally {
-      changed?.free();
-    }
+    await ensureInit();
+    return accountRecordStore().runExclusive(async (tx) => {
+      const saved = tx.record();
+      if (!saved) throw new Error('no account keystore stored for this profile');
+      let handle;
+      let changed;
+      try {
+        handle = wasmAccountUnlock(
+          current,
+          saved.identity.keystore,
+          effectiveAccountFloor(saved),
+        );
+        changed = wasmAccountChangePassphrase(handle, next);
+        const { committed } = await commitAccountSnapshot(tx, saved, handle, changed);
+        replaceAccount(handle, committed.identity.version);
+        handle = null;
+        return { generation: changed.generation };
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        handle?.free();
+        changed?.free();
+      }
+    });
   },
 
   /** Return only the resident account's public admission identity. */
@@ -725,18 +812,29 @@ const api = {
   /** Rotate the account root and recovery credential while retaining its stable identity keys. */
   async accountRotateRoot({ passphrase }) {
     await ensureInit();
-    let rotated;
-    try {
-      rotated = wasmAccountRotateRoot(requireAccount(), passphrase);
-      await saveAccount(rotated.keystore, rotated.generation);
-      return { recoveryCode: rotated.recoveryCode, generation: rotated.generation };
-    } catch (e) {
-      try { account?.free(); } catch { /* already freed */ }
-      account = null;
-      throw vaultError(e);
-    } finally {
-      rotated?.free();
-    }
+    return accountRecordStore().runExclusive(async (tx) => {
+      const saved = tx.record();
+      if (!saved) throw new Error('no account keystore stored for this profile');
+      let handle;
+      let rotated;
+      try {
+        handle = wasmAccountUnlock(
+          passphrase,
+          saved.identity.keystore,
+          effectiveAccountFloor(saved),
+        );
+        rotated = wasmAccountRotateRoot(handle, passphrase);
+        const { committed } = await commitAccountSnapshot(tx, saved, handle, rotated);
+        replaceAccount(handle, committed.identity.version);
+        handle = null;
+        return { recoveryCode: rotated.recoveryCode, generation: rotated.generation };
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        handle?.free();
+        rotated?.free();
+      }
+    });
   },
 
   /** Sign the server's frozen registration proof bytes without exposing the account signing key. */
