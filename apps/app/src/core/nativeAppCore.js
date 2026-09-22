@@ -174,6 +174,11 @@ export function createNativeAppCore() {
     accountRecover: ({ recoveryCode, newPassphrase }) =>
       call('account_recover', { recoveryCode, newPassphrase }),
     accountSnapshot: () => call('account_snapshot'),
+    accountSyncState: () => call('account_sync_state'),
+    accountConfirmBinding: (binding) => call('account_confirm_binding', { binding }),
+    accountStageBackup: ({ kind, binding }) => call('account_stage_backup', { kind, binding }),
+    accountAcknowledgeBackup: ({ expected, checkpoint }) =>
+      call('account_acknowledge_backup', { expected, checkpoint }),
     accountAdoptCandidate: ({ keystore, credential }) => {
       if (credential && typeof credential.passphrase === 'string') {
         return call('account_adopt_candidate', {

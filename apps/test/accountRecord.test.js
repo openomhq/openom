@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  acknowledgeAccountBackup,
+  confirmAccountBinding,
   createAccountRecord,
   decodeAccountRecord,
   effectiveAccountFloor,
   encodeAccountRecord,
   replaceAccountIdentity,
   sameAccountVersion,
+  stageAccountBackup,
   validateAccountRecord,
 } from '../app/src/core/accountRecord.js';
 
@@ -32,8 +35,8 @@ describe('account record codec', () => {
     const bytes = await encodeAccountRecord(record);
     const json = JSON.parse(new TextDecoder().decode(bytes));
     expect(json).toMatchObject({ revision: 1, identity: { memberId: 'member-a', floor: 1 } });
-    expect(json.identity.keystore).toEqual([1, 2, 3]);
-    expect(json.identity.version.blobHash).toHaveLength(32);
+    expect(json.identity.blob.keystore).toEqual([1, 2, 3]);
+    expect(json.identity.blob.blobHash).toHaveLength(32);
     const decoded = await decodeAccountRecord(bytes);
     expect(decoded).toEqual(record);
     expect(Object.isFrozen(decoded)).toBe(true);
@@ -45,7 +48,7 @@ describe('account record codec', () => {
     const corrupt = { ...record, identity: { ...record.identity, keystore: new Uint8Array([9, 2, 3]) } };
     await expect(validateAccountRecord(corrupt)).rejects.toThrow('does not match');
     const json = JSON.parse(new TextDecoder().decode(await encodeAccountRecord(record)));
-    json.identity.version.blobHash[0] ^= 1;
+    json.identity.blob.blobHash[0] ^= 1;
     await expect(decodeAccountRecord(new TextEncoder().encode(JSON.stringify(json)))).rejects.toThrow('does not match');
   });
 
@@ -102,10 +105,58 @@ describe('account record codec', () => {
       },
     })).rejects.toThrow('not the confirmed binding');
     const json = JSON.parse(new TextDecoder().decode(await encodeAccountRecord(record)));
-    json.identity.keystore[0] = 256;
+    json.identity.blob.keystore[0] = 256;
     await expect(decodeAccountRecord(new TextEncoder().encode(JSON.stringify(json)))).rejects.toThrow('invalid byte');
-    json.identity.keystore[0] = 1;
+    json.identity.blob.keystore[0] = 1;
     delete json.binding;
     await expect(decodeAccountRecord(new TextEncoder().encode(JSON.stringify(json)))).rejects.toThrow('binding must be present');
+  });
+
+  it('stages and compare-clears only the exact acknowledged backup', async () => {
+    const initial = await createAccountRecord(await snapshot('member-a', 4));
+    const binding = { issuer: 'https://issuer.example', subject: 'subject-a', memberId: 'member-a' };
+    const bound = await confirmAccountBinding(initial, binding);
+    const staged = await stageAccountBackup(bound, { kind: 'backup', binding });
+    expect(staged.pendingBackup.version).toEqual(staged.identity.version);
+
+    const staleExpected = {
+      ...staged.pendingBackup,
+      version: { ...staged.pendingBackup.version, generation: 3 },
+    };
+    await expect(acknowledgeAccountBackup(staged, staleExpected, {
+      etag: '"v4"', version: staged.identity.version,
+    })).resolves.toBeNull();
+
+    const acknowledged = await acknowledgeAccountBackup(staged, staged.pendingBackup, {
+      etag: '"v4"', version: staged.identity.version,
+    });
+    expect(acknowledged.pendingBackup).toBeNull();
+    expect(acknowledged.acknowledgedBackup).toEqual({
+      etag: '"v4"', version: staged.identity.version,
+    });
+  });
+
+  it('never downgrades a pending revoke to an ordinary backup', async () => {
+    const initial = await createAccountRecord(await snapshot());
+    const binding = { issuer: 'https://issuer.example', subject: 'subject-a', memberId: 'member-a' };
+    const bound = await confirmAccountBinding(initial, binding);
+    const revoke = await stageAccountBackup(bound, { kind: 'revoke', binding });
+    const attemptedBackup = await stageAccountBackup(revoke, { kind: 'backup', binding });
+    expect(attemptedBackup).toEqual(revoke);
+
+    const rewrapped = await replaceAccountIdentity(
+      revoke,
+      await snapshot('member-a', 1, new Uint8Array([9, 9])),
+    );
+    expect(rewrapped.pendingBackup.kind).toBe('revoke');
+    expect(rewrapped.pendingBackup.version).toEqual(rewrapped.identity.version);
+    await expect(acknowledgeAccountBackup(rewrapped, revoke.pendingBackup, {
+      etag: '"empty"', version: null,
+    })).resolves.toBeNull();
+
+    const acknowledged = await acknowledgeAccountBackup(revoke, revoke.pendingBackup, {
+      etag: '"empty"', version: null,
+    });
+    expect(acknowledged.acknowledgedBackup).toEqual({ etag: '"empty"', version: null });
   });
 });

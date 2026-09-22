@@ -3,15 +3,18 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AccountAdopted, AccountChanged, AccountIdentity, AccountOpened, AccountSnapshot, AccountStatus,
-    AddedMember, AppCoreHost, BlobData, BlobMeta, InviteMaterial, KeyringRevisionPayload,
-    MemberToAdd, MemberUnlocked, Provisioned, RemovedMember, RoleChanged, SyncOut, Unlocked,
+    AccountAdopted, AccountBackupAcknowledged, AccountChanged, AccountIdentity, AccountOpened,
+    AccountSnapshot, AccountStatus, AccountSyncState, AddedMember, AppCoreHost, BlobData, BlobMeta,
+    InviteMaterial, KeyringRevisionPayload, MemberToAdd, MemberUnlocked, Provisioned,
+    RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, TreeId};
 use openom_vault_host::sqlite::SqliteVaultStore;
-use openom_vault_host::VaultStore;
+use openom_vault_host::{
+    AccountBinding, AccountRemoteCheckpoint, PendingAccountBackup, PendingBackupKind, VaultStore,
+};
 use tauri::{Manager, State};
 
 /// The one native session host (OPE-427 Full-A): it runs `openom-app-core` natively — the DEK, the claim
@@ -147,6 +150,39 @@ fn account_public_identity(state: State<'_, Host>) -> Result<AccountIdentity, St
 #[tauri::command]
 fn account_snapshot(state: State<'_, Host>) -> Result<AccountSnapshot, String> {
     state.account_snapshot().map_err(e)
+}
+
+#[tauri::command]
+fn account_sync_state(state: State<'_, Host>) -> Result<AccountSyncState, String> {
+    state.account_sync_state().map_err(e)
+}
+
+#[tauri::command]
+fn account_confirm_binding(
+    state: State<'_, Host>,
+    binding: AccountBinding,
+) -> Result<AccountSyncState, String> {
+    state.account_confirm_binding(binding).map_err(e)
+}
+
+#[tauri::command]
+fn account_stage_backup(
+    state: State<'_, Host>,
+    kind: PendingBackupKind,
+    binding: AccountBinding,
+) -> Result<AccountSyncState, String> {
+    state.account_stage_backup(kind, binding).map_err(e)
+}
+
+#[tauri::command]
+fn account_acknowledge_backup(
+    state: State<'_, Host>,
+    expected: PendingAccountBackup,
+    checkpoint: AccountRemoteCheckpoint,
+) -> Result<AccountBackupAcknowledged, String> {
+    state
+        .account_acknowledge_backup(&expected, checkpoint)
+        .map_err(e)
 }
 
 #[tauri::command]
@@ -776,6 +812,10 @@ pub fn run() {
             account_register_proof,
             account_public_identity,
             account_snapshot,
+            account_sync_state,
+            account_confirm_binding,
+            account_stage_backup,
+            account_acknowledge_backup,
             account_adopt_candidate,
             account_adopt_recovery_candidate,
             core_provision,

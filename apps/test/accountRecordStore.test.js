@@ -140,16 +140,19 @@ describe('AccountRecordCoordinator', () => {
   it('reports persistent-storage support without making denial fatal', async () => {
     const store = new MemorySnapshots();
     const granted = new AccountRecordCoordinator(store, {
-      storageManager: { persist: vi.fn(async () => true) },
+      storageManager: { persist: vi.fn(async () => true), persisted: vi.fn(async () => true) },
     });
     const denied = new AccountRecordCoordinator(store, {
-      storageManager: { persist: vi.fn(async () => false) },
+      storageManager: { persist: vi.fn(async () => false), persisted: vi.fn(async () => false) },
     });
     const unavailable = new AccountRecordCoordinator(store, { storageManager: null });
 
     await expect(granted.requestPersistentStorage()).resolves.toBe('granted');
     await expect(denied.requestPersistentStorage()).resolves.toBe('denied');
     await expect(unavailable.requestPersistentStorage()).resolves.toBe('unavailable');
+    await expect(granted.persistentStorageStatus()).resolves.toBe('granted');
+    await expect(denied.persistentStorageStatus()).resolves.toBe('denied');
+    await expect(unavailable.persistentStorageStatus()).resolves.toBe('unavailable');
   });
 
   it('broadcasts only committed portable revisions to other contexts', async () => {

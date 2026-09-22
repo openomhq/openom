@@ -9,9 +9,10 @@ use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_vault_host::{
-    AccountBackupVersion as StoredAccountBackupVersion, AccountBlobHash as StoredAccountBlobHash,
-    AccountGeneration, AccountGenerationFloor, AccountIdentityRecord, AccountKeystore,
-    AccountMemberId, AccountRecord, VaultStore,
+    AccountBackupVersion as StoredAccountBackupVersion, AccountBinding,
+    AccountBlobHash as StoredAccountBlobHash, AccountGeneration, AccountGenerationFloor,
+    AccountIdentityRecord, AccountKeystore, AccountMemberId, AccountRecord,
+    AccountRemoteCheckpoint, PendingAccountBackup, PendingBackupKind, VaultStore,
 };
 use store_blob::{BlobStore, FsBlob, Precondition};
 use store_media::MediaStore;
@@ -157,6 +158,78 @@ pub struct AccountAdopted {
     pub recovery_code: String,
     pub generation: u64,
     pub blob_hash: Vec<u8>,
+}
+
+/// Non-secret account-record version exposed to the sync coordinator.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncVersion {
+    pub generation: u64,
+    pub blob_hash: Vec<u8>,
+}
+
+/// Server-confirmed provider binding exposed to the sync coordinator.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncBinding {
+    pub issuer: String,
+    pub subject: String,
+    pub member_id: String,
+}
+
+/// Last remote ETag/version acknowledged for this binding.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncCheckpoint {
+    pub etag: String,
+    pub version: Option<AccountSyncVersion>,
+}
+
+/// Durable operation intent, pinned to an exact local version and auth binding.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncPending {
+    pub kind: PendingBackupKind,
+    pub version: AccountSyncVersion,
+    pub binding: AccountSyncBinding,
+}
+
+/// Identity-scoped custody metadata without the wrapped keystore bytes.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncIdentity {
+    pub member_id: String,
+    pub version: AccountSyncVersion,
+    pub floor: u64,
+    pub effective_floor: u64,
+}
+
+/// Non-secret projection of the native local account record.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncRecord {
+    pub revision: u64,
+    pub identity: AccountSyncIdentity,
+    pub binding: Option<AccountSyncBinding>,
+    pub acknowledged_backup: Option<AccountSyncCheckpoint>,
+    pub pending_backup: Option<AccountSyncPending>,
+}
+
+/// Native account-sync state. Native `SQLite` is durable without browser persistence grants.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncState {
+    pub record: Option<AccountSyncRecord>,
+    pub storage_persistence: &'static str,
+}
+
+/// Result of exact pending-operation compare-and-clear.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountBackupAcknowledged {
+    pub cleared: bool,
+    pub record: Option<AccountSyncRecord>,
+    pub storage_persistence: &'static str,
 }
 
 /// Compatibility shape for callers transitioning to [`AppCoreHost::account_public_identity`]. `kdf_params`
@@ -390,6 +463,53 @@ impl<St: VaultStore> AppCoreHost<St> {
         }
     }
 
+    fn sync_version(version: StoredAccountBackupVersion) -> AccountSyncVersion {
+        AccountSyncVersion {
+            generation: version.generation().get(),
+            blob_hash: version.blob_hash().as_bytes().to_vec(),
+        }
+    }
+
+    fn sync_binding(binding: &AccountBinding) -> AccountSyncBinding {
+        AccountSyncBinding {
+            issuer: binding.issuer().to_string(),
+            subject: binding.subject().to_string(),
+            member_id: binding.member_id().as_str().to_string(),
+        }
+    }
+
+    fn sync_record(record: &AccountRecord) -> AccountSyncRecord {
+        let identity = record.identity();
+        AccountSyncRecord {
+            revision: record.revision().get(),
+            identity: AccountSyncIdentity {
+                member_id: identity.member_id().as_str().to_string(),
+                version: Self::sync_version(identity.version()),
+                floor: identity.persisted_floor().get(),
+                effective_floor: identity.effective_floor().get(),
+            },
+            binding: record.binding().map(Self::sync_binding),
+            acknowledged_backup: record.acknowledged_backup().map(|checkpoint| {
+                AccountSyncCheckpoint {
+                    etag: checkpoint.etag().to_string(),
+                    version: checkpoint.version().map(Self::sync_version),
+                }
+            }),
+            pending_backup: record.pending_backup().map(|pending| AccountSyncPending {
+                kind: pending.kind(),
+                version: Self::sync_version(pending.version()),
+                binding: Self::sync_binding(pending.binding()),
+            }),
+        }
+    }
+
+    fn sync_state(record: Option<&AccountRecord>) -> AccountSyncState {
+        AccountSyncState {
+            record: record.map(Self::sync_record),
+            storage_persistence: "native",
+        }
+    }
+
     fn stored_identity(handle: &AccountHandle) -> AccountIdentityRecord {
         let snapshot = openom_app_core::account_snapshot(handle);
         let version = snapshot.version();
@@ -422,21 +542,29 @@ impl<St: VaultStore> AppCoreHost<St> {
         handle: &AccountHandle,
     ) -> Result<AccountRecord, HostError> {
         let next = Self::next_account_record(current, handle)?;
+        self.persist_account_record(current, &next)
+    }
+
+    fn persist_account_record(
+        &self,
+        current: Option<&AccountRecord>,
+        next: &AccountRecord,
+    ) -> Result<AccountRecord, HostError> {
         self.store
-            .commit_account(&next, current.map(AccountRecord::revision))
+            .commit_account(next, current.map(AccountRecord::revision))
             .map_err(HostError::Store)?;
         if self
             .store
             .load_account()
             .map_err(HostError::Store)?
             .as_ref()
-            != Some(&next)
+            != Some(next)
         {
             return Err(HostError::Store(
                 "account persistence verification failed".into(),
             ));
         }
-        Ok(next)
+        Ok(next.clone())
     }
 
     fn commit_candidate(
@@ -589,6 +717,98 @@ impl<St: VaultStore> AppCoreHost<St> {
             Ok(Self::snapshot_wire(openom_app_core::account_snapshot(
                 account,
             )))
+        })
+    }
+
+    /// Return the non-secret local account journal used by the network sync coordinator.
+    ///
+    /// # Errors
+    /// Returns [`HostError::Store`] when persisted account custody cannot be read.
+    pub fn account_sync_state(&self) -> Result<AccountSyncState, HostError> {
+        let _operation = self.account_op();
+        let record = self.store.load_account().map_err(HostError::Store)?;
+        Ok(Self::sync_state(record.as_ref()))
+    }
+
+    /// Persist the exact provider subject the server confirmed for this durable identity.
+    ///
+    /// # Errors
+    /// Returns [`HostError`] when no local account exists, the binding mismatches, or persistence fails.
+    pub fn account_confirm_binding(
+        &self,
+        binding: AccountBinding,
+    ) -> Result<AccountSyncState, HostError> {
+        let _operation = self.account_op();
+        let current = self
+            .store
+            .load_account()
+            .map_err(HostError::Store)?
+            .ok_or(HostError::NoAccount)?;
+        let next = current.confirm_binding(binding).map_err(HostError::Store)?;
+        let committed = if next.revision() == current.revision() {
+            current
+        } else {
+            self.persist_account_record(Some(&current), &next)?
+        };
+        Ok(Self::sync_state(Some(&committed)))
+    }
+
+    /// Journal an account backup/revocation before the network request begins.
+    ///
+    /// # Errors
+    /// Returns [`HostError`] when the binding is not confirmed or persistence fails.
+    pub fn account_stage_backup(
+        &self,
+        kind: PendingBackupKind,
+        binding: AccountBinding,
+    ) -> Result<AccountSyncState, HostError> {
+        let _operation = self.account_op();
+        let current = self
+            .store
+            .load_account()
+            .map_err(HostError::Store)?
+            .ok_or(HostError::NoAccount)?;
+        let next = current
+            .stage_backup(kind, binding)
+            .map_err(HostError::Store)?;
+        let committed = if next.revision() == current.revision() {
+            current
+        } else {
+            self.persist_account_record(Some(&current), &next)?
+        };
+        Ok(Self::sync_state(Some(&committed)))
+    }
+
+    /// Compare-and-clear exactly the pending operation acknowledged by the server.
+    ///
+    /// # Errors
+    /// Returns [`HostError`] when the checkpoint is invalid or persistence fails.
+    pub fn account_acknowledge_backup(
+        &self,
+        expected: &PendingAccountBackup,
+        checkpoint: AccountRemoteCheckpoint,
+    ) -> Result<AccountBackupAcknowledged, HostError> {
+        let _operation = self.account_op();
+        let current = self
+            .store
+            .load_account()
+            .map_err(HostError::Store)?
+            .ok_or(HostError::NoAccount)?;
+        let Some(next) = current
+            .acknowledge_backup(expected, checkpoint)
+            .map_err(HostError::Store)?
+        else {
+            return Ok(AccountBackupAcknowledged {
+                cleared: false,
+                record: Some(Self::sync_record(&current)),
+                storage_persistence: "native",
+            });
+        };
+        let committed = self.persist_account_record(Some(&current), &next)?;
+        Ok(AccountBackupAcknowledged {
+            cleared: true,
+            record: Some(Self::sync_record(&committed)),
+            storage_persistence: "native",
         })
     }
 
@@ -2375,7 +2595,10 @@ mod tests {
     use super::{AccountRecord, AccountStatus, AppCoreHost, HostError, TreeId, VaultStore};
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::EngineKind;
-    use openom_vault_host::AccountRecordRevision;
+    use openom_vault_host::{
+        AccountBackupVersion, AccountBinding, AccountGeneration, AccountRecordRevision,
+        AccountRemoteCheckpoint, PendingAccountBackup, PendingBackupKind,
+    };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -2547,6 +2770,68 @@ mod tests {
         host.account_unlock(&passphrase).unwrap();
         assert_eq!(host.account_status().unwrap(), AccountStatus::Unlocked);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn account_backup_journal_compare_clears_only_the_exact_pending_version() {
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let passphrase = Passphrase::new(b"profile passphrase".to_vec());
+        host.account_create(&passphrase).unwrap();
+        let member_id = host.account_public_identity().unwrap().member_id;
+        let binding = AccountBinding::new(
+            "https://issuer",
+            "subject-a",
+            openom_vault_host::AccountMemberId::new(member_id.clone()),
+        );
+
+        let bound = host.account_confirm_binding(binding.clone()).unwrap();
+        assert_eq!(bound.record.unwrap().revision, 2);
+        let staged = host
+            .account_stage_backup(PendingBackupKind::Backup, binding.clone())
+            .unwrap();
+        let wire = serde_json::to_value(&staged).unwrap();
+        assert_eq!(wire["record"]["identity"]["memberId"], member_id);
+        assert_eq!(wire["storagePersistence"], "native");
+        assert_eq!(staged.record.unwrap().revision, 3);
+        let stored = host.store().load_account().unwrap().unwrap();
+        let expected = stored.pending_backup().unwrap().clone();
+        let stale = PendingAccountBackup::new(
+            PendingBackupKind::Backup,
+            AccountBackupVersion::new(
+                AccountGeneration::new(expected.version().generation().get() + 1),
+                expected.version().blob_hash(),
+            ),
+            binding.clone(),
+        );
+        let stale_result = host
+            .account_acknowledge_backup(
+                &stale,
+                AccountRemoteCheckpoint::new("\"etag\"", Some(expected.version())),
+            )
+            .unwrap();
+        assert!(!stale_result.cleared);
+
+        let acknowledged = host
+            .account_acknowledge_backup(
+                &expected,
+                AccountRemoteCheckpoint::new("\"etag\"", Some(expected.version())),
+            )
+            .unwrap();
+        assert!(acknowledged.cleared);
+        assert!(acknowledged.record.unwrap().pending_backup.is_none());
+
+        let revoke = host
+            .account_stage_backup(PendingBackupKind::Revoke, binding.clone())
+            .unwrap();
+        let downgrade = host
+            .account_stage_backup(PendingBackupKind::Backup, binding)
+            .unwrap();
+        assert_eq!(
+            downgrade.record.unwrap().revision,
+            revoke.record.unwrap().revision
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

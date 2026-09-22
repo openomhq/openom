@@ -170,13 +170,21 @@ impl AccountBackupVersion {
     }
 }
 
+/// Serialized wrapped blob fields in the frozen portable record shape.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountIdentityBlob {
+    keystore: AccountKeystore,
+    generation: AccountGeneration,
+    blob_hash: AccountBlobHash,
+}
+
 /// Wrapped account custody plus the anti-rollback floor scoped to its stable identity.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountIdentityRecord {
     member_id: AccountMemberId,
-    keystore: AccountKeystore,
-    version: AccountBackupVersion,
+    blob: AccountIdentityBlob,
     floor: AccountGenerationFloor,
 }
 
@@ -190,8 +198,11 @@ impl AccountIdentityRecord {
     ) -> Self {
         Self {
             member_id,
-            keystore,
-            version,
+            blob: AccountIdentityBlob {
+                keystore,
+                generation: version.generation(),
+                blob_hash: version.blob_hash(),
+            },
             floor: AccountGenerationFloor::new(floor.get().max(version.generation().get())),
         }
     }
@@ -203,12 +214,12 @@ impl AccountIdentityRecord {
 
     #[must_use]
     pub const fn keystore(&self) -> &AccountKeystore {
-        &self.keystore
+        &self.blob.keystore
     }
 
     #[must_use]
     pub const fn version(&self) -> AccountBackupVersion {
-        self.version
+        AccountBackupVersion::new(self.blob.generation, self.blob.blob_hash)
     }
 
     #[must_use]
@@ -218,7 +229,7 @@ impl AccountIdentityRecord {
 
     #[must_use]
     pub fn effective_floor(&self) -> AccountGenerationFloor {
-        AccountGenerationFloor::new(self.floor.get().max(self.version.generation().get()))
+        AccountGenerationFloor::new(self.floor.get().max(self.blob.generation.get()))
     }
 
     fn advance_floor(&mut self, floor: AccountGenerationFloor) {
@@ -398,14 +409,23 @@ impl AccountRecord {
             .checked_next()
             .ok_or_else(|| "account record revision exhausted".to_string())?;
         if identity.member_id == self.identity.member_id {
-            if identity.version.generation().get() < self.identity.effective_floor().get() {
+            if identity.version().generation().get() < self.identity.effective_floor().get() {
                 return Err("account generation rollback".into());
             }
             identity.advance_floor(self.identity.effective_floor());
-            let pending_backup = self
-                .pending_backup
-                .clone()
-                .filter(|pending| pending.version == identity.version);
+            let pending_backup = self.pending_backup.as_ref().and_then(|pending| {
+                if pending.kind == PendingBackupKind::Revoke {
+                    Some(PendingAccountBackup::new(
+                        PendingBackupKind::Revoke,
+                        identity.version(),
+                        pending.binding.clone(),
+                    ))
+                } else if pending.version == identity.version() {
+                    Some(pending.clone())
+                } else {
+                    None
+                }
+            });
             Ok(Self {
                 revision,
                 identity,
@@ -424,6 +444,100 @@ impl AccountRecord {
         }
     }
 
+    /// Persist a server-confirmed auth binding and discard checkpoints from a prior subject.
+    ///
+    /// # Errors
+    /// Returns an error when the binding belongs to another identity or the record revision is exhausted.
+    pub fn confirm_binding(&self, binding: AccountBinding) -> Result<Self, String> {
+        if binding.member_id != self.identity.member_id {
+            return Err("account binding belongs to another identity".into());
+        }
+        if self.binding.as_ref() == Some(&binding) {
+            return Ok(self.clone());
+        }
+        let next = Self {
+            revision: self.next_revision()?,
+            identity: self.identity.clone(),
+            binding: Some(binding),
+            acknowledged_backup: None,
+            pending_backup: None,
+        };
+        next.validate()?;
+        Ok(next)
+    }
+
+    /// Journal an upload/revocation for the exact current blob before network I/O.
+    ///
+    /// # Errors
+    /// Returns an error when the binding is not confirmed or the record revision is exhausted.
+    pub fn stage_backup(
+        &self,
+        kind: PendingBackupKind,
+        binding: AccountBinding,
+    ) -> Result<Self, String> {
+        if self.binding.as_ref() != Some(&binding) {
+            return Err("pending account backup binding is not confirmed".into());
+        }
+        let pending = PendingAccountBackup::new(kind, self.identity.version(), binding);
+        if self.pending_backup.as_ref() == Some(&pending) {
+            return Ok(self.clone());
+        }
+        if self.pending_backup.as_ref().is_some_and(|existing| {
+            existing.kind == PendingBackupKind::Revoke
+                && kind == PendingBackupKind::Backup
+                && existing.version.generation().get() >= self.identity.version().generation().get()
+        }) {
+            return Ok(self.clone());
+        }
+        let next = Self {
+            revision: self.next_revision()?,
+            identity: self.identity.clone(),
+            binding: self.binding.clone(),
+            acknowledged_backup: self.acknowledged_backup.clone(),
+            pending_backup: Some(pending),
+        };
+        next.validate()?;
+        Ok(next)
+    }
+
+    /// Compare-and-clear one exact pending operation after its server acknowledgement.
+    ///
+    /// # Errors
+    /// Returns an error when the checkpoint does not describe the pending operation or the revision is exhausted.
+    pub fn acknowledge_backup(
+        &self,
+        expected: &PendingAccountBackup,
+        checkpoint: AccountRemoteCheckpoint,
+    ) -> Result<Option<Self>, String> {
+        if self.pending_backup.as_ref() != Some(expected) {
+            return Ok(None);
+        }
+        match expected.kind {
+            PendingBackupKind::Backup if checkpoint.version != Some(expected.version) => {
+                return Err("backup acknowledgement version does not match pending backup".into());
+            }
+            PendingBackupKind::Revoke if checkpoint.version.is_some() => {
+                return Err("revoke acknowledgement must carry no remote version".into());
+            }
+            PendingBackupKind::Backup | PendingBackupKind::Revoke => {}
+        }
+        let next = Self {
+            revision: self.next_revision()?,
+            identity: self.identity.clone(),
+            binding: self.binding.clone(),
+            acknowledged_backup: Some(checkpoint),
+            pending_backup: None,
+        };
+        next.validate()?;
+        Ok(Some(next))
+    }
+
+    fn next_revision(&self) -> Result<AccountRecordRevision, String> {
+        self.revision
+            .checked_next()
+            .ok_or_else(|| "account record revision exhausted".to_string())
+    }
+
     /// Validate identity scoping after deserializing an untrusted/corrupt local record.
     ///
     /// # Errors
@@ -435,8 +549,8 @@ impl AccountRecord {
         if self.identity.member_id.as_str().is_empty() {
             return Err("account member id must not be empty".into());
         }
-        let actual_hash: [u8; 32] = Sha256::digest(self.identity.keystore.as_bytes()).into();
-        if actual_hash != *self.identity.version.blob_hash().as_bytes() {
+        let actual_hash: [u8; 32] = Sha256::digest(self.identity.keystore().as_bytes()).into();
+        if actual_hash != *self.identity.version().blob_hash().as_bytes() {
             return Err("account blob hash does not match wrapped bytes".into());
         }
         if self
@@ -579,10 +693,66 @@ mod account_record_tests {
     fn validation_rejects_a_blob_hash_for_different_wrapped_bytes() {
         let record = AccountRecord::new(identity("member-a", 1, 1));
         let mut encoded = serde_json::to_value(&record).unwrap();
-        encoded["identity"]["keystore"] = serde_json::json!([2, 2, 2, 2]);
+        encoded["identity"]["blob"]["keystore"] = serde_json::json!([2, 2, 2, 2]);
         let corrupted: AccountRecord = serde_json::from_value(encoded).unwrap();
 
         assert!(corrupted.validate().is_err());
+    }
+
+    #[test]
+    fn pending_backup_compare_and_clear_is_exact_and_revoke_wins() {
+        let initial = AccountRecord::new(identity("member-a", 4, 4));
+        let binding = AccountBinding::new(
+            "https://issuer",
+            "subject-a",
+            AccountMemberId::new("member-a"),
+        );
+        let bound = initial.confirm_binding(binding.clone()).unwrap();
+        let staged = bound
+            .stage_backup(PendingBackupKind::Backup, binding.clone())
+            .unwrap();
+        let expected = staged.pending_backup().unwrap().clone();
+        let stale = PendingAccountBackup::new(
+            PendingBackupKind::Backup,
+            AccountBackupVersion::new(AccountGeneration::new(3), expected.version().blob_hash()),
+            binding.clone(),
+        );
+        assert!(staged
+            .acknowledge_backup(
+                &stale,
+                AccountRemoteCheckpoint::new("\"etag\"", Some(expected.version())),
+            )
+            .unwrap()
+            .is_none());
+
+        let acknowledged = staged
+            .acknowledge_backup(
+                &expected,
+                AccountRemoteCheckpoint::new("\"etag\"", Some(expected.version())),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(acknowledged.pending_backup().is_none());
+
+        let revoke = acknowledged
+            .stage_backup(PendingBackupKind::Revoke, binding.clone())
+            .unwrap();
+        let downgrade = revoke
+            .stage_backup(PendingBackupKind::Backup, binding)
+            .unwrap();
+        assert_eq!(downgrade, revoke);
+
+        let rewrapped = revoke.next_identity(identity("member-a", 4, 5)).unwrap();
+        let carried = rewrapped.pending_backup().unwrap();
+        assert_eq!(carried.kind(), PendingBackupKind::Revoke);
+        assert_eq!(carried.version(), rewrapped.identity().version());
+        assert!(rewrapped
+            .acknowledge_backup(
+                revoke.pending_backup().unwrap(),
+                AccountRemoteCheckpoint::new("\"empty\"", None),
+            )
+            .unwrap()
+            .is_none());
     }
 }
 

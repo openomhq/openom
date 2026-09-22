@@ -26,6 +26,7 @@ backs onto `SqliteVaultStore` (behind the `sqlite` feature).
 | **VAULT-HOST-2** | `effective_floor` is at least the authenticated local blob generation, even when a persisted floor is lower. | Losing only the explicit floor must not make a surviving newer blob unusable or teach a lower floor. | `account_record_tests::effective_floor_self_heals_a_lower_persisted_value` |
 | **VAULT-HOST-3** | Replacing the stable identity replaces its floor and clears binding, acknowledgement, and pending state. | Sync metadata from one identity must never authorize or acknowledge another identity's backup. | `account_record_tests::a_different_identity_gets_its_own_floor_and_drops_remote_state` |
 | **VAULT-HOST-4** | The stored blob hash must equal SHA-256 of the exact wrapped account bytes. | A corrupted record must not associate backup acknowledgements with different ciphertext. | `account_record_tests::validation_rejects_a_blob_hash_for_different_wrapped_bytes` |
+| **VAULT-HOST-5** | A backup/revoke intent is pinned to the exact local version and confirmed binding; acknowledgement compare-clears only that intent, and a pending revoke cannot be downgraded to backup. | A stale response must never acknowledge newer custody, and revocation must win over an upload retry. | `account_record_tests::pending_backup_compare_and_clear_is_exact_and_revoke_wins` |
 
 ## Scope
 

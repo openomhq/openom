@@ -133,6 +133,15 @@ export class AccountRecordCoordinator {
     }
   }
 
+  async persistentStorageStatus() {
+    if (typeof this.#storageManager?.persisted !== 'function') return 'unavailable';
+    try {
+      return await this.#storageManager.persisted() ? 'granted' : 'denied';
+    } catch {
+      return 'denied';
+    }
+  }
+
   onRevision(callback) {
     if (typeof callback !== 'function') throw new Error('revision subscriber must be a function');
     this.#revisionSubscribers.add(callback);

@@ -507,6 +507,42 @@
         return { staleTreeDropped, secondStatus, oldPassRejected, reopenedMemberId: reopened.memberId };
       },
 
+      async accountPendingJournal() {
+        const nonce = crypto.randomUUID();
+        const worker = spawnWorker(`pending-account-${nonce}`);
+        await worker.warm();
+        const created = await worker.accountCreate('pending journal passphrase');
+        const binding = {
+          issuer: 'https://issuer.example', subject: `subject-${nonce}`, memberId: created.memberId,
+        };
+        await worker.accountConfirmBinding(binding);
+        const staged = await worker.accountStageBackup({ kind: 'backup', binding });
+        const expected = staged.record.pendingBackup;
+        const stale = {
+          ...expected,
+          version: { ...expected.version, generation: expected.version.generation + 1 },
+        };
+        const staleResult = await worker.accountAcknowledgeBackup({
+          expected: stale,
+          checkpoint: { etag: '"backup-v1"', version: expected.version },
+        });
+        const cleared = await worker.accountAcknowledgeBackup({
+          expected,
+          checkpoint: { etag: '"backup-v1"', version: expected.version },
+        });
+        const revoke = await worker.accountStageBackup({ kind: 'revoke', binding });
+        const downgrade = await worker.accountStageBackup({ kind: 'backup', binding });
+        return {
+          staleCleared: staleResult.cleared,
+          staleStillPending: staleResult.record.pendingBackup !== null,
+          exactCleared: cleared.cleared,
+          acknowledgedEtag: cleared.record.acknowledgedBackup.etag,
+          pendingKindAfterDowngrade: downgrade.record.pendingBackup.kind,
+          revokeRevision: revoke.record.revision,
+          downgradeRevision: downgrade.record.revision,
+        };
+      },
+
       // Phase 0 acceptance: one browser-profile account owns two trees, joins a third, changes its
       // passphrase once, then reopens every tree through the verified founder/member role dispatch.
       async durableAccountAcrossTrees(engine) {

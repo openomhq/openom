@@ -167,6 +167,23 @@ test('app-core: account record changes invalidate stale tabs and tree sessions',
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: account backup intent compare-clears only its exact version', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(String(error)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const result = await page.evaluate(() => (window as any).__syncWorker.accountPendingJournal());
+  expect(result.staleCleared).toBe(false);
+  expect(result.staleStillPending).toBe(true);
+  expect(result.exactCleared).toBe(true);
+  expect(result.acknowledgedEtag).toBe('"backup-v1"');
+  expect(result.pendingKindAfterDowngrade).toBe('revoke');
+  expect(result.downgradeRevision).toBe(result.revokeRevision);
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 for (const engine of ['chain', 'dag'] as const) {
   test(`app-core: one durable account owns and joins multiple trees (${engine})`, async ({ page }) => {
     const errors: string[] = [];

@@ -69,6 +69,22 @@ function clonePending(pending) {
   };
 }
 
+function bindingEqual(left, right) {
+  return left !== null
+    && right !== null
+    && left.issuer === right.issuer
+    && left.subject === right.subject
+    && left.memberId === right.memberId;
+}
+
+function pendingEqual(left, right) {
+  return left !== null
+    && right !== null
+    && left.kind === right.kind
+    && sameAccountVersion(left.version, right.version)
+    && bindingEqual(left.binding, right.binding);
+}
+
 function immutableRecord(record) {
   const identity = Object.freeze({
     memberId: record.identity.memberId,
@@ -105,10 +121,10 @@ function recordFromJson(value) {
     revision: value.revision,
     identity: {
       memberId: value.identity.memberId,
-      keystore: bytesFromJson(value.identity.keystore, 'identity.keystore'),
+      keystore: bytesFromJson(value.identity.blob?.keystore, 'identity.blob.keystore'),
       version: {
-        generation: value.identity.version?.generation,
-        blobHash: bytesFromJson(value.identity.version?.blobHash, 'identity.version.blobHash'),
+        generation: value.identity.blob?.generation,
+        blobHash: bytesFromJson(value.identity.blob?.blobHash, 'identity.blob.blobHash'),
       },
       floor: value.identity.floor,
     },
@@ -136,8 +152,11 @@ function recordToJson(record) {
     revision: record.revision,
     identity: {
       memberId: record.identity.memberId,
-      keystore: Array.from(record.identity.keystore),
-      version: version(record.identity.version),
+      blob: {
+        keystore: Array.from(record.identity.keystore),
+        generation: record.identity.version.generation,
+        blobHash: Array.from(record.identity.version.blobHash),
+      },
       floor: record.identity.floor,
     },
     binding: record.binding === null ? null : { ...record.binding },
@@ -259,16 +278,78 @@ export async function replaceAccountIdentity(record, snapshot) {
       ? Math.max(effectiveAccountFloor(current), snapshot.generation)
       : snapshot.generation,
   );
-  const pendingBackup = sameIdentity && current.pendingBackup !== null
-    && sameAccountVersion(current.pendingBackup.version, identity.version)
-    ? current.pendingBackup
-    : null;
+  let pendingBackup = null;
+  if (sameIdentity && current.pendingBackup?.kind === 'revoke') {
+    pendingBackup = { ...current.pendingBackup, version: identity.version };
+  } else if (sameIdentity && current.pendingBackup !== null
+    && sameAccountVersion(current.pendingBackup.version, identity.version)) {
+    pendingBackup = current.pendingBackup;
+  }
   return validateAccountRecord({
     revision: current.revision + 1,
     identity,
     binding: sameIdentity ? current.binding : null,
     acknowledgedBackup: sameIdentity ? current.acknowledgedBackup : null,
     pendingBackup,
+  });
+}
+
+/** Commits a server-confirmed auth binding and clears checkpoints from any prior subject. */
+export async function confirmAccountBinding(record, binding) {
+  const current = await validateAccountRecord(record);
+  validateBinding(binding, current.identity.memberId, 'binding');
+  if (bindingEqual(current.binding, binding)) return current;
+  if (current.revision === Number.MAX_SAFE_INTEGER) fail('revision is exhausted');
+  return validateAccountRecord({
+    ...current,
+    revision: current.revision + 1,
+    binding,
+    acknowledgedBackup: null,
+    pendingBackup: null,
+  });
+}
+
+/** Persists an upload/revocation intent for the exact current blob before any network request. */
+export async function stageAccountBackup(record, { kind, binding }) {
+  const current = await validateAccountRecord(record);
+  if (!bindingEqual(current.binding, binding)) fail('pendingBackup.binding is not the confirmed binding');
+  const pendingBackup = {
+    kind,
+    version: current.identity.version,
+    binding,
+  };
+  if (pendingEqual(current.pendingBackup, pendingBackup)) return current;
+  if (current.pendingBackup?.kind === 'revoke' && kind === 'backup'
+    && current.pendingBackup.version.generation >= current.identity.version.generation) {
+    return current;
+  }
+  if (current.revision === Number.MAX_SAFE_INTEGER) fail('revision is exhausted');
+  return validateAccountRecord({
+    ...current,
+    revision: current.revision + 1,
+    pendingBackup,
+  });
+}
+
+/** Clears only the exact pending operation acknowledged by the server and records its remote checkpoint. */
+export async function acknowledgeAccountBackup(record, expected, checkpoint) {
+  const current = await validateAccountRecord(record);
+  if (!pendingEqual(current.pendingBackup, expected)) return null;
+  const acknowledgedBackup = checkpoint === null ? null : cloneCheckpoint(checkpoint);
+  if (expected.kind === 'backup') {
+    if (acknowledgedBackup?.version === null
+      || !sameAccountVersion(acknowledgedBackup?.version, expected.version)) {
+      fail('backup acknowledgement version does not match pending backup');
+    }
+  } else if (acknowledgedBackup?.version !== null) {
+    fail('revoke acknowledgement must carry no remote version');
+  }
+  if (current.revision === Number.MAX_SAFE_INTEGER) fail('revision is exhausted');
+  return validateAccountRecord({
+    ...current,
+    revision: current.revision + 1,
+    acknowledgedBackup,
+    pendingBackup: null,
   });
 }
 

@@ -67,7 +67,8 @@ checkpoints; tree keyrings, watermarks, and logs stay per document. Browser muta
 use IndexedDB's separate opaque CAS token as a fail-safe, and verify an exact read-back before installing the
 live handle. Committed revisions cross tabs through `BroadcastChannel`; a peer drops resident account and tree
 handles when their exact source blob is stale. Persistent-browser-storage requests are best-effort; only a
-confirmed remote backup supplies a redundant identity copy. Owned and joined trees both borrow that account handle;
+confirmed remote backup supplies a redundant identity copy. Backup/revoke intent is committed before network I/O
+and compare-cleared only for the exact acknowledged blob version. Owned and joined trees both borrow that account handle;
 joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
 from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle
 and exposes its durable member ID only as the raw development bearer; it does not own accounts.

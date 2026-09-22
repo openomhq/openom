@@ -53,10 +53,13 @@ import init, {
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import {
+  acknowledgeAccountBackup,
+  confirmAccountBinding,
   createAccountRecord,
   effectiveAccountFloor,
   replaceAccountIdentity,
   sameAccountVersion,
+  stageAccountBackup,
 } from './accountRecord.js';
 import { AccountRecordCoordinator } from './accountRecordStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
@@ -600,6 +603,25 @@ async function commitAccountSnapshot(tx, current, handle, snapshot) {
   return { committed, identity };
 }
 
+function accountSyncView(record, storagePersistence) {
+  if (!record) return { record: null, storagePersistence };
+  return {
+    record: {
+      revision: record.revision,
+      identity: {
+        memberId: record.identity.memberId,
+        version: record.identity.version,
+        floor: record.identity.floor,
+        effectiveFloor: effectiveAccountFloor(record),
+      },
+      binding: record.binding,
+      acknowledgedBackup: record.acknowledgedBackup,
+      pendingBackup: record.pendingBackup,
+    },
+    storagePersistence,
+  };
+}
+
 async function verifyAccountPassphrase(passphrase) {
   return runAccountOperation(async (tx) => {
     const saved = tx.record();
@@ -792,6 +814,52 @@ const api = {
       } finally {
         snapshot?.free();
       }
+    });
+  },
+
+  /** Return non-secret local sync metadata; wrapped bytes remain behind accountSnapshot's explicit boundary. */
+  async accountSyncState() {
+    await ensureInit();
+    return runAccountOperation(async (tx) => accountSyncView(
+      tx.record(),
+      await accountRecordStore().persistentStorageStatus(),
+    ));
+  },
+
+  /** Persist the exact provider subject the server confirmed for this durable identity. */
+  async accountConfirmBinding(binding) {
+    await ensureInit();
+    return runAccountOperation(async (tx) => {
+      const current = tx.record();
+      if (!current) throw new Error('no account keystore stored for this profile');
+      const next = await confirmAccountBinding(current, binding);
+      const committed = next.revision === current.revision ? current : await tx.commit(next);
+      return accountSyncView(committed, await accountRecordStore().persistentStorageStatus());
+    });
+  },
+
+  /** Journal a backup/revoke before network I/O, pinned to the exact current blob and confirmed binding. */
+  async accountStageBackup({ kind, binding }) {
+    await ensureInit();
+    return runAccountOperation(async (tx) => {
+      const current = tx.record();
+      if (!current) throw new Error('no account keystore stored for this profile');
+      const next = await stageAccountBackup(current, { kind, binding });
+      const committed = next.revision === current.revision ? current : await tx.commit(next);
+      return accountSyncView(committed, await accountRecordStore().persistentStorageStatus());
+    });
+  },
+
+  /** Compare-and-clear only the exact operation that received a server acknowledgement. */
+  async accountAcknowledgeBackup({ expected, checkpoint }) {
+    await ensureInit();
+    return runAccountOperation(async (tx) => {
+      const current = tx.record();
+      if (!current) throw new Error('no account keystore stored for this profile');
+      const next = await acknowledgeAccountBackup(current, expected, checkpoint);
+      if (!next) return { cleared: false, ...accountSyncView(current, await accountRecordStore().persistentStorageStatus()) };
+      const committed = await tx.commit(next);
+      return { cleared: true, ...accountSyncView(committed, await accountRecordStore().persistentStorageStatus()) };
     });
   },
 

@@ -8,6 +8,8 @@ Fetched account backups are first opened in temporary Rust custody. Only the res
 is committed to the injected store; the resident account and live trees are replaced after that commit lands.
 All native account mutations hold one profile operation mutex across read, credential verification, record-CAS
 commit, read-back verification, and resident-handle installation.
+Registration bindings and backup/revoke intents use that same gate and complete-record CAS. The host exposes a
+non-secret sync projection while keeping wrapped keystore bytes behind the explicit snapshot operation.
 
 ## What it is — and is not
 
@@ -25,6 +27,7 @@ client, and it does not persist invite-handshake resume state.
 | **APP-HOST-3** | Account lock drops all resident account and tree secrets without deleting their encrypted persistence. | A locked session must not retain usable keys or destroy the data needed to unlock again. | `tests::account_status_and_lock_follow_native_custody` |
 | **APP-HOST-4** | Candidate adoption verifies credentials and the generation floor, commits the authenticated snapshot, and only then replaces resident account/tree custody; recovery adoption rotates its credential first. | A bad credential or failed local write must leave the previously usable identity and trees intact, and a used recovery code must not remain valid. | `tests::candidate_adoption_commits_before_replacing_native_custody`, `tests::recovery_candidate_rotates_before_native_adoption` |
 | **APP-HOST-5** | Native profile mutations serialize the complete record protocol, account-dependent tree lifecycle uses the same gate, and record revision advances independently of account generation. | A same-generation passphrase re-wrap is still a new local record; neither concurrent credential calls nor account-backed tree opens may cross an identity replacement. | `tests::profile_gate_blocks_account_dependent_tree_lifecycle`, `tests::one_native_account_owns_multiple_trees_and_changes_its_passphrase_once` |
+| **APP-HOST-6** | Native backup intent is durable before network I/O and clears only when the exact pending version is acknowledged. | A stale server response must not erase or acknowledge a newer local re-wrap. | `tests::account_backup_journal_compare_clears_only_the_exact_pending_version` |
 
 ## Position
 
