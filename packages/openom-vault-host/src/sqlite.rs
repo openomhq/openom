@@ -1,8 +1,8 @@
 //! A durable [`VaultStore`] on `SQLite`, for the Tauri host.
 //!
-//! Holds the keyring (a wrapped DEK —
-//! not secret, needs only durability) and the keyring-revision watermark (anti-rollback state)
-//! in the app data dir. Fable's guidance: keep this in its OWN file (`vault.sqlite`), separate
+//! Holds the revisioned profile-account record, each keyring (a wrapped DEK — not secret, needs only
+//! durability), and the keyring-revision watermark (anti-rollback state) in the app data dir. Keep this in its
+//! OWN file (`vault.sqlite`), separate
 //! from the doc store's `tree.sqlite`, so copying/restoring the tree database can't drag the
 //! watermark back with it.
 //!
@@ -13,10 +13,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use store_schema::ResetPolicy;
 
-use crate::{AccountGeneration, AccountKeystore, AccountRecord, VaultStore};
+use crate::{AccountRecord, AccountRecordRevision, VaultStore};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
        tree_key TEXT PRIMARY KEY,
@@ -28,8 +28,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
      );
      CREATE TABLE IF NOT EXISTS account (
        singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
-       bytes      BLOB NOT NULL,
-       generation INTEGER NOT NULL
+       record     BLOB NOT NULL
      );";
 
 /// The schema version stamped in the DB header (`PRAGMA user_version`). BUMP THIS whenever [`SCHEMA`] changes
@@ -37,8 +36,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
 /// the stale DB to a `.bak` — this store holds the only local wrapped-DEK copy + the anti-rollback watermark, so
 /// it is NEVER destroyed) and FAILS CLOSED in release (errors, touches nothing). See [`store_schema`].
 ///
-/// v3: replaced per-tree keystores with one generation-stamped profile account.
-const SCHEMA_VERSION: i64 = 3;
+/// v4: replaced the split account columns with one revisioned, identity-scoped custody/sync record.
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct SqliteVaultStore {
     conn: Mutex<Connection>,
@@ -143,44 +142,104 @@ impl VaultStore for SqliteVaultStore {
     }
 
     fn load_account(&self) -> Result<Option<AccountRecord>, String> {
-        self.conn()
+        let bytes: Option<Vec<u8>> = self
+            .conn()
             .query_row(
-                "SELECT bytes, generation FROM account WHERE singleton = 1",
+                "SELECT record FROM account WHERE singleton = 1",
                 [],
-                |row| {
-                    Ok(AccountRecord {
-                        keystore: AccountKeystore::new(row.get(0)?),
-                        generation: AccountGeneration::new(row.get(1)?),
-                    })
-                },
+                |row| row.get(0),
             )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other.to_string()),
+            .optional()
+            .map_err(|error| error.to_string())?;
+        bytes
+            .map(|bytes| {
+                let record: AccountRecord =
+                    serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                record.validate()?;
+                Ok(record)
             })
+            .transpose()
     }
 
-    fn commit_account(&self, account: &AccountRecord) -> Result<(), String> {
-        let changed = self
-            .conn()
-            .execute(
-                "INSERT INTO account (singleton, bytes, generation) VALUES (1, ?1, ?2)
-                 ON CONFLICT(singleton) DO UPDATE SET bytes = excluded.bytes, generation = excluded.generation
-                 WHERE excluded.generation >= account.generation",
-                params![account.keystore.as_bytes(), account.generation.get()],
+    fn commit_account(
+        &self,
+        account: &AccountRecord,
+        expected_revision: Option<AccountRecordRevision>,
+    ) -> Result<(), String> {
+        account.validate()?;
+        let mut connection = self.conn();
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let current_bytes: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT record FROM account WHERE singleton = 1",
+                [],
+                |row| row.get(0),
             )
-            .map_err(|e| e.to_string())?;
-        if changed == 0 {
-            return Err("account generation rollback".into());
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let current = current_bytes
+            .map(|bytes| {
+                serde_json::from_slice::<AccountRecord>(&bytes).map_err(|error| error.to_string())
+            })
+            .transpose()?;
+        if let Some(record) = &current {
+            record.validate()?;
         }
-        Ok(())
+        let current_revision = current.as_ref().map(AccountRecord::revision);
+        if current_revision != expected_revision {
+            return Err(format!(
+                "account record conflict: expected {expected_revision:?}, found {current_revision:?}"
+            ));
+        }
+        let required_revision = match expected_revision {
+            Some(revision) => revision
+                .checked_next()
+                .ok_or_else(|| "account record revision exhausted".to_string())?,
+            None => AccountRecordRevision::INITIAL,
+        };
+        if account.revision() != required_revision {
+            return Err("account record revision is not the next revision".into());
+        }
+        if current.as_ref().is_some_and(|stored| {
+            stored.identity().member_id() == account.identity().member_id()
+                && account.identity().effective_floor() < stored.identity().effective_floor()
+        }) {
+            return Err("account generation floor rollback".into());
+        }
+        let encoded = serde_json::to_vec(account).map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT INTO account (singleton, record) VALUES (1, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET record = excluded.record",
+            params![encoded],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        AccountBackupVersion, AccountBlobHash, AccountGeneration, AccountGenerationFloor,
+        AccountIdentityRecord, AccountKeystore, AccountMemberId,
+    };
+    use sha2::{Digest, Sha256};
+
+    fn account_identity(member_id: &str, generation: u64, byte: u8) -> AccountIdentityRecord {
+        let keystore = vec![byte; 8];
+        AccountIdentityRecord::new(
+            AccountMemberId::new(member_id),
+            AccountKeystore::new(keystore.clone()),
+            AccountBackupVersion::new(
+                AccountGeneration::new(generation),
+                AccountBlobHash::new(Sha256::digest(&keystore).into()),
+            ),
+            AccountGenerationFloor::new(generation),
+        )
+    }
 
     #[test]
     fn keyring_and_watermark_persist_across_reopen() {
@@ -194,17 +253,8 @@ mod tests {
                 .unwrap();
             s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 3])
                 .unwrap();
-            s.commit_account(&AccountRecord {
-                keystore: AccountKeystore::new(b"wrapped-account".to_vec()),
-                generation: AccountGeneration::new(7),
-            })
-            .unwrap();
-            assert!(s
-                .commit_account(&AccountRecord {
-                    keystore: AccountKeystore::new(b"rolled-back-account".to_vec()),
-                    generation: AccountGeneration::new(6),
-                })
-                .is_err());
+            let account = AccountRecord::new(account_identity("member-a", 7, 7));
+            s.commit_account(&account, None).unwrap();
         }
         {
             let s = SqliteVaultStore::open(&path).unwrap();
@@ -217,15 +267,36 @@ mod tests {
             assert!(s.watermark("absent").unwrap().is_empty());
             assert_eq!(
                 s.load_account().unwrap(),
-                Some(AccountRecord {
-                    keystore: AccountKeystore::new(b"wrapped-account".to_vec()),
-                    generation: AccountGeneration::new(7),
-                })
+                Some(AccountRecord::new(account_identity("member-a", 7, 7)))
             );
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(path.with_extension(format!("sqlite{suffix}")));
         }
+    }
+
+    #[test]
+    fn account_record_cas_rejects_conflicts_and_identity_scoped_floor_rollback() {
+        let store = SqliteVaultStore::in_memory().unwrap();
+        let first = AccountRecord::new(account_identity("member-a", 7, 7));
+        store.commit_account(&first, None).unwrap();
+
+        let next = first
+            .next_identity(account_identity("member-a", 8, 8))
+            .unwrap();
+        assert!(store.commit_account(&next, None).is_err());
+        store.commit_account(&next, Some(first.revision())).unwrap();
+
+        assert!(next
+            .next_identity(account_identity("member-a", 6, 6))
+            .is_err());
+        let replacement = next
+            .next_identity(account_identity("member-b", 1, 1))
+            .unwrap();
+        store
+            .commit_account(&replacement, Some(next.revision()))
+            .unwrap();
+        assert_eq!(store.load_account().unwrap(), Some(replacement));
     }
 
     /// Golden-shape tripwire: if [`SCHEMA`] changes, this assertion breaks and forces the author to update it —
@@ -239,8 +310,8 @@ mod tests {
         assert_eq!(
             (SCHEMA_VERSION, shape.as_str()),
             (
-                3,
-                "account(singleton:INTEGER nn=0 pk=1, bytes:BLOB nn=1 pk=0, generation:INTEGER nn=1 pk=0)\n\
+                4,
+                "account(singleton:INTEGER nn=0 pk=1, record:BLOB nn=1 pk=0)\n\
                  keyrings(tree_key:TEXT nn=0 pk=1, bytes:BLOB nn=1 pk=0)\n\
                  watermarks(tree_key:TEXT nn=0 pk=1, watermark:BLOB nn=1 pk=0)\n"
             ),

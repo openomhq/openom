@@ -1,6 +1,6 @@
 [package]
 name = "openom-vault-host"
-description = "openom — the native keyring/watermark custody seam: the VaultStore trait + its durable SQLite backing (the Tauri host persists the wrapped DEK + anti-rollback cursor here). The DEK/engine/session logic now lives in openom-app-core-host."
+description = "openom — native persistence for the revisioned profile-account record and per-tree keyring/watermark custody."
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -10,6 +10,9 @@ rust-version.workspace = true
 # The durable SqliteVaultStore (Tauri deployment) is backed by rusqlite, opened through store-schema's versioned
 # open (the shared schema-drift policy: debug self-heal / release fail-closed).
 rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 store-schema = { workspace = true, optional = true }
 
 [features]

@@ -8,7 +8,11 @@ use openom_app_core::{AccountHandle, AppCore, StoredObject};
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
-use openom_vault_host::{AccountGeneration, AccountKeystore, AccountRecord, VaultStore};
+use openom_vault_host::{
+    AccountBackupVersion as StoredAccountBackupVersion, AccountBlobHash as StoredAccountBlobHash,
+    AccountGeneration, AccountGenerationFloor, AccountIdentityRecord, AccountKeystore,
+    AccountMemberId, AccountRecord, VaultStore,
+};
 use store_blob::{BlobStore, FsBlob, Precondition};
 use store_media::MediaStore;
 pub use store_media::{BlobData, BlobMeta};
@@ -316,6 +320,8 @@ pub struct AppCoreHost<St: VaultStore> {
     cores: Mutex<CoreMap>,
     /// The one unlocked profile account shared by every owned and joined tree session.
     account: Mutex<Option<AccountHandle>>,
+    /// Serializes the complete profile-account read/verify/mutate/commit/install protocol.
+    account_ops: Mutex<()>,
     /// Per-doc EXCLUSIVE operation lock. Every op that opens a core or writes the keyring (the provision /
     /// unlock / recover / change-passphrase / join / member-unlock / membership / keyring-sync paths) holds it
     /// across its whole body, so a re-open's check-then-commit can't be raced by another open of the same doc
@@ -336,6 +342,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             engine,
             cores: Mutex::new(HashMap::new()),
             account: Mutex::new(None),
+            account_ops: Mutex::new(()),
             op_locks: Mutex::new(HashMap::new()),
             media_stores: Mutex::new(HashMap::new()),
         }
@@ -350,6 +357,12 @@ impl<St: VaultStore> AppCoreHost<St> {
                 .entry(doc.to_string())
                 .or_default(),
         )
+    }
+
+    fn account_op(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The keyring/watermark store (for the Tauri command layer to reach the native custody).
@@ -368,13 +381,6 @@ impl<St: VaultStore> AppCoreHost<St> {
         f(account.as_ref().ok_or(HostError::NoAccount)?)
     }
 
-    fn account_record(keystore: Vec<u8>, generation: u64) -> AccountRecord {
-        AccountRecord {
-            keystore: AccountKeystore::new(keystore),
-            generation: AccountGeneration::new(generation),
-        }
-    }
-
     fn snapshot_wire(snapshot: openom_app_core::AccountSnapshot) -> AccountSnapshot {
         let version = snapshot.version();
         AccountSnapshot {
@@ -384,29 +390,64 @@ impl<St: VaultStore> AppCoreHost<St> {
         }
     }
 
-    fn candidate_floor(&self) -> Result<openom_app_core::AccountGeneration, HostError> {
-        Ok(self
+    fn stored_identity(handle: &AccountHandle) -> AccountIdentityRecord {
+        let snapshot = openom_app_core::account_snapshot(handle);
+        let version = snapshot.version();
+        let generation = AccountGeneration::new(version.generation().get());
+        AccountIdentityRecord::new(
+            AccountMemberId::new(handle.member_id()),
+            AccountKeystore::new(snapshot.into_keystore()),
+            StoredAccountBackupVersion::new(
+                generation,
+                StoredAccountBlobHash::new(*version.blob_hash().as_bytes()),
+            ),
+            AccountGenerationFloor::new(generation.get()),
+        )
+    }
+
+    fn next_account_record(
+        current: Option<&AccountRecord>,
+        handle: &AccountHandle,
+    ) -> Result<AccountRecord, HostError> {
+        let identity = Self::stored_identity(handle);
+        match current {
+            Some(record) => record.next_identity(identity).map_err(HostError::Store),
+            None => Ok(AccountRecord::new(identity)),
+        }
+    }
+
+    fn persist_account_handle(
+        &self,
+        current: Option<&AccountRecord>,
+        handle: &AccountHandle,
+    ) -> Result<AccountRecord, HostError> {
+        let next = Self::next_account_record(current, handle)?;
+        self.store
+            .commit_account(&next, current.map(AccountRecord::revision))
+            .map_err(HostError::Store)?;
+        if self
             .store
             .load_account()
             .map_err(HostError::Store)?
-            .map_or_else(openom_app_core::AccountGeneration::default, |record| {
-                openom_app_core::AccountGeneration::new(record.generation.get())
-            }))
+            .as_ref()
+            != Some(&next)
+        {
+            return Err(HostError::Store(
+                "account persistence verification failed".into(),
+            ));
+        }
+        Ok(next)
     }
 
     fn commit_candidate(
         &self,
+        current: Option<&AccountRecord>,
         handle: AccountHandle,
         recovery_code: String,
     ) -> Result<AccountAdopted, HostError> {
         let member_id = handle.member_id().to_string();
         let snapshot = Self::snapshot_wire(openom_app_core::account_snapshot(&handle));
-        self.store
-            .commit_account(&Self::account_record(
-                snapshot.keystore.clone(),
-                snapshot.generation,
-            ))
-            .map_err(HostError::Store)?;
+        self.persist_account_handle(current, &handle)?;
         self.lock_cores().clear();
         *self
             .account
@@ -425,6 +466,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// # Errors
     /// Returns [`HostError::Store`] when persisted account custody cannot be read.
     pub fn account_status(&self) -> Result<AccountStatus, HostError> {
+        let _operation = self.account_op();
         if self
             .account
             .lock()
@@ -449,6 +491,10 @@ impl<St: VaultStore> AppCoreHost<St> {
 
     /// Drop every live tree core and the resident profile account. Persisted ciphertext remains untouched.
     pub fn account_lock(&self) {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.lock_cores().clear();
         *self
             .account
@@ -461,21 +507,16 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// # Errors
     /// Returns [`HostError`] if an account already exists, account creation fails, or persistence fails.
     pub fn account_create(&self, passphrase: &Passphrase) -> Result<AccountOpened, HostError> {
-        if self
-            .store
-            .load_account()
-            .map_err(HostError::Store)?
-            .is_some()
-        {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.store.load_account().map_err(HostError::Store)?;
+        if current.is_some() {
             return Err(HostError::Store("profile account already exists".into()));
         }
         let created = openom_app_core::account_create(passphrase)?;
-        self.store
-            .commit_account(&Self::account_record(
-                created.keystore,
-                created.generation.get(),
-            ))
-            .map_err(HostError::Store)?;
+        self.persist_account_handle(None, &created.handle)?;
         *self
             .account
             .lock()
@@ -491,6 +532,10 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// # Errors
     /// Returns [`HostError`] if no account exists, the passphrase is wrong, or persistence cannot be read.
     pub fn account_unlock(&self, passphrase: &Passphrase) -> Result<AccountIdentity, HostError> {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let record = self
             .store
             .load_account()
@@ -498,9 +543,14 @@ impl<St: VaultStore> AppCoreHost<St> {
             .ok_or(HostError::NoAccount)?;
         let handle = openom_app_core::account_unlock(
             passphrase,
-            record.keystore.as_bytes(),
-            openom_app_core::AccountGeneration::new(record.generation.get()),
+            record.identity().keystore().as_bytes(),
+            openom_app_core::AccountGeneration::new(record.identity().effective_floor().get()),
         )?;
+        if handle.member_id() != record.identity().member_id().as_str() {
+            return Err(HostError::Store(
+                "stored account member id does not match authenticated keystore".into(),
+            ));
+        }
         let identity = openom_app_core::account_public_identity(&handle);
         *self
             .account
@@ -518,6 +568,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// # Errors
     /// Returns [`HostError::NoAccount`] when the profile account is locked.
     pub fn account_public_identity(&self) -> Result<AccountIdentity, HostError> {
+        let _operation = self.account_op();
         self.with_account(|account| {
             let identity = openom_app_core::account_public_identity(account);
             Ok(AccountIdentity {
@@ -533,8 +584,11 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// # Errors
     /// Returns [`HostError::NoAccount`] when the profile account is locked.
     pub fn account_snapshot(&self) -> Result<AccountSnapshot, HostError> {
+        let _operation = self.account_op();
         self.with_account(|account| {
-            Ok(Self::snapshot_wire(openom_app_core::account_snapshot(account)))
+            Ok(Self::snapshot_wire(openom_app_core::account_snapshot(
+                account,
+            )))
         })
     }
 
@@ -547,12 +601,20 @@ impl<St: VaultStore> AppCoreHost<St> {
         candidate: &[u8],
         passphrase: &Passphrase,
     ) -> Result<AccountAdopted, HostError> {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.store.load_account().map_err(HostError::Store)?;
+        let floor = current
+            .as_ref()
+            .map_or(0, |record| record.identity().effective_floor().get());
         let handle = openom_app_core::account_open_candidate(
             passphrase,
             candidate,
-            self.candidate_floor()?,
+            openom_app_core::AccountGeneration::new(floor),
         )?;
-        self.commit_candidate(handle, String::new())
+        self.commit_candidate(current.as_ref(), handle, String::new())
     }
 
     /// Verify, rotate, and durably adopt a fetched account blob with a recovery credential.
@@ -566,13 +628,21 @@ impl<St: VaultStore> AppCoreHost<St> {
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
     ) -> Result<AccountAdopted, HostError> {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.store.load_account().map_err(HostError::Store)?;
+        let floor = current
+            .as_ref()
+            .map_or(0, |record| record.identity().effective_floor().get());
         let recovered = openom_app_core::account_recover_candidate(
             recovery_code,
             new_passphrase,
             candidate,
-            self.candidate_floor()?,
+            openom_app_core::AccountGeneration::new(floor),
         )?;
-        self.commit_candidate(recovered.handle, recovered.recovery_code)
+        self.commit_candidate(current.as_ref(), recovered.handle, recovered.recovery_code)
     }
 
     /// Recover and rotate the singleton account, atomically persisting its new generation.
@@ -584,6 +654,10 @@ impl<St: VaultStore> AppCoreHost<St> {
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
     ) -> Result<AccountOpened, HostError> {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let record = self
             .store
             .load_account()
@@ -592,15 +666,10 @@ impl<St: VaultStore> AppCoreHost<St> {
         let recovered = openom_app_core::account_recover(
             recovery_code,
             new_passphrase,
-            record.keystore.as_bytes(),
-            openom_app_core::AccountGeneration::new(record.generation.get()),
+            record.identity().keystore().as_bytes(),
+            openom_app_core::AccountGeneration::new(record.identity().effective_floor().get()),
         )?;
-        self.store
-            .commit_account(&Self::account_record(
-                recovered.keystore,
-                recovered.generation.get(),
-            ))
-            .map_err(HostError::Store)?;
+        self.persist_account_handle(Some(&record), &recovered.handle)?;
         *self
             .account
             .lock()
@@ -619,6 +688,15 @@ impl<St: VaultStore> AppCoreHost<St> {
         &self,
         new_passphrase: &Passphrase,
     ) -> Result<AccountChanged, HostError> {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = self
+            .store
+            .load_account()
+            .map_err(HostError::Store)?
+            .ok_or(HostError::NoAccount)?;
         let mut resident = self
             .account
             .lock()
@@ -627,15 +705,10 @@ impl<St: VaultStore> AppCoreHost<St> {
             resident.as_mut().ok_or(HostError::NoAccount)?,
             new_passphrase,
         )?;
-        if let Err(error) = self
-            .store
-            .commit_account(&Self::account_record(
-                changed.keystore,
-                changed.generation.get(),
-            ))
-        {
+        let handle = resident.as_ref().ok_or(HostError::NoAccount)?;
+        if let Err(error) = self.persist_account_handle(Some(&record), handle) {
             *resident = None;
-            return Err(HostError::Store(error));
+            return Err(error);
         }
         Ok(AccountChanged {
             generation: changed.generation.get(),
@@ -648,6 +721,15 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// Returns [`HostError`] if the account is locked, the passphrase is wrong, rotation fails, or persistence
     /// fails. A persistence failure locks the resident account rather than retaining uncommitted root material.
     pub fn account_rotate_root(&self, passphrase: &Passphrase) -> Result<AccountOpened, HostError> {
+        let _operation = self
+            .account_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = self
+            .store
+            .load_account()
+            .map_err(HostError::Store)?
+            .ok_or(HostError::NoAccount)?;
         let mut resident = self
             .account
             .lock()
@@ -656,15 +738,10 @@ impl<St: VaultStore> AppCoreHost<St> {
             resident.as_mut().ok_or(HostError::NoAccount)?,
             passphrase,
         )?;
-        if let Err(error) = self
-            .store
-            .commit_account(&Self::account_record(
-                rotated.keystore,
-                rotated.generation.get(),
-            ))
-        {
+        let handle = resident.as_ref().ok_or(HostError::NoAccount)?;
+        if let Err(error) = self.persist_account_handle(Some(&record), handle) {
             *resident = None;
-            return Err(HostError::Store(error));
+            return Err(error);
         }
         Ok(AccountOpened {
             recovery_code: rotated.recovery_code,
@@ -682,6 +759,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         subject: &str,
         timestamp: i64,
     ) -> Result<Vec<u8>, HostError> {
+        let _operation = self.account_op();
         self.with_account(|account| {
             Ok(openom_app_core::account_register_proof(
                 account, issuer, subject, timestamp,
@@ -810,6 +888,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// # Errors
     /// [`HostError::Vault`] if provisioning fails; [`HostError::Store`] if the keyring can't be persisted.
     pub fn provision_tree(&self, doc: &str, tree_id: &TreeId) -> Result<Provisioned, HostError> {
+        let _account_operation = self.account_op();
         let op = self.op_lock(doc);
         let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let replica = ReplicaId::new(fresh_replica()?);
@@ -845,6 +924,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// [`HostError::NoKeyring`] if the tree was never provisioned/joined; [`HostError::Vault`] on a wrong
     /// passphrase / stale keyring; [`HostError::Store`] on a store read failure.
     pub fn open_tree(&self, doc: &str, tree_id: &TreeId) -> Result<Unlocked, HostError> {
+        let _account_operation = self.account_op();
         let op = self.op_lock(doc);
         let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let anchor = self
@@ -1018,6 +1098,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         tree_id: &TreeId,
         member: &MemberToAdd,
     ) -> Result<AddedMember, HostError> {
+        let _account_operation = self.account_op();
         // Hold the owner core's per-doc lock across the WHOLE op — a concurrent sync/session op that grabbed the
         // same Arc must not interleave with the keyring change + in-place re-open (design-review F1/F3). The
         // op-lock also serializes the store writes below against a concurrent open of the same doc.
@@ -1129,6 +1210,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         tree_id: &TreeId,
         remove_member_id: &MemberId,
     ) -> Result<RemovedMember, HostError> {
+        let _account_operation = self.account_op();
         // Hold the owner core's per-doc lock across the WHOLE op (F1/F3) + the op-lock to serialize store writes.
         let op = self.op_lock(doc);
         let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1229,6 +1311,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         target_member_id: &MemberId,
         new_role: &str,
     ) -> Result<RoleChanged, HostError> {
+        let _account_operation = self.account_op();
         let op = self.op_lock(doc);
         let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let handle = self
@@ -1307,6 +1390,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         pinned_revision: u32,
         pinned_hash: &[u8],
     ) -> Result<MemberUnlocked, HostError> {
+        let _account_operation = self.account_op();
         // Hold the doc's op-lock across the WHOLE join (check-then-commit): two concurrent joins (a double
         // invoke, or a compromised webview racing two invite payloads) must not both pass the re-join guard and
         // both write, the later silently winning — the exact attacker-redirect the guard exists to prevent.
@@ -1385,6 +1469,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         anchor_wrapped: &[u8],
         pin: &[u8],
     ) -> Result<MemberUnlocked, HostError> {
+        let _account_operation = self.account_op();
         if self.engine != EngineKind::Dag {
             return Err(HostError::Store("join_dag_anchor is dag-only".into()));
         }
@@ -1594,6 +1679,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// [`HostError::Store`] if the member-context store read fails.
     #[cfg(test)]
     pub fn has_member_context(&self, doc: &str) -> Result<bool, HostError> {
+        let _account_operation = self.account_op();
         let keyring = self.store.load_keyring(doc).map_err(HostError::Store)?;
         let Some(keyring) = keyring else {
             return Ok(false);
@@ -2289,9 +2375,10 @@ mod tests {
     use super::{AccountRecord, AccountStatus, AppCoreHost, HostError, TreeId, VaultStore};
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::EngineKind;
+    use openom_vault_host::AccountRecordRevision;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     type Rows = HashMap<String, (Vec<u8>, Vec<u8>)>;
 
@@ -2335,11 +2422,26 @@ mod tests {
         fn load_account(&self) -> Result<Option<AccountRecord>, String> {
             Ok(self.account.lock().unwrap().clone())
         }
-        fn commit_account(&self, account: &AccountRecord) -> Result<(), String> {
+        fn commit_account(
+            &self,
+            account: &AccountRecord,
+            expected_revision: Option<AccountRecordRevision>,
+        ) -> Result<(), String> {
             if self.fail_account_commit.load(Ordering::Relaxed) {
                 return Err("injected account commit failure".into());
             }
-            *self.account.lock().unwrap() = Some(account.clone());
+            let mut stored = self.account.lock().unwrap();
+            let found = stored.as_ref().map(AccountRecord::revision);
+            if found != expected_revision {
+                return Err("account record conflict".into());
+            }
+            let required = expected_revision.map_or(AccountRecordRevision::INITIAL, |revision| {
+                revision.checked_next().unwrap()
+            });
+            if account.revision() != required {
+                return Err("account record revision is not next".into());
+            }
+            *stored = Some(account.clone());
             Ok(())
         }
     }
@@ -2364,7 +2466,8 @@ mod tests {
                 .load_account()
                 .unwrap()
                 .unwrap()
-                .keystore
+                .identity()
+                .keystore()
                 .as_bytes(),
         )
         .unwrap()
@@ -2448,6 +2551,43 @@ mod tests {
     }
 
     #[test]
+    fn profile_gate_blocks_account_dependent_tree_lifecycle() {
+        let dir = temp_dir();
+        let host = Arc::new(AppCoreHost::new(
+            MemStore::default(),
+            &dir,
+            EngineKind::Chain,
+        ));
+        host.account_create(&Passphrase::new(b"profile passphrase".to_vec()))
+            .unwrap();
+        let operation = host.account_op();
+        let worker = Arc::clone(&host);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(
+                    worker
+                        .provision_tree("tree", &TreeId::new([27; 16]))
+                        .is_ok(),
+                )
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+
+        drop(operation);
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap());
+        thread.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn candidate_adoption_commits_before_replacing_native_custody() {
         let dir = temp_dir();
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
@@ -2462,9 +2602,15 @@ mod tests {
         assert_ne!(local_member, remote_member);
 
         assert!(host
-            .account_adopt_candidate(&remote.keystore, &Passphrase::new(b"wrong passphrase".to_vec()))
+            .account_adopt_candidate(
+                &remote.keystore,
+                &Passphrase::new(b"wrong passphrase".to_vec())
+            )
             .is_err());
-        assert_eq!(host.account_public_identity().unwrap().member_id, local_member);
+        assert_eq!(
+            host.account_public_identity().unwrap().member_id,
+            local_member
+        );
         assert!(host.core("tree").is_some());
 
         host.store()
@@ -2474,7 +2620,10 @@ mod tests {
             host.account_adopt_candidate(&remote.keystore, &remote_passphrase),
             Err(HostError::Store(_))
         ));
-        assert_eq!(host.account_public_identity().unwrap().member_id, local_member);
+        assert_eq!(
+            host.account_public_identity().unwrap().member_id,
+            local_member
+        );
         assert!(host.core("tree").is_some());
 
         host.store()
@@ -2484,7 +2633,10 @@ mod tests {
             .account_adopt_candidate(&remote.keystore, &remote_passphrase)
             .unwrap();
         assert_eq!(adopted.member_id, remote_member);
-        assert_eq!(host.account_public_identity().unwrap().member_id, remote_member);
+        assert_eq!(
+            host.account_public_identity().unwrap().member_id,
+            remote_member
+        );
         assert!(host.core("tree").is_none());
         let snapshot = host.account_snapshot().unwrap();
         assert_eq!(snapshot.generation, adopted.generation);
@@ -2505,11 +2657,7 @@ mod tests {
         let new_passphrase = Passphrase::new(b"recovered profile passphrase".to_vec());
 
         let adopted = host
-            .account_adopt_recovery_candidate(
-                &remote.keystore,
-                &old_recovery,
-                &new_passphrase,
-            )
+            .account_adopt_recovery_candidate(&remote.keystore, &old_recovery, &new_passphrase)
             .unwrap();
 
         assert_eq!(adopted.member_id, remote_member);
@@ -2522,7 +2670,10 @@ mod tests {
                 &Passphrase::new(b"second recovery passphrase".to_vec()),
             )
             .is_err());
-        assert_eq!(host.account_unlock(&new_passphrase).unwrap().member_id, remote_member);
+        assert_eq!(
+            host.account_unlock(&new_passphrase).unwrap().member_id,
+            remote_member
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2535,6 +2686,10 @@ mod tests {
             let old = Passphrase::new(b"one profile passphrase".to_vec());
             let new = Passphrase::new(b"one changed profile passphrase".to_vec());
             let created = host.account_create(&old).unwrap();
+            assert_eq!(
+                host.store().load_account().unwrap().unwrap().revision(),
+                AccountRecordRevision::INITIAL
+            );
             let member_id = host.account_public_identity().unwrap().member_id;
             let first = TreeId::new([30 + engine_index as u8; 16]);
             let second = TreeId::new([40 + engine_index as u8; 16]);
@@ -2544,6 +2699,13 @@ mod tests {
             assert_eq!(first_open.did_key, second_open.did_key);
 
             host.account_change_passphrase(&new).unwrap();
+            let changed_record = host.store().load_account().unwrap().unwrap();
+            assert_eq!(changed_record.revision().get(), 2);
+            assert_eq!(
+                changed_record.identity().version().generation().get(),
+                created.generation,
+                "record revision advances independently of credential generation"
+            );
             host.close("first");
             host.close("second");
             assert!(host.account_unlock(&old).is_err());
@@ -2557,15 +2719,6 @@ mod tests {
                 second_open.did_key
             );
             assert_eq!(
-                created.generation,
-                host.store()
-                    .load_account()
-                    .unwrap()
-                    .unwrap()
-                    .generation
-                    .get()
-            );
-            assert_eq!(
                 host.account_register_proof("https://issuer", "subject", 1_700_000_000)
                     .unwrap()
                     .len(),
@@ -2573,6 +2726,12 @@ mod tests {
             );
             let rotated = host.account_rotate_root(&new).unwrap();
             assert_eq!(rotated.generation, created.generation + 1);
+            let rotated_record = host.store().load_account().unwrap().unwrap();
+            assert_eq!(rotated_record.revision().get(), 3);
+            assert_eq!(
+                rotated_record.identity().version().generation().get(),
+                rotated.generation
+            );
             assert_eq!(host.account_public_identity().unwrap().member_id, member_id);
 
             std::fs::remove_dir_all(&dir).ok();
@@ -2631,7 +2790,7 @@ mod tests {
         let keyring = host_a.store().load_keyring("t").unwrap().unwrap();
         let account = host_a.store().load_account().unwrap().unwrap();
         host_b.store().commit_keyring("t", &keyring, &[]).unwrap();
-        host_b.store().commit_account(&account).unwrap();
+        host_b.store().commit_account(&account, None).unwrap();
         host_b.unlock("t", &tree_id, &owner, &pass).unwrap();
 
         // A mints, commits, and pushes to the shared remote (empty → all of A's objects are uploads).
