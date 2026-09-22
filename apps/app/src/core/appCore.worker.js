@@ -56,6 +56,7 @@ import {
   createAccountRecord,
   effectiveAccountFloor,
   replaceAccountIdentity,
+  sameAccountVersion,
 } from './accountRecord.js';
 import { AccountRecordCoordinator } from './accountRecordStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
@@ -110,9 +111,16 @@ async function loadWatermark(docId) {
 // snapshot version remains an opaque CAS token.
 const accountProfile = new URL(globalThis.location?.href ?? 'http://localhost/').searchParams.get('accountProfile') ?? 'default';
 let accountRecords = null;
-const accountRecordStore = () => (
-  accountRecords ??= new AccountRecordCoordinator(store(), { profile: accountProfile })
-);
+function accountRecordStore() {
+  if (accountRecords) return accountRecords;
+  const records = new AccountRecordCoordinator(store(), {
+    profile: accountProfile,
+    broadcastFactory: globalThis.BroadcastChannel ?? null,
+  });
+  accountRecords = records;
+  records.onRevision(scheduleAccountRecordRefresh);
+  return records;
+}
 
 // OPE-407 (explicit create-tree): a DURABLE per-doc marker that this device provisioned a NEW tree whose
 // server `trees` row may not exist yet. Set at provision, consumed + cleared on the first sync tick that
@@ -154,6 +162,7 @@ const cores = new Map();
 let account = null;
 /** Exact persisted blob version from which the resident account was opened. */
 let accountSourceVersion = null;
+let accountRefresh = Promise.resolve();
 
 /** docId -> network transport. Keyed here (not on the Core) so a member JOIN can fetch the keyring history
  * BEFORE its core exists. Set by `attachTransport`, read by the sync tick + join. */
@@ -445,17 +454,71 @@ function storageError(e) {
   return makeError('storage_blocked', { cause: String(e?.message ?? e) });
 }
 
+function dropAccountHandle() {
+  if (account) {
+    try { account.free(); } catch { /* already freed */ }
+  }
+  account = null;
+  accountSourceVersion = null;
+}
+
 function replaceAccount(next, sourceVersion) {
   if (account && account !== next) {
-    try { account.free(); } catch { /* already freed */ }
+    dropAccountHandle();
   }
   account = next;
   accountSourceVersion = sourceVersion;
 }
 
-async function ensureAccount(passphrase, createIfMissing = false) {
-  if (account) return { created: false, recoveryCode: '' };
+async function closeCore(docId) {
+  const c = cores.get(docId);
+  if (!c) return;
+  c.aborted = true;
+  try {
+    await c.persistLock;
+  } catch {
+    // A failed persist cannot retain a stale secret handle.
+  }
+  try {
+    c.handle.free();
+  } catch {
+    // Already freed.
+  }
+  cores.delete(docId);
+  transports.delete(docId);
+  if (cores.size === 0) dropAccountHandle();
+}
+
+async function dropStaleResidentAccount(record) {
+  if (!account) return false;
+  if (record && accountSourceVersion && sameAccountVersion(accountSourceVersion, record.identity.version)) {
+    return false;
+  }
+  for (const docId of [...cores.keys()]) await closeCore(docId);
+  dropAccountHandle();
+  return true;
+}
+
+function scheduleAccountRecordRefresh() {
+  const records = accountRecords;
+  if (!records) return;
+  accountRefresh = accountRefresh
+    .then(() => records.runExclusive((tx) => dropStaleResidentAccount(tx.record())))
+    .catch((error) => {
+      console.warn('[openom] account record refresh failed', error);
+    });
+}
+
+function runAccountOperation(operation) {
   return accountRecordStore().runExclusive(async (tx) => {
+    await dropStaleResidentAccount(tx.record());
+    return operation(tx);
+  });
+}
+
+async function ensureAccount(passphrase, createIfMissing = false) {
+  return runAccountOperation(async (tx) => {
+    if (account) return { created: false, recoveryCode: '' };
     const saved = tx.record();
     if (saved) {
       let unlocked;
@@ -538,7 +601,7 @@ async function commitAccountSnapshot(tx, current, handle, snapshot) {
 }
 
 async function verifyAccountPassphrase(passphrase) {
-  return accountRecordStore().runExclusive(async (tx) => {
+  return runAccountOperation(async (tx) => {
     const saved = tx.record();
     if (!saved) throw new Error('no account keystore stored for this profile');
     let verified;
@@ -610,7 +673,7 @@ const api = {
   /** Create and durably persist this browser profile's singleton account. */
   async accountCreate(passphrase) {
     await ensureInit();
-    return accountRecordStore().runExclusive(async (tx) => {
+    return runAccountOperation(async (tx) => {
       if (account || tx.record()) throw new Error('profile account already exists');
       let created;
       let handle;
@@ -639,7 +702,7 @@ const api = {
   /** Unlock the persisted singleton account and retain its secrets inside this worker. */
   async accountUnlock(passphrase) {
     await ensureInit();
-    return accountRecordStore().runExclusive(async (tx) => {
+    return runAccountOperation(async (tx) => {
       const saved = tx.record();
       if (!saved) throw new Error('no account keystore stored for this profile');
       let unlocked;
@@ -664,25 +727,24 @@ const api = {
   /** Report profile account custody without exposing wrapped or secret material. */
   async accountStatus() {
     await ensureInit();
-    if (account) return 'unlocked';
-    return await accountRecordStore().read() ? 'locked' : 'none';
+    return runAccountOperation((tx) => (
+      account ? 'unlocked' : (tx.record() ? 'locked' : 'none')
+    ));
   },
 
   /** Drop every live tree and the resident account while retaining their encrypted persistence. */
   async accountLock() {
     await ensureInit();
-    for (const docId of [...cores.keys()]) await api.close(docId);
-    if (account) {
-      try { account.free(); } catch { /* already freed */ }
-      account = null;
-      accountSourceVersion = null;
-    }
+    return runAccountOperation(async () => {
+      for (const docId of [...cores.keys()]) await closeCore(docId);
+      dropAccountHandle();
+    });
   },
 
   /** Recover the persisted account, rotating its recovery code and authenticated generation. */
   async accountRecover({ recoveryCode, newPassphrase }) {
     await ensureInit();
-    return accountRecordStore().runExclusive(async (tx) => {
+    return runAccountOperation(async (tx) => {
       const saved = tx.record();
       if (!saved) throw new Error('no account keystore stored for this profile');
       let recovered;
@@ -715,26 +777,28 @@ const api = {
   /** Return the resident account snapshot and its public identity without exposing a secret handle. */
   async accountSnapshot() {
     await ensureInit();
-    let snapshot;
-    try {
-      snapshot = wasmAccountSnapshot(requireAccount());
-      return {
-        ...publicAccountIdentity(),
-        keystore: snapshot.keystore,
-        generation: snapshot.generation,
-        blobHash: snapshot.blobHash,
-      };
-    } catch (e) {
-      throw vaultError(e);
-    } finally {
-      snapshot?.free();
-    }
+    return runAccountOperation(async () => {
+      let snapshot;
+      try {
+        snapshot = wasmAccountSnapshot(requireAccount());
+        return {
+          ...publicAccountIdentity(),
+          keystore: snapshot.keystore,
+          generation: snapshot.generation,
+          blobHash: snapshot.blobHash,
+        };
+      } catch (e) {
+        throw vaultError(e);
+      } finally {
+        snapshot?.free();
+      }
+    });
   },
 
   /** Verify a fetched account snapshot before replacing durable and resident custody. */
   async accountAdoptCandidate({ keystore, credential }) {
     await ensureInit();
-    return accountRecordStore().runExclusive(async (tx) => {
+    return runAccountOperation(async (tx) => {
       const saved = tx.record();
       const generationFloor = saved ? effectiveAccountFloor(saved) : 0;
       let candidate;
@@ -778,7 +842,7 @@ const api = {
   /** Re-verify the current passphrase, then re-wrap only the profile account under the replacement. */
   async accountChangePassphrase({ current, next }) {
     await ensureInit();
-    return accountRecordStore().runExclusive(async (tx) => {
+    return runAccountOperation(async (tx) => {
       const saved = tx.record();
       if (!saved) throw new Error('no account keystore stored for this profile');
       let handle;
@@ -806,13 +870,13 @@ const api = {
   /** Return only the resident account's public admission identity. */
   async accountPublicIdentity() {
     await ensureInit();
-    return publicAccountIdentity();
+    return runAccountOperation(() => publicAccountIdentity());
   },
 
   /** Rotate the account root and recovery credential while retaining its stable identity keys. */
   async accountRotateRoot({ passphrase }) {
     await ensureInit();
-    return accountRecordStore().runExclusive(async (tx) => {
+    return runAccountOperation(async (tx) => {
       const saved = tx.record();
       if (!saved) throw new Error('no account keystore stored for this profile');
       let handle;
@@ -840,11 +904,13 @@ const api = {
   /** Sign the server's frozen registration proof bytes without exposing the account signing key. */
   async accountRegisterProof({ issuer, subject, timestamp }) {
     await ensureInit();
-    try {
-      return wasmAccountRegisterProof(requireAccount(), issuer, subject, timestamp);
-    } catch (e) {
-      throw vaultError(e);
-    }
+    return runAccountOperation(() => {
+      try {
+        return wasmAccountRegisterProof(requireAccount(), issuer, subject, timestamp);
+      } catch (e) {
+        throw vaultError(e);
+      }
+    });
   },
 
   /** Set the compaction cadence K — the log-object count that triggers a snapshot per tick (OPE-409). */
@@ -1561,25 +1627,7 @@ const api = {
 
   /** Drop a core entirely (frees the wasm handle + the DEK it holds). */
   async close(docId) {
-    const c = cores.get(docId);
-    if (!c) return;
-    c.aborted = true; // any in-flight tick bails at its next aborted-check before touching the handle
-    try {
-      await c.persistLock; // let an in-flight persist finish writing before we free the handle
-    } catch {
-      /* persist failed — free anyway */
-    }
-    try {
-      c.handle.free();
-    } catch {
-      /* already gone */
-    }
-    cores.delete(docId);
-    transports.delete(docId);
-    if (cores.size === 0 && account) {
-      try { account.free(); } catch { /* already gone */ }
-      account = null;
-    }
+    return closeCore(docId);
   },
 
   /** Open a stored tree under the already-unlocked profile account. */

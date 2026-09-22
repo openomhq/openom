@@ -37,6 +37,32 @@ class MemorySnapshots {
   }
 }
 
+class FakeBroadcastChannel {
+  static channels = new Map();
+
+  constructor(name) {
+    this.name = name;
+    this.listener = null;
+    const channels = FakeBroadcastChannel.channels.get(name) ?? new Set();
+    channels.add(this);
+    FakeBroadcastChannel.channels.set(name, channels);
+  }
+
+  addEventListener(type, listener) {
+    if (type === 'message') this.listener = listener;
+  }
+
+  postMessage(data) {
+    for (const channel of FakeBroadcastChannel.channels.get(this.name) ?? []) {
+      if (channel !== this) channel.listener?.({ data });
+    }
+  }
+
+  close() {
+    FakeBroadcastChannel.channels.get(this.name)?.delete(this);
+  }
+}
+
 describe('AccountRecordCoordinator', () => {
   it('serializes local operations and commits through the profile Web Lock', async () => {
     const store = new MemorySnapshots();
@@ -124,5 +150,23 @@ describe('AccountRecordCoordinator', () => {
     await expect(granted.requestPersistentStorage()).resolves.toBe('granted');
     await expect(denied.requestPersistentStorage()).resolves.toBe('denied');
     await expect(unavailable.requestPersistentStorage()).resolves.toBe('unavailable');
+  });
+
+  it('broadcasts only committed portable revisions to other contexts', async () => {
+    const store = new MemorySnapshots();
+    const first = new AccountRecordCoordinator(store, {
+      profile: 'shared', locks: null, broadcastFactory: FakeBroadcastChannel,
+    });
+    const second = new AccountRecordCoordinator(store, {
+      profile: 'shared', locks: null, broadcastFactory: FakeBroadcastChannel,
+    });
+    const revisions = [];
+    second.onRevision((revision) => revisions.push(revision));
+
+    await first.runExclusive(async (tx) => tx.commit(await record()));
+    expect(revisions).toEqual([1]);
+
+    first.close();
+    second.close();
   });
 });

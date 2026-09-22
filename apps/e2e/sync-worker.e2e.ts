@@ -152,6 +152,21 @@ test('app-core: account candidates verify before snapshot adoption', async ({ pa
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: account record changes invalidate stale tabs and tree sessions', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(String(error)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const result = await page.evaluate(() => (window as any).__syncWorker.accountCrossTabInvalidation());
+  expect(result.staleTreeDropped).toBe(true);
+  expect(result.secondStatus).toBe('locked');
+  expect(result.oldPassRejected).toBe(true);
+  expect(result.reopenedMemberId).toBeTruthy();
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 for (const engine of ['chain', 'dag'] as const) {
   test(`app-core: one durable account owns and joins multiple trees (${engine})`, async ({ page }) => {
     const errors: string[] = [];

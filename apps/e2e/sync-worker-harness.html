@@ -467,6 +467,46 @@
         };
       },
 
+      // Phase 2c: one profile revision is shared across tabs. A committed re-wrap broadcasts its new record
+      // revision; peers refresh under the profile lock and drop account/tree handles sourced from the old blob.
+      async accountCrossTabInvalidation() {
+        const nonce = crypto.randomUUID();
+        const profile = `cross-tab-account-${nonce}`;
+        const docId = `cross-tab-tree-${nonce}`;
+        const treeId = new Uint8Array(16).fill(31);
+        const oldPassphrase = 'cross-tab old passphrase';
+        const newPassphrase = 'cross-tab new passphrase';
+        const first = spawnWorker(profile);
+        const second = spawnWorker(profile);
+        await Promise.all([first.warm(), second.warm()]);
+
+        await first.accountCreate(oldPassphrase);
+        await second.accountUnlock(oldPassphrase);
+        await second.provisionTree({ treeId, docId, engine: 'chain' });
+        await first.accountChangePassphrase({ current: oldPassphrase, next: newPassphrase });
+
+        let staleTreeDropped = false;
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          try {
+            await second.project(docId);
+          } catch {
+            staleTreeDropped = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        const secondStatus = await second.accountStatus();
+        let oldPassRejected = false;
+        try {
+          await second.accountUnlock(oldPassphrase);
+        } catch {
+          oldPassRejected = true;
+        }
+        const reopened = await second.accountUnlock(newPassphrase);
+
+        return { staleTreeDropped, secondStatus, oldPassRejected, reopenedMemberId: reopened.memberId };
+      },
+
       // Phase 0 acceptance: one browser-profile account owns two trees, joins a third, changes its
       // passphrase once, then reopens every tree through the verified founder/member role dispatch.
       async durableAccountAcrossTrees(engine) {

@@ -65,8 +65,9 @@ keystore is persisted once per profile (IndexedDB on web, native SQLite under Ta
 record carrying its authenticated generation/hash, anti-rollback floor, portable record revision, and sync
 checkpoints; tree keyrings, watermarks, and logs stay per document. Browser mutations hold a profile Web Lock,
 use IndexedDB's separate opaque CAS token as a fail-safe, and verify an exact read-back before installing the
-live handle. Persistent-browser-storage requests are best-effort; only a confirmed remote backup supplies a
-redundant identity copy. Owned and joined trees both borrow that account handle;
+live handle. Committed revisions cross tabs through `BroadcastChannel`; a peer drops resident account and tree
+handles when their exact source blob is stale. Persistent-browser-storage requests are best-effort; only a
+confirmed remote backup supplies a redundant identity copy. Owned and joined trees both borrow that account handle;
 joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
 from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle
 and exposes its durable member ID only as the raw development bearer; it does not own accounts.
@@ -90,7 +91,7 @@ src/main.js            wires the store stack, the sealer/vault, the lock policy,
 src/core/              orchestration — no UI, no rendering.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
   accountRecord.js        validates/codecs the portable identity-scoped account record and its three counters.
-  accountRecordStore.js   serializes profile mutations with Web Locks, IndexedDB CAS, and verified read-back.
+  accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.
   accountSession.js       account-backed identity/custody facade; the sole app-level crypto identity source.
   membership.js, sharing.js   resumable invite/claim orchestration and verified chain/DAG join bootstrap.
   store.js               DocStore contract: opaque-bytes persistence (memory / IndexedDB / Tauri).

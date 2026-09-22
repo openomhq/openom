@@ -18,12 +18,14 @@ class AccountRecordTransaction {
   #snapshot;
   #record;
   #committed = false;
+  #onCommit;
 
-  constructor(store, key, snapshot, record) {
+  constructor(store, key, snapshot, record, onCommit) {
     this.#store = store;
     this.#key = key;
     this.#snapshot = snapshot;
     this.#record = record;
+    this.#onCommit = onCommit;
   }
 
   record() {
@@ -56,6 +58,7 @@ class AccountRecordTransaction {
     this.#committed = true;
     this.#snapshot = saved;
     this.#record = verified;
+    this.#onCommit(verified.revision);
     return verified;
   }
 }
@@ -70,12 +73,15 @@ export class AccountRecordCoordinator {
   #lockName;
   #locks;
   #storageManager;
+  #channel;
+  #revisionSubscribers = new Set();
   #tail = Promise.resolve();
 
   constructor(store, {
     profile = 'default',
     locks = globalThis.navigator?.locks ?? null,
     storageManager = globalThis.navigator?.storage ?? null,
+    broadcastFactory = null,
   } = {}) {
     if (!store?.readSnapshot || !store?.putSnapshot) {
       throw new Error('AccountRecordCoordinator needs a conditional snapshot store');
@@ -85,6 +91,14 @@ export class AccountRecordCoordinator {
     this.#lockName = `${ACCOUNT_LOCK_PREFIX}${profile}`;
     this.#locks = locks;
     this.#storageManager = storageManager;
+    if (broadcastFactory) {
+      try {
+        this.#channel = new broadcastFactory(`${ACCOUNT_LOCK_PREFIX}${profile}.changes`);
+        this.#channel.addEventListener('message', (event) => this.#receiveRevision(event.data));
+      } catch {
+        this.#channel = null;
+      }
+    }
   }
 
   async read() {
@@ -97,7 +111,13 @@ export class AccountRecordCoordinator {
     const run = () => this.#withCrossContextLock(async () => {
       const snapshot = await this.#store.readSnapshot(this.#key);
       const record = snapshot ? await decodeAccountRecord(snapshot.bytes) : null;
-      return operation(new AccountRecordTransaction(this.#store, this.#key, snapshot, record));
+      return operation(new AccountRecordTransaction(
+        this.#store,
+        this.#key,
+        snapshot,
+        record,
+        (revision) => this.#publishRevision(revision),
+      ));
     });
     const result = this.#tail.then(run, run);
     this.#tail = result.then(() => undefined, () => undefined);
@@ -113,10 +133,42 @@ export class AccountRecordCoordinator {
     }
   }
 
+  onRevision(callback) {
+    if (typeof callback !== 'function') throw new Error('revision subscriber must be a function');
+    this.#revisionSubscribers.add(callback);
+    return () => this.#revisionSubscribers.delete(callback);
+  }
+
+  close() {
+    this.#revisionSubscribers.clear();
+    this.#channel?.close();
+    this.#channel = null;
+  }
+
   #withCrossContextLock(operation) {
     if (typeof this.#locks?.request === 'function') {
       return this.#locks.request(this.#lockName, { mode: 'exclusive' }, operation);
     }
     return operation();
+  }
+
+  #publishRevision(revision) {
+    try {
+      this.#channel?.postMessage({ revision });
+    } catch {
+      // IndexedDB is authoritative; a later operation still refreshes under the profile lock.
+    }
+  }
+
+  #receiveRevision(message) {
+    const revision = message?.revision;
+    if (!Number.isSafeInteger(revision) || revision <= 0) return;
+    for (const callback of this.#revisionSubscribers) {
+      try {
+        callback(revision);
+      } catch {
+        // A subscriber cannot break invalidation for the remaining contexts.
+      }
+    }
   }
 }
