@@ -125,7 +125,6 @@ pub enum SyncError {
     Sealer(Box<dyn std::error::Error + Send + Sync>),
 }
 
-
 /// A classifier's decision on a fetched peer delta (the caller's §B3 verify/attribution gate lives here —
 /// `docsync` stays ignorant of what "valid" means; the client opens the envelope and passes the classifier
 /// both the raw envelope, for attribution, and the opened plaintext).
@@ -217,7 +216,11 @@ fn encode_frontier(f: &Frontier) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&u32::try_from(f.len()).unwrap_or(u32::MAX).to_be_bytes());
     for (replica, counter) in f {
-        out.extend_from_slice(&u32::try_from(replica.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(
+            &u32::try_from(replica.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
         out.extend_from_slice(replica.as_bytes());
         out.extend_from_slice(&counter.to_be_bytes());
     }
@@ -240,7 +243,9 @@ fn decode_frontier(bytes: &[u8]) -> Option<(Frontier, &[u8])> {
     let mut frontier = Frontier::new();
     for _ in 0..count {
         let rlen = u32::from_be_bytes(bite(&mut rest, 4)?.try_into().ok()?) as usize;
-        let replica = std::str::from_utf8(bite(&mut rest, rlen)?).ok()?.to_string();
+        let replica = std::str::from_utf8(bite(&mut rest, rlen)?)
+            .ok()?
+            .to_string();
         let counter = u64::from_be_bytes(bite(&mut rest, 8)?.try_into().ok()?);
         frontier.insert(replica, counter);
     }
@@ -359,7 +364,11 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// its claimed floor was already GC'd) degrades to an incomplete-not-wedged pull — the caller's existing
     /// `None` handling (break / continue / a `Vanished` stall) applies — instead of a `Gone` propagating as a
     /// fatal error and turning a correctly-rejected forgery into a sync wedge (OPE-421).
-    fn read_log(&self, replica: &str, counter: u64) -> Result<Option<(Vec<u8>, String)>, SyncError> {
+    fn read_log(
+        &self,
+        replica: &str,
+        counter: u64,
+    ) -> Result<Option<(Vec<u8>, String)>, SyncError> {
         match self.store.get(&log_key(&self.doc, replica, counter)) {
             Ok(v) => Ok(v),
             Err(store_blob::BlobError::Gone) => Ok(None),
@@ -451,7 +460,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         // IfAbsent: the object is immutable. A crash-retry of the same counter finds it already present
         // (PreconditionFailed) — idempotent, so treat that as success and advance, rather than failing.
         // (A replica id is fresh per open, so no two live clients ever share this keyspace.)
-        match self.store.put(&key, &out.envelope, store_blob::Precondition::IfAbsent) {
+        match self
+            .store
+            .put(&key, &out.envelope, store_blob::Precondition::IfAbsent)
+        {
             Ok(_) | Err(store_blob::BlobError::PreconditionFailed) => {}
             Err(e) => return Err(e.into()),
         }
@@ -511,11 +523,13 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                         merged += 1;
                     } else {
                         self.quarantined += 1;
-                        self.stalled.insert((replica.clone(), c), StallCause::MergeFailed);
+                        self.stalled
+                            .insert((replica.clone(), c), StallCause::MergeFailed);
                     }
                 } else {
                     self.quarantined += 1;
-                    self.stalled.insert((replica.clone(), c), StallCause::Unopenable);
+                    self.stalled
+                        .insert((replica.clone(), c), StallCause::Unopenable);
                 }
                 c += 1;
             }
@@ -624,7 +638,8 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                     deltas.push((replica.clone(), c, env, pt));
                 } else {
                     self.quarantined += 1;
-                    self.stalled.insert((replica.clone(), c), StallCause::Unopenable);
+                    self.stalled
+                        .insert((replica.clone(), c), StallCause::Unopenable);
                 }
                 c += 1;
             }
@@ -699,7 +714,8 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         for (replica, counter) in blockers {
             // and_modify only: a blocker always sits below `pull_frontier[replica]`, so the entry exists; a
             // replica absent from pull_frontier is (M1) covered=0 downstream, which is conservative.
-            out.entry(replica.clone()).and_modify(|c| *c = (*c).min(counter));
+            out.entry(replica.clone())
+                .and_modify(|c| *c = (*c).min(counter));
         }
         out
     }
@@ -898,8 +914,11 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             .sealer
             .seal(&ctx, &body)
             .map_err(|e| SyncError::Sealer(Box::new(e)))?;
-        self.store
-            .put(&snapshot_key(&self.doc), &out.envelope, store_blob::Precondition::Any)?;
+        self.store.put(
+            &snapshot_key(&self.doc),
+            &out.envelope,
+            store_blob::Precondition::Any,
+        )?;
         // Reset the compaction-trigger baseline: subsequent maybe_compact measures log objects accrued SINCE
         // this snapshot (a snapshot is a pointer, not a log object, so the count is unchanged by this write).
         self.log_len_at_snapshot = self.log_object_count()?;
@@ -908,7 +927,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
 
     /// The total number of `log/*` objects in the store for this doc — the compaction-trigger measure.
     fn log_object_count(&self) -> Result<u64, SyncError> {
-        Ok(u64::try_from(self.store.list(&format!("{}/log/", self.doc))?.len()).unwrap_or(u64::MAX))
+        Ok(
+            u64::try_from(self.store.list(&format!("{}/log/", self.doc))?.len())
+                .unwrap_or(u64::MAX),
+        )
     }
 
     /// Compact iff the [`SnapshotPolicy`] says so, given how many `log/*` objects have accrued since the last
@@ -933,7 +955,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         // tick until K more accrue; a rare simultaneous race is still resolved server-side by the M6 guard.
         let subsumed = self.subsumed_frontier();
         if let Some(covered) = self.snapshot_covered_frontier()? {
-            if subsumed.iter().all(|(r, c)| covered.get(r).copied().unwrap_or(0) >= *c) {
+            if subsumed
+                .iter()
+                .all(|(r, c)| covered.get(r).copied().unwrap_or(0) >= *c)
+            {
                 self.log_len_at_snapshot = total;
                 return Ok(false);
             }
@@ -1130,11 +1155,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
 ///
 /// # Errors
 /// Returns [`SyncError`] if a blob read/write fails.
-pub fn mirror<A: BlobStore, B: BlobStore>(
-    from: &A,
-    to: &B,
-    doc: &str,
-) -> Result<usize, SyncError> {
+pub fn mirror<A: BlobStore, B: BlobStore>(from: &A, to: &B, doc: &str) -> Result<usize, SyncError> {
     use store_blob::{BlobError, Precondition};
     let mut copied = 0;
     let hp = heads_prefix(doc);
@@ -1174,7 +1195,11 @@ pub fn mirror<A: BlobStore, B: BlobStore>(
             }
         }
         if head_cap > to_head {
-            to.put(&head_key(doc, &replica), &encode_count(head_cap), Precondition::Any)?;
+            to.put(
+                &head_key(doc, &replica),
+                &encode_count(head_cap),
+                Precondition::Any,
+            )?;
         }
     }
     // Carry the source snapshot when the target's differs (or lacks one), keyed on the ETAG — `mirror` has no
@@ -1225,7 +1250,11 @@ fn kind_tag(kind: EntryKind) -> u8 {
 impl Sealer for PassthroughSealer {
     type Error = WrongKind;
 
-    fn seal(&mut self, ctx: &SealCtx, plaintext: &[u8]) -> std::result::Result<Sealed, Self::Error> {
+    fn seal(
+        &mut self,
+        ctx: &SealCtx,
+        plaintext: &[u8],
+    ) -> std::result::Result<Sealed, Self::Error> {
         let mut env = Vec::with_capacity(9 + plaintext.len());
         env.extend_from_slice(&ctx.covers_through_seq.to_be_bytes());
         env.push(kind_tag(ctx.kind));

@@ -83,8 +83,7 @@ pub fn decode_kdf_params(bytes: &[u8]) -> Result<KdfParams, CodecError> {
 }
 
 fn decode_strict<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
-    let (value, rest) =
-        postcard::take_from_bytes::<T>(bytes).map_err(|_| CodecError::Malformed)?;
+    let (value, rest) = postcard::take_from_bytes::<T>(bytes).map_err(|_| CodecError::Malformed)?;
     if !rest.is_empty() {
         return Err(CodecError::TrailingBytes);
     }
@@ -153,7 +152,12 @@ mod tests {
     struct KdfSample;
     impl KdfSample {
         fn kdf() -> crate::kdf::KdfParams {
-            crate::kdf::KdfParams { salt: vec![1, 2], memory_kib: 19_456, iterations: 2, parallelism: 1 }
+            crate::kdf::KdfParams {
+                salt: vec![1, 2],
+                memory_kib: 19_456,
+                iterations: 2,
+                parallelism: 1,
+            }
         }
     }
 
@@ -172,7 +176,10 @@ mod tests {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(encode_epochs(&sample_epochs()));
         let hex = data_encoding::HEXLOWER.encode(&digest);
-        assert_eq!(hex, "306c4100ddb9c85f3cfc9f22838db7be84914f55c988351f2ee76a727cdd0260");
+        assert_eq!(
+            hex,
+            "306c4100ddb9c85f3cfc9f22838db7be84914f55c988351f2ee76a727cdd0260"
+        );
     }
 
     #[test]
@@ -183,7 +190,12 @@ mod tests {
 
     #[test]
     fn kdf_params_round_trip_and_reject_trailing() {
-        let k = crate::kdf::KdfParams { salt: vec![9, 8, 7], memory_kib: 19_456, iterations: 3, parallelism: 2 };
+        let k = crate::kdf::KdfParams {
+            salt: vec![9, 8, 7],
+            memory_kib: 19_456,
+            iterations: 3,
+            parallelism: 2,
+        };
         assert_eq!(decode_kdf_params(&encode_kdf_params(&k)).unwrap(), k);
         let mut bytes = encode_kdf_params(&k);
         bytes.push(0);
@@ -194,13 +206,19 @@ mod tests {
     fn trailing_bytes_are_rejected() {
         let mut bytes = encode_epochs(&sample_epochs());
         bytes.push(0);
-        assert_eq!(decode_epochs::<String>(&bytes), Err(CodecError::TrailingBytes));
+        assert_eq!(
+            decode_epochs::<String>(&bytes),
+            Err(CodecError::TrailingBytes)
+        );
     }
 
     #[test]
     fn a_truncated_blob_is_malformed() {
         let bytes = encode_epochs(&sample_epochs());
-        assert_eq!(decode_epochs::<String>(&bytes[..bytes.len() / 2]), Err(CodecError::Malformed));
+        assert_eq!(
+            decode_epochs::<String>(&bytes[..bytes.len() / 2]),
+            Err(CodecError::Malformed)
+        );
     }
 
     /// Per-field binding: mutating ANY field of ANY wrap variant changes the encoded bytes — the empirical
@@ -220,23 +238,42 @@ mod tests {
         assert_ne!(base, mutate(&|e| e.dek_commitment = [0xAB; 32]));
         // Wrap-level + MemberHpke variant fields.
         assert_ne!(base, mutate(&|e| e.wraps[0].recipient = "zzz".into()));
-        assert_ne!(base, mutate(&|e| e.wraps[0].ciphertext = WrappedDek::from_bytes([99u8; 48])));
-        assert_ne!(base, mutate(&|e| {
-            if let WrapMethod::MemberHpke { encapped, .. } = &mut e.wraps[0].method {
-                *encapped = EncappedKey::from_bytes([99u8; 32]);
-            }
-        }));
-        assert_ne!(base, mutate(&|e| {
-            if let WrapMethod::MemberHpke { recipient_key, .. } = &mut e.wraps[0].method {
-                *recipient_key = X25519PublicKey::from_bytes([99u8; 32]);
-            }
-        }));
+        assert_ne!(
+            base,
+            mutate(&|e| e.wraps[0].ciphertext = WrappedDek::from_bytes([99u8; 48]))
+        );
+        assert_ne!(
+            base,
+            mutate(&|e| {
+                if let WrapMethod::MemberHpke { encapped, .. } = &mut e.wraps[0].method {
+                    *encapped = EncappedKey::from_bytes([99u8; 32]);
+                }
+            })
+        );
+        assert_ne!(
+            base,
+            mutate(&|e| {
+                if let WrapMethod::MemberHpke { recipient_key, .. } = &mut e.wraps[0].method {
+                    *recipient_key = X25519PublicKey::from_bytes([99u8; 32]);
+                }
+            })
+        );
         // The variant discriminant itself.
-        assert_ne!(base, mutate(&|e| {
-            if let WrapMethod::MemberHpke { encapped, recipient_key } = &e.wraps[0].method {
-                e.wraps[0].method = WrapMethod::RrkHpke { encapped: *encapped, recipient_key: *recipient_key };
-            }
-        }));
+        assert_ne!(
+            base,
+            mutate(&|e| {
+                if let WrapMethod::MemberHpke {
+                    encapped,
+                    recipient_key,
+                } = &e.wraps[0].method
+                {
+                    e.wraps[0].method = WrapMethod::RrkHpke {
+                        encapped: *encapped,
+                        recipient_key: *recipient_key,
+                    };
+                }
+            })
+        );
     }
 
     #[test]
@@ -247,25 +284,37 @@ mod tests {
             f(&mut w[0]);
             encode_wraps(&w)
         };
-        assert_ne!(base, mutate(&|w| {
-            if let WrapMethod::Kek { kind, .. } = &mut w.method {
-                *kind = KekKind::RecoveryCode;
-            }
-        }));
-        assert_ne!(base, mutate(&|w| {
-            if let WrapMethod::Kek { nonce, .. } = &mut w.method {
-                *nonce = Nonce::from_bytes([99u8; 24]);
-            }
-        }));
-        assert_ne!(base, mutate(&|w| {
-            if let WrapMethod::Kek { kdf, .. } = &mut w.method {
-                kdf.iterations = 99;
-            }
-        }));
-        assert_ne!(base, mutate(&|w| {
-            if let WrapMethod::Kek { kdf, .. } = &mut w.method {
-                kdf.salt = vec![0xEE];
-            }
-        }));
+        assert_ne!(
+            base,
+            mutate(&|w| {
+                if let WrapMethod::Kek { kind, .. } = &mut w.method {
+                    *kind = KekKind::RecoveryCode;
+                }
+            })
+        );
+        assert_ne!(
+            base,
+            mutate(&|w| {
+                if let WrapMethod::Kek { nonce, .. } = &mut w.method {
+                    *nonce = Nonce::from_bytes([99u8; 24]);
+                }
+            })
+        );
+        assert_ne!(
+            base,
+            mutate(&|w| {
+                if let WrapMethod::Kek { kdf, .. } = &mut w.method {
+                    kdf.iterations = 99;
+                }
+            })
+        );
+        assert_ne!(
+            base,
+            mutate(&|w| {
+                if let WrapMethod::Kek { kdf, .. } = &mut w.method {
+                    kdf.salt = vec![0xEE];
+                }
+            })
+        );
     }
 }

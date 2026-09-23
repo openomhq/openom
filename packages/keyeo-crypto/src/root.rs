@@ -150,7 +150,12 @@ mod tests {
     // unit logic tests — what derive_root's tests check is cost-INDEPENDENT. The production cost is
     // pinned in kdf.rs.
     fn cheap(salt: Vec<u8>) -> KdfParams {
-        KdfParams { salt, memory_kib: 8, iterations: 1, parallelism: 1 }
+        KdfParams {
+            salt,
+            memory_kib: 8,
+            iterations: 1,
+            parallelism: 1,
+        }
     }
     fn params() -> KdfParams {
         cheap(vec![7u8; 16])

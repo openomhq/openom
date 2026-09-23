@@ -25,9 +25,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use base64::Engine as _;
+use openom_keyring_chain::wire::{Keyring, Member};
 use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring, SigningKey};
 use openom_protocol::v1::{Aead, Envelope, Header, Kind, MemberRole};
-use openom_keyring_chain::wire::{Keyring, Member};
 use openom_protocol::Message;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -72,7 +72,9 @@ fn assert_problem(
 ) -> Value {
     assert_eq!(status, expected_status);
     assert_eq!(
-        headers.get("content-type").and_then(|value| value.to_str().ok()),
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
         Some("application/problem+json")
     );
     assert!(
@@ -304,9 +306,15 @@ fn build_keyring(
         let encapped = keyeo_crypto::EncappedKey::from_bytes([0u8; 32]);
         let recipient_key = keyeo_crypto::X25519PublicKey::from_bytes([9u8; 32]);
         let method = if rrk {
-            keyeo_crypto::WrapMethod::RrkHpke { encapped, recipient_key }
+            keyeo_crypto::WrapMethod::RrkHpke {
+                encapped,
+                recipient_key,
+            }
         } else {
-            keyeo_crypto::WrapMethod::MemberHpke { encapped, recipient_key }
+            keyeo_crypto::WrapMethod::MemberHpke {
+                encapped,
+                recipient_key,
+            }
         };
         keyeo_crypto::Wrap {
             recipient: id.to_string(),
@@ -349,7 +357,11 @@ fn build_keyring(
 fn put_keyring_as(tree: Uuid, k: &Keyring, member: Uuid) -> Request<Body> {
     // Frame the signed Keyring as the client now does: MembershipEnvelope(chain) inside the KeyringUpdate
     // transport envelope. The server parses only the outer KeyringUpdate.
-    let payload = openom_keyring_api::MembershipEnvelope::wrap(openom_keyring_api::EngineKind::Chain, k.encode_to_vec()).encode();
+    let payload = openom_keyring_api::MembershipEnvelope::wrap(
+        openom_keyring_api::EngineKind::Chain,
+        k.encode_to_vec(),
+    )
+    .encode();
     let update = openom_protocol::v1::KeyringUpdate {
         version: 1,
         tree_id: tree.as_bytes().to_vec(),
@@ -415,10 +427,23 @@ async fn cross_owner_access_forbidden() {
     let other = Uuid::new_v4(); // a different member; needn't even have an account
     let tree = new_blob_tree(&app, &db, owner).await;
     // Owner seeds one delta so the read path has something to guard.
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rO/0"), b"d0", owner, true)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rO/0"),
+            b"d0",
+            owner,
+            true,
+        ),
+    )
+    .await;
 
     // A non-owner is refused on read, list, write, and history — the seam guards every per-tree data op.
-    let (s, headers, _) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rO/0"), other)).await;
+    let (s, headers, _) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/blobs/log/rO/0"), other),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read a blob");
     // Guards that `app()` still wires the request_id middleware (the `with_trace_layers` extraction
     // must not silently drift from production): every response echoes x-request-id.
@@ -430,7 +455,12 @@ async fn cross_owner_access_forbidden() {
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot list");
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), b"hostile", other, true),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rX/0"),
+            b"hostile",
+            other,
+            true,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot write a blob");
@@ -464,17 +494,23 @@ async fn roles_read_propose_commit() {
     // Read — every member role can read the blob channel, history, and proposals.
     for m in [viewer, editor, maint] {
         assert_eq!(
-            send(&app, get_as(format!("/v1/trees/{tree}/blobs"), m)).await.0,
+            send(&app, get_as(format!("/v1/trees/{tree}/blobs"), m))
+                .await
+                .0,
             StatusCode::OK,
             "list blobs"
         );
         assert_eq!(
-            send(&app, get_as(format!("/v1/trees/{tree}/history"), m)).await.0,
+            send(&app, get_as(format!("/v1/trees/{tree}/history"), m))
+                .await
+                .0,
             StatusCode::OK,
             "read history"
         );
         assert_eq!(
-            send(&app, get_as(format!("/v1/trees/{tree}/proposals"), m)).await.0,
+            send(&app, get_as(format!("/v1/trees/{tree}/proposals"), m))
+                .await
+                .0,
             StatusCode::OK,
             "read proposals"
         );
@@ -487,20 +523,33 @@ async fn roles_read_propose_commit() {
         (editor, StatusCode::OK, "editor proposes"),
         (maint, StatusCode::OK, "maintainer proposes"),
     ] {
-        let (s, ..) =
-            send(&app, post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, member)).await;
+        let (s, ..) = send(
+            &app,
+            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, member),
+        )
+        .await;
         assert_eq!(s, want, "{msg}");
     }
 
     // Commit (append a delta = a blob log object) — Maintainer+ yes, Editor + Viewer no.
     for (member, replica, want, msg) in [
         (viewer, "rv", StatusCode::FORBIDDEN, "viewer can't commit"),
-        (editor, "re", StatusCode::FORBIDDEN, "editor can't commit (propose/approve instead)"),
+        (
+            editor,
+            "re",
+            StatusCode::FORBIDDEN,
+            "editor can't commit (propose/approve instead)",
+        ),
         (maint, "rm", StatusCode::OK, "maintainer commits"),
     ] {
         let (s, ..) = send(
             &app,
-            put_bytes_as(format!("/v1/trees/{tree}/blobs/log/{replica}/0"), b"x", member, true),
+            put_bytes_as(
+                format!("/v1/trees/{tree}/blobs/log/{replica}/0"),
+                b"x",
+                member,
+                true,
+            ),
         )
         .await;
         assert_eq!(s, want, "{msg}");
@@ -534,7 +583,11 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_json_as(format!("/v1/trees/{tree}/media/intent"), &intent_body(), viewer)
+            post_json_as(
+                format!("/v1/trees/{tree}/media/intent"),
+                &intent_body(),
+                viewer
+            )
         )
         .await
         .0,
@@ -544,7 +597,11 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_json_as(format!("/v1/trees/{tree}/media/intent"), &intent_body(), editor)
+            post_json_as(
+                format!("/v1/trees/{tree}/media/intent"),
+                &intent_body(),
+                editor
+            )
         )
         .await
         .0,
@@ -598,18 +655,48 @@ async fn per_member_rate_isolation() {
 
     // The maintainer spends their single token on a blob log write, then is throttled.
     assert_eq!(
-        send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), b"m0", maint, true)).await.0,
+        send(
+            &app,
+            put_bytes_as(
+                format!("/v1/trees/{tree}/blobs/log/rM/0"),
+                b"m0",
+                maint,
+                true
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
         "maintainer's first append"
     );
     assert_eq!(
-        send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rM/1"), b"m1", maint, true)).await.0,
+        send(
+            &app,
+            put_bytes_as(
+                format!("/v1/trees/{tree}/blobs/log/rM/1"),
+                b"m1",
+                maint,
+                true
+            )
+        )
+        .await
+        .0,
         StatusCode::TOO_MANY_REQUESTS,
         "maintainer throttled"
     );
     // The owner has their OWN bucket — unaffected by the maintainer draining theirs.
     assert_eq!(
-        send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rO/0"), b"o0", owner, true)).await.0,
+        send(
+            &app,
+            put_bytes_as(
+                format!("/v1/trees/{tree}/blobs/log/rO/0"),
+                b"o0",
+                owner,
+                true
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
         "owner not throttled by the maintainer"
     );
@@ -771,9 +858,12 @@ async fn keyring_transition_updates_and_removes() {
         "ACL row gone after removal"
     );
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rMaint0000/0"), m))
-            .await
-            .0,
+        send(
+            &app,
+            get_as(format!("/v1/trees/{tree}/blobs/log/rMaint0000/0"), m)
+        )
+        .await
+        .0,
         StatusCode::FORBIDDEN,
         "removed member refused"
     );
@@ -848,7 +938,11 @@ async fn keyring_history() {
     send(&app, put_keyring_as(tree, &rev1, owner)).await;
     send(&app, put_keyring_as(tree, &rev2, owner)).await;
 
-    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/keyring?from=1"), owner)).await;
+    let (s, _, b) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/keyring?from=1"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     let h: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(h["head"].as_i64().unwrap(), 2);
@@ -863,9 +957,17 @@ async fn keyring_history() {
     // The stored payload is the engine-opaque Admitted.state = the MembershipEnvelope wrapping the Keyring.
     let env1 = openom_keyring_api::MembershipEnvelope::decode(&p1).unwrap();
     assert_eq!(env1.engine, "chain");
-    assert_eq!(env1.body, rev1.encode_to_vec(), "the revision's keyring round-trips inside the envelope");
+    assert_eq!(
+        env1.body,
+        rev1.encode_to_vec(),
+        "the revision's keyring round-trips inside the envelope"
+    );
 
-    let (_, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/keyring?from=2"), owner)).await;
+    let (_, _, b2) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/keyring?from=2"), owner),
+    )
+    .await;
     assert_eq!(
         serde_json::from_slice::<Value>(&b2).unwrap()["revisions"]
             .as_array()
@@ -970,7 +1072,11 @@ async fn keyring_accepts_a_recovery_reset() {
     );
 
     // GET flags the reset revision (a UX hint for the OOB re-verify prompt).
-    let (_, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/keyring?from=2"), owner)).await;
+    let (_, _, b) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/keyring?from=2"), owner),
+    )
+    .await;
     let h: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(h["head"].as_i64().unwrap(), 2);
     assert!(
@@ -1056,7 +1162,16 @@ async fn keyring_removal_purges_and_access_list() {
         ),
     )
     .await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rMember00/0"), b"c", m, true)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rMember00/0"),
+            b"c",
+            m,
+            true,
+        ),
+    )
+    .await;
     let props: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2",
     )
@@ -1215,7 +1330,11 @@ async fn proposals_lifecycle() {
 async fn propose(app: &Router, tree: Uuid, label: &[u8], member: Uuid) -> (StatusCode, Vec<u8>) {
     let (s, _, body) = send(
         app,
-        post_bytes_as(format!("/v1/trees/{tree}/proposals"), &proposal_envelope(tree, label), member),
+        post_bytes_as(
+            format!("/v1/trees/{tree}/proposals"),
+            &proposal_envelope(tree, label),
+            member,
+        ),
     )
     .await;
     (s, body)
@@ -1411,13 +1530,24 @@ async fn media_lifecycle_and_gc() {
         "presigned PUT"
     );
 
-    let (s, _, cbody) = send(&app, post_as(format!("/v1/trees/{tree}/media/{blob}/confirm"), owner)).await;
+    let (s, _, cbody) = send(
+        &app,
+        post_as(format!("/v1/trees/{tree}/media/{blob}/confirm"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "confirm");
     let cj: Value = serde_json::from_slice(&cbody).unwrap();
-    assert_eq!(usize::try_from(cj["size_bytes"].as_u64().unwrap()).unwrap(), media.len());
+    assert_eq!(
+        usize::try_from(cj["size_bytes"].as_u64().unwrap()).unwrap(),
+        media.len()
+    );
 
     // Presigned download round-trips the exact bytes.
-    let (s, _, gbody) = send(&app, get_as(format!("/v1/trees/{tree}/media/{blob}"), owner)).await;
+    let (s, _, gbody) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/media/{blob}"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "get media");
     let gj: Value = serde_json::from_slice(&gbody).unwrap();
     let dl = reqwest::get(gj["download_url"].as_str().unwrap())
@@ -1430,8 +1560,16 @@ async fn media_lifecycle_and_gc() {
     );
 
     // attach → detach-to-zero → tombstone → sweep physically deletes → 404.
-    send(&app, post_as(format!("/v1/trees/{tree}/media/{blob}/attach"), owner)).await;
-    let (_, _, dbody) = send(&app, post_as(format!("/v1/trees/{tree}/media/{blob}/detach"), owner)).await;
+    send(
+        &app,
+        post_as(format!("/v1/trees/{tree}/media/{blob}/attach"), owner),
+    )
+    .await;
+    let (_, _, dbody) = send(
+        &app,
+        post_as(format!("/v1/trees/{tree}/media/{blob}/detach"), owner),
+    )
+    .await;
     let dj: Value = serde_json::from_slice(&dbody).unwrap();
     assert_eq!(
         dj["state"].as_str().unwrap(),
@@ -1451,7 +1589,11 @@ async fn media_lifecycle_and_gc() {
         "swept the tombstone"
     );
 
-    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/media/{blob}"), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/media/{blob}"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "gone after sweep");
 }
 
@@ -1495,7 +1637,11 @@ fn summary_body(basis: &[&str], expected: Option<i64>, members: &[(Uuid, i16)]) 
 async fn new_tree(app: &Router, db: &sqlx::PgPool, owner: Uuid) -> Uuid {
     seed_account(db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
     tree
 }
 
@@ -1513,20 +1659,37 @@ async fn access_summary_derives_acl_generation_and_basis() {
 
     let (s, _, body) = send(
         &app,
-        put_json_as(uri.clone(), &summary_body(&["op:aa", "op:bb"], None, &[(owner, 1), (editor, 4)]), owner),
+        put_json_as(
+            uri.clone(),
+            &summary_body(&["op:aa", "op:bb"], None, &[(owner, 1), (editor, 4)]),
+            owner,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "owner pushes the first summary");
-    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["generation"].as_i64().unwrap(), 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["generation"]
+            .as_i64()
+            .unwrap(),
+        1
+    );
 
     assert_eq!(role_of(&db, tree, owner).await, Some(1), "owner in the ACL");
-    assert_eq!(role_of(&db, tree, editor).await, Some(4), "editor derived from the summary");
+    assert_eq!(
+        role_of(&db, tree, editor).await,
+        Some(4),
+        "editor derived from the summary"
+    );
 
     let (s, _, body) = send(&app, get_as(uri, owner)).await;
     assert_eq!(s, StatusCode::OK);
     let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["generation"].as_i64().unwrap(), 1);
-    assert_eq!(v["basis"], serde_json::json!(["op:aa", "op:bb"]), "the opaque basis round-trips");
+    assert_eq!(
+        v["basis"],
+        serde_json::json!(["op:aa", "op:bb"]),
+        "the opaque basis round-trips"
+    );
     assert_eq!(v["members"].as_array().unwrap().len(), 2);
 }
 
@@ -1540,27 +1703,74 @@ async fn access_summary_cas_and_idempotent_reassert() {
     let editor = Uuid::new_v4();
     let viewer = Uuid::new_v4();
     let uri = format!("/v1/trees/{tree}/access");
-    let g = |body: &[u8]| serde_json::from_slice::<Value>(body).unwrap()["generation"].as_i64().unwrap();
+    let g = |body: &[u8]| {
+        serde_json::from_slice::<Value>(body).unwrap()["generation"]
+            .as_i64()
+            .unwrap()
+    };
 
     // First push (expects no summary yet) → generation 1.
-    let (_, _, b) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], None, &[(owner, 1), (editor, 4)]), owner)).await;
+    let (_, _, b) = send(
+        &app,
+        put_json_as(
+            uri.clone(),
+            &summary_body(&["op:1"], None, &[(owner, 1), (editor, 4)]),
+            owner,
+        ),
+    )
+    .await;
     assert_eq!(g(&b), 1);
 
     // Idempotent re-assert (same members) → 200, generation NOT bumped.
-    let (s, _, b) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 4)]), owner)).await;
+    let (s, _, b) = send(
+        &app,
+        put_json_as(
+            uri.clone(),
+            &summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 4)]),
+            owner,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(g(&b), 1, "an identical re-assert does not bump the generation");
-    assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["unchanged"], serde_json::json!(true));
+    assert_eq!(
+        g(&b),
+        1,
+        "an identical re-assert does not bump the generation"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&b).unwrap()["unchanged"],
+        serde_json::json!(true)
+    );
 
     // A real change (add a viewer) → generation 2.
-    let (_, _, b) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:2"], Some(1), &[(owner, 1), (editor, 4), (viewer, 5)]), owner)).await;
+    let (_, _, b) = send(
+        &app,
+        put_json_as(
+            uri.clone(),
+            &summary_body(&["op:2"], Some(1), &[(owner, 1), (editor, 4), (viewer, 5)]),
+            owner,
+        ),
+    )
+    .await;
     assert_eq!(g(&b), 2);
     assert_eq!(role_of(&db, tree, viewer).await, Some(5));
 
     // A stale push (wrong expected generation) → 409, and it does not apply.
-    let (s, _, _) = send(&app, put_json_as(uri, &summary_body(&["op:2"], Some(1), &[(owner, 1)]), owner)).await;
-    assert_eq!(s, StatusCode::CONFLICT, "a stale generation is a CAS conflict");
-    assert_eq!(role_of(&db, tree, viewer).await, Some(5), "the refused push did not drop the viewer");
+    let (s, _, _) = send(
+        &app,
+        put_json_as(uri, &summary_body(&["op:2"], Some(1), &[(owner, 1)]), owner),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::CONFLICT,
+        "a stale generation is a CAS conflict"
+    );
+    assert_eq!(
+        role_of(&db, tree, viewer).await,
+        Some(5),
+        "the refused push did not drop the viewer"
+    );
 }
 
 #[tokio::test]
@@ -1579,19 +1789,69 @@ async fn access_summary_signer_gate() {
     let uri = format!("/v1/trees/{tree}/access");
 
     // Owner establishes the roster.
-    send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], None, &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4)]), owner)).await;
+    send(
+        &app,
+        put_json_as(
+            uri.clone(),
+            &summary_body(
+                &["op:1"],
+                None,
+                &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4)],
+            ),
+            owner,
+        ),
+    )
+    .await;
 
     // A co-owner may push (adds a viewer).
     let viewer = Uuid::new_v4();
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:2"], Some(1), &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4), (viewer, 5)]), coowner)).await;
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            uri.clone(),
+            &summary_body(
+                &["op:2"],
+                Some(1),
+                &[
+                    (owner, 1),
+                    (coowner, 2),
+                    (maint, 3),
+                    (editor, 4),
+                    (viewer, 5),
+                ],
+            ),
+            coowner,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "a co-owner may assert membership");
 
     // A Maintainer (role 3) may NOT.
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:3"], Some(2), &[(owner, 1)]), maint)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "a Maintainer is below the signer gate");
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            uri.clone(),
+            &summary_body(&["op:3"], Some(2), &[(owner, 1)]),
+            maint,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a Maintainer is below the signer gate"
+    );
 
     // A stranger with no role may NOT.
-    let (s, _, _) = send(&app, put_json_as(uri, &summary_body(&["op:3"], Some(2), &[(owner, 1)]), stranger)).await;
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            uri,
+            &summary_body(&["op:3"], Some(2), &[(owner, 1)]),
+            stranger,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "a non-member is refused");
 }
 
@@ -1606,13 +1866,29 @@ async fn access_summary_owner_invariant_and_validation() {
     let uri = format!("/v1/trees/{tree}/access");
 
     // A summary that OMITS the owner still keeps the owner in the ACL at role Owner (owner is invariant).
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], None, &[(editor, 4)]), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            uri.clone(),
+            &summary_body(&["op:1"], None, &[(editor, 4)]),
+            owner,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(role_of(&db, tree, owner).await, Some(1), "the owner row is never dropped");
+    assert_eq!(
+        role_of(&db, tree, owner).await,
+        Some(1),
+        "the owner row is never dropped"
+    );
     assert_eq!(role_of(&db, tree, editor).await, Some(4));
 
     // An empty member list is refused (never nuke the ACL).
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&[], Some(1), &[]), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        put_json_as(uri.clone(), &summary_body(&[], Some(1), &[]), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "empty membership is refused");
 
     // A non-UUID member_id is refused (the advisory layer keys on the account UUID).
@@ -1649,7 +1925,11 @@ async fn blob_put_404s_on_nonexistent_tree() {
         ),
     )
     .await;
-    assert_eq!(s, StatusCode::NOT_FOUND, "a blob write to an uncreated tree 404s");
+    assert_eq!(
+        s,
+        StatusCode::NOT_FOUND,
+        "a blob write to an uncreated tree 404s"
+    );
 
     let row: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree)
@@ -1681,10 +1961,19 @@ async fn create_tree_then_blob_write_succeeds() {
 
     let (s, h, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"), b"delta", owner, true),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"),
+            b"delta",
+            owner,
+            true,
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "a blob write to the created tree succeeds");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "a blob write to the created tree succeeds"
+    );
     assert!(h.get("etag").is_some());
 }
 
@@ -1704,9 +1993,17 @@ async fn create_tree_idempotent_for_owner_forbidden_for_others() {
     let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), owner)).await;
     assert_eq!(s, StatusCode::CREATED, "first create");
     let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), owner)).await;
-    assert_eq!(s, StatusCode::OK, "the owner re-creating is an idempotent 200");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "the owner re-creating is an idempotent 200"
+    );
     let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), intruder)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "a different caller cannot claim an existing tree");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a different caller cannot claim an existing tree"
+    );
 }
 
 #[tokio::test]
@@ -1725,11 +2022,23 @@ async fn create_tree_enforces_max_trees_limit() {
         .unwrap();
 
     for _ in 0..2 {
-        let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+        let (s, _, _) = send(
+            &app,
+            post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED, "creates up to max_trees succeed");
     }
-    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "the create past max_trees is refused");
+    let (s, _, _) = send(
+        &app,
+        post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the create past max_trees is refused"
+    );
 }
 
 #[tokio::test]
@@ -1749,23 +2058,41 @@ async fn create_tree_concurrent_creates_respect_max_trees() {
         .unwrap();
 
     let (a, b, c, d) = tokio::join!(
-        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
-        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
-        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
-        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
+        send(
+            &app,
+            post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)
+        ),
+        send(
+            &app,
+            post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)
+        ),
+        send(
+            &app,
+            post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)
+        ),
+        send(
+            &app,
+            post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)
+        ),
     );
     let created = [a.0, b.0, c.0, d.0]
         .iter()
         .filter(|s| **s == StatusCode::CREATED)
         .count();
-    assert_eq!(created, 1, "exactly one concurrent create wins the single free slot");
+    assert_eq!(
+        created, 1,
+        "exactly one concurrent create wins the single free slot"
+    );
 
     let tree_count: i64 = sqlx::query_scalar("SELECT count(*) FROM trees WHERE owner_id = $1")
         .bind(owner)
         .fetch_one(&db)
         .await
         .unwrap();
-    assert_eq!(tree_count, 1, "the owner never exceeds max_trees under a concurrent race");
+    assert_eq!(
+        tree_count, 1,
+        "the owner never exceeds max_trees under a concurrent race"
+    );
 }
 
 #[tokio::test]
@@ -1779,11 +2106,26 @@ async fn create_tree_is_rate_limited_per_account() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 0.001, 1).await; // 1-token create bucket, negligible refill
 
-    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED, "first create spends the one token");
-    let (s, h, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
-    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "the second create is rate-limited, not entitlement-blocked");
-    assert!(h.get("retry-after").is_some(), "the 429 carries Retry-After");
+    let (s, h, _) = send(
+        &app,
+        post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the second create is rate-limited, not entitlement-blocked"
+    );
+    assert!(
+        h.get("retry-after").is_some(),
+        "the 429 carries Retry-After"
+    );
 }
 
 #[tokio::test]
@@ -1797,14 +2139,38 @@ async fn create_tree_rate_debits_even_a_rejected_attempt() {
     let db = db().await;
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 0.001, 2).await; // 2-token bucket, negligible refill
-    sqlx::query("UPDATE accounts SET max_trees = 1 WHERE id = $1").bind(owner).execute(&db).await.unwrap();
+    sqlx::query("UPDATE accounts SET max_trees = 1 WHERE id = $1")
+        .bind(owner)
+        .execute(&db)
+        .await
+        .unwrap();
 
-    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED, "create #1 succeeds (token 2->1)");
-    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "create #2 is over-quota (403) but still spends a token (1->0)");
-    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
-    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "create #3 is 429 — the rejected #2 consumed its token");
+    let (s, _, _) = send(
+        &app,
+        post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "create #2 is over-quota (403) but still spends a token (1->0)"
+    );
+    let (s, _, _) = send(
+        &app,
+        post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::TOO_MANY_REQUESTS,
+        "create #3 is 429 — the rejected #2 consumed its token"
+    );
 }
 
 #[tokio::test]
@@ -1817,7 +2183,12 @@ async fn blob_put_get_roundtrip_pointer() {
 
     let (s, h, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"7", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
+            b"7",
+            owner,
+            false,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "pointer put (Precondition::Any)");
@@ -1835,7 +2206,12 @@ async fn blob_put_get_roundtrip_pointer() {
     // Unconditional overwrite — no conflict, new etag.
     let (s, h3, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"8", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
+            b"8",
+            owner,
+            false,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "pointer overwrite");
@@ -1870,7 +2246,11 @@ async fn blob_if_absent_create_then_conflict_and_idempotent_retry() {
     let e1 = etag(&h);
 
     // A different-content PUT to the same immutable key conflicts.
-    let (s, h2, _) = send(&app, put_bytes_as(key.clone(), b"delta-different", owner, true)).await;
+    let (s, h2, _) = send(
+        &app,
+        put_bytes_as(key.clone(), b"delta-different", owner, true),
+    )
+    .await;
     assert_eq!(
         s,
         StatusCode::PRECONDITION_FAILED,
@@ -1902,17 +2282,32 @@ async fn blob_list_by_prefix() {
 
     send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
+            b"1",
+            owner,
+            false,
+        ),
     )
     .await;
     send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaBBB"), b"2", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaBBB"),
+            b"2",
+            owner,
+            false,
+        ),
     )
     .await;
     send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"), b"d", owner, true),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"),
+            b"d",
+            owner,
+            true,
+        ),
     )
     .await;
     // A snapshot PUT now MANDATES the covered-frontier header (OPE-409); an empty map is valid here (this
@@ -1944,7 +2339,10 @@ async fn blob_list_by_prefix() {
     keys.sort();
     assert_eq!(
         keys,
-        vec!["heads/replicaAAA".to_string(), "heads/replicaBBB".to_string()],
+        vec![
+            "heads/replicaAAA".to_string(),
+            "heads/replicaBBB".to_string()
+        ],
         "prefix scopes the listing, relative to the tree segment"
     );
 
@@ -1992,7 +2390,11 @@ async fn blob_http_conformance() {
 
     // get_missing_is_none → a missing key is 404 (the HTTP analog of `None`).
     let (s, _, _) = send(&app, get_as(blob("ptr/missing"), owner)).await;
-    assert_eq!(s, StatusCode::NOT_FOUND, "get of a missing key is 404 (None)");
+    assert_eq!(
+        s,
+        StatusCode::NOT_FOUND,
+        "get of a missing key is 404 (None)"
+    );
 
     // put_then_get_roundtrips + ETAG PARITY: the managed etag equals what the reference MemoryBlob yields for
     // the same bytes (both are hex(sha256)), so a client reading R2 sees the SAME etag as one reading
@@ -2017,7 +2419,11 @@ async fn blob_http_conformance() {
 
     // idempotent_put_same_etag → identical content (Precondition::Any) yields the same etag.
     let (_, h3, _) = send(&app, put_bytes_as(blob("ptr/rA"), b"hello", owner, false)).await;
-    assert_eq!(etag(&h3), put_etag, "identical content yields the same etag");
+    assert_eq!(
+        etag(&h3),
+        put_etag,
+        "identical content yields the same etag"
+    );
 
     // if_absent_creates_then_conflicts → IfAbsent creates; a conflicting IfAbsent 412s carrying the existing
     // etag; the first value stands.
@@ -2025,14 +2431,22 @@ async fn blob_http_conformance() {
     assert_eq!(s, StatusCode::OK, "IfAbsent create");
     let created = etag(&hc);
     let (s, hc2, _) = send(&app, put_bytes_as(blob("log/rA/0"), b"v2", owner, true)).await;
-    assert_eq!(s, StatusCode::PRECONDITION_FAILED, "IfAbsent on an existing key conflicts");
+    assert_eq!(
+        s,
+        StatusCode::PRECONDITION_FAILED,
+        "IfAbsent on an existing key conflicts"
+    );
     assert_eq!(etag(&hc2), created, "the 412 carries the existing etag");
     let (_, _, body) = send(&app, get_as(blob("log/rA/0"), owner)).await;
     assert_eq!(body, b"v1", "the conflicting write did not land");
 
     // list_by_prefix → a prefix scopes the listing; the empty prefix lists everything under the tree.
     send(&app, put_bytes_as(blob("log/rA/1"), b"v", owner, true)).await;
-    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/blobs?prefix=log/"), owner)).await;
+    let (s, _, b) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/blobs?prefix=log/"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     let mut keys: Vec<String> = serde_json::from_slice::<Value>(&b).unwrap()["keys"]
         .as_array()
@@ -2041,10 +2455,17 @@ async fn blob_http_conformance() {
         .map(|k| k["key"].as_str().unwrap().to_string())
         .collect();
     keys.sort();
-    assert_eq!(keys, vec!["log/rA/0".to_string(), "log/rA/1".to_string()], "list returns only the prefix");
+    assert_eq!(
+        keys,
+        vec!["log/rA/0".to_string(), "log/rA/1".to_string()],
+        "list returns only the prefix"
+    );
     let (_, _, ball) = send(&app, get_as(format!("/v1/trees/{tree}/blobs"), owner)).await;
     assert_eq!(
-        serde_json::from_slice::<Value>(&ball).unwrap()["keys"].as_array().unwrap().len(),
+        serde_json::from_slice::<Value>(&ball).unwrap()["keys"]
+            .as_array()
+            .unwrap()
+            .len(),
         3,
         "the empty prefix lists everything (ptr/rA + log/rA/0 + log/rA/1)"
     );
@@ -2100,7 +2521,12 @@ async fn blob_metering_capacity_gates_immutable_only() {
     // A pointer overwrite still succeeds — capacity-exempt.
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
+            b"1",
+            owner,
+            false,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "a pointer put is capacity-exempt");
@@ -2128,7 +2554,10 @@ async fn blob_metering_capacity_gates_immutable_only() {
         .fetch_one(&db)
         .await
         .unwrap();
-    assert_eq!(after, used, "a rejected immutable put leaves the meter untouched");
+    assert_eq!(
+        after, used,
+        "a rejected immutable put leaves the meter untouched"
+    );
 }
 
 #[tokio::test]
@@ -2148,14 +2577,28 @@ async fn blob_metering_rate_gates_every_put() {
 
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
+            b"1",
+            owner,
+            false,
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "first pointer put spends the single token");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "first pointer put spends the single token"
+    );
 
     let (s, h, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"2", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
+            b"2",
+            owner,
+            false,
+        ),
     )
     .await;
     assert_eq!(
@@ -2176,7 +2619,12 @@ async fn blob_authz_forbidden_for_non_members_viewer_cant_commit() {
     let tree = new_tree(&app, &db, owner).await;
     send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
+            b"1",
+            owner,
+            false,
+        ),
     )
     .await;
 
@@ -2237,7 +2685,11 @@ async fn frontier_report_upserts_and_administer_gates_read() {
     grant_role(&db, tree, editor, 4).await;
 
     let body = serde_json::json!({ "frontier": { "replicaAAA": 3, "replicaBBB": 1 } });
-    let (s, _, _) = send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), &body, editor)).await;
+    let (s, _, _) = send(
+        &app,
+        put_json_as(format!("/v1/trees/{tree}/frontier"), &body, editor),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "a member reports its own frontier");
 
     // Administer (Maintainer+) can read the raw reports.
@@ -2252,13 +2704,25 @@ async fn frontier_report_upserts_and_administer_gates_read() {
 
     // Re-report updates in place, not duplicates.
     let body2 = serde_json::json!({ "frontier": { "replicaAAA": 5 } });
-    send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), &body2, editor)).await;
+    send(
+        &app,
+        put_json_as(format!("/v1/trees/{tree}/frontier"), &body2, editor),
+    )
+    .await;
     let (_, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/frontier"), maint)).await;
     let v2: Value = serde_json::from_slice(&b2).unwrap();
     let rows2 = v2["frontier"].as_array().unwrap();
-    assert_eq!(rows2.len(), 2, "still one row per replica — updated, not appended");
+    assert_eq!(
+        rows2.len(),
+        2,
+        "still one row per replica — updated, not appended"
+    );
     let a = rows2.iter().find(|r| r["replica"] == "replicaAAA").unwrap();
-    assert_eq!(a["counter"].as_i64().unwrap(), 5, "counter updated in place");
+    assert_eq!(
+        a["counter"].as_i64().unwrap(),
+        5,
+        "counter updated in place"
+    );
 
     // An Editor (below the Administer gate) can't read the raw reports back.
     let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/frontier"), editor)).await;
@@ -2314,7 +2778,9 @@ async fn new_blob_tree(app: &Router, db: &sqlx::PgPool, owner: Uuid) -> Uuid {
     seed_account(db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
     assert_eq!(
-        send(app, post_as(format!("/v1/trees/{tree}"), owner)).await.0,
+        send(app, post_as(format!("/v1/trees/{tree}"), owner))
+            .await
+            .0,
         StatusCode::CREATED,
         "create data-channel tree"
     );
@@ -2343,9 +2809,27 @@ async fn snapshot_covered_publish_and_guards() {
     // the tree actually retains (OPE-421 M3: indexed or reaped-below-floor) — heads alone (client-writable)
     // is not proof of coverage, so the objects must exist for {rA:5} to be publishable.
     for i in 0..5 {
-        send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rA/{i}"), b"d", owner, true)).await;
+        send(
+            &app,
+            put_bytes_as(
+                format!("/v1/trees/{tree}/blobs/log/rA/{i}"),
+                b"d",
+                owner,
+                true,
+            ),
+        )
+        .await;
     }
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rA"), b"5", owner, false)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/rA"),
+            b"5",
+            owner,
+            false,
+        ),
+    )
+    .await;
 
     // covered {rA:5} — accepted; the coverage row is written, bound to the snapshot object's etag.
     let (s, h, _) = send(
@@ -2405,10 +2889,19 @@ async fn snapshot_covered_publish_and_guards() {
     // The covered header is mandatory: a snapshot PUT without it → 400.
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/snapshot"), b"snap-4", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap-4",
+            owner,
+            false,
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "missing x-openom-covered rejected");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "missing x-openom-covered rejected"
+    );
 }
 
 #[tokio::test]
@@ -2431,15 +2924,29 @@ async fn log_write_guards_below_floor_and_immutability() {
     // M2: a log/* PUT must be immutable (if-none-match: *) → 400 otherwise.
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/0"), b"d", owner, false),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rB/0"),
+            b"d",
+            owner,
+            false,
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "non-IfAbsent log PUT rejected (M2)");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "non-IfAbsent log PUT rejected (M2)"
+    );
 
     // D2: an IfAbsent log PUT below the floor (counter 1 < 3) → 409 below_gc_floor.
     let (s, _, b) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/1"), b"d", owner, true),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rB/1"),
+            b"d",
+            owner,
+            true,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "below-floor log PUT rejected (D2)");
@@ -2448,13 +2955,27 @@ async fn log_write_guards_below_floor_and_immutability() {
     // At/above the floor is fine (counter 3 >= 3).
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/3"), b"d", owner, true),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rB/3"),
+            b"d",
+            owner,
+            true,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "at-floor log PUT accepted");
 
     // A covered frontier below the floor → 409 covered_below_gc_floor (head high enough that M3 passes first).
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rB"), b"5", owner, false)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/rB"),
+            b"5",
+            owner,
+            false,
+        ),
+    )
+    .await;
     let (s, _, b) = send(
         &app,
         put_bytes_with_headers_as(
@@ -2481,21 +3002,49 @@ async fn log_get_states_absent_present_marked() {
     let tree = new_blob_tree(&app, &db, owner).await;
 
     // Present: write rX/0.
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), b"d0", owner, true)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rX/0"),
+            b"d0",
+            owner,
+            true,
+        ),
+    )
+    .await;
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), owner)).await.0,
+        send(
+            &app,
+            get_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), owner)
+        )
+        .await
+        .0,
         StatusCode::OK,
         "present log dot serves 200"
     );
     // Not yet written: rX/5 (at/above floor 0) → 404 graceful-absence.
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rX/5"), owner)).await.0,
+        send(
+            &app,
+            get_as(format!("/v1/trees/{tree}/blobs/log/rX/5"), owner)
+        )
+        .await
+        .0,
         StatusCode::NOT_FOUND,
         "not-yet-written log dot is 404"
     );
 
     // Mark rX/0 pending WITHOUT reaping: publish head + report + covered, then sweep with a huge grace.
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rX"), b"1", owner, false)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/rX"),
+            b"1",
+            owner,
+            false,
+        ),
+    )
+    .await;
     send(
         &app,
         put_json_as(
@@ -2527,7 +3076,12 @@ async fn log_get_states_absent_present_marked() {
     .unwrap();
     assert!(marked.is_some(), "row is marked pending_delete_at");
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), owner)).await.0,
+        send(
+            &app,
+            get_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), owner)
+        )
+        .await
+        .0,
         StatusCode::OK,
         "a marked-pending dot still serves 200 (M4)"
     );
@@ -2552,8 +3106,26 @@ async fn gc_sweep_reaps_credits_and_gones() {
 
     // Two immutable log dots (accumulating bytes), a published head of 2, an in-window owner report, and a
     // snapshot covering both.
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rG/0"), b"delta-zero", owner, true)).await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rG/1"), b"delta-one", owner, true)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rG/0"),
+            b"delta-zero",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rG/1"),
+            b"delta-one",
+            owner,
+            true,
+        ),
+    )
+    .await;
     let charged: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
         .bind(owner)
         .fetch_one(&db)
@@ -2561,7 +3133,16 @@ async fn gc_sweep_reaps_credits_and_gones() {
         .unwrap();
     assert!(charged > before, "log dots charged the byte meter");
 
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rG"), b"2", owner, false)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/rG"),
+            b"2",
+            owner,
+            false,
+        ),
+    )
+    .await;
     send(
         &app,
         put_json_as(
@@ -2586,7 +3167,10 @@ async fn gc_sweep_reaps_credits_and_gones() {
     let (s, _, sb) = send(&app, post("/dev/log/gc?deletion_grace_secs=0".into())).await;
     assert_eq!(s, StatusCode::OK, "sweep");
     let sj: Value = serde_json::from_slice(&sb).unwrap();
-    assert!(sj["reaped"].as_u64().unwrap() >= 2, "both dots reaped: {sj}");
+    assert!(
+        sj["reaped"].as_u64().unwrap() >= 2,
+        "both dots reaped: {sj}"
+    );
 
     // The index rows are gone…
     let remaining: i64 = sqlx::query_scalar(
@@ -2607,7 +3191,11 @@ async fn gc_sweep_reaps_credits_and_gones() {
     assert_eq!(after, before, "reclaimed bytes credited back to the owner");
 
     // …and a get of a reaped dot (below the floor of 2) is 410 below_gc_floor, telling the client to bootstrap.
-    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rG/0"), owner)).await;
+    let (s, _, b) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/blobs/log/rG/0"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::GONE, "reaped dot is 410");
     assert_eq!(body_code(&b), "below_gc_floor");
 }
@@ -2630,12 +3218,43 @@ async fn gc_retains_deltas_within_the_history_window() {
         .unwrap();
 
     // Two recent log dots, a head of 2, an in-window frontier, a snapshot covering both (floor advances to 2).
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), b"delta-zero", owner, true)).await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rH/1"), b"delta-one", owner, true)).await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rH"), b"2", owner, false)).await;
     send(
         &app,
-        put_json_as(format!("/v1/trees/{tree}/frontier"), &serde_json::json!({ "frontier": { "rH": 2 } }), owner),
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rH/0"),
+            b"delta-zero",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rH/1"),
+            b"delta-one",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/rH"),
+            b"2",
+            owner,
+            false,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_json_as(
+            format!("/v1/trees/{tree}/frontier"),
+            &serde_json::json!({ "frontier": { "rH": 2 } }),
+            owner,
+        ),
     )
     .await;
     send(
@@ -2650,7 +3269,13 @@ async fn gc_retains_deltas_within_the_history_window() {
     .await;
 
     // Sweep grace 0: the floor advances to 2, BUT both dots are inside the 30-day window → retained, not reaped.
-    assert_eq!(send(&app, post("/dev/log/gc?deletion_grace_secs=0".into())).await.0, StatusCode::OK, "sweep");
+    assert_eq!(
+        send(&app, post("/dev/log/gc?deletion_grace_secs=0".into()))
+            .await
+            .0,
+        StatusCode::OK,
+        "sweep"
+    );
     let remaining: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM tree_blob_index WHERE tree_id = $1 AND key LIKE 'log/rH/%'",
     )
@@ -2658,10 +3283,18 @@ async fn gc_retains_deltas_within_the_history_window() {
     .fetch_one(&db)
     .await
     .unwrap();
-    assert_eq!(remaining, 2, "in-window deltas are retained below the floor, not reaped");
+    assert_eq!(
+        remaining, 2,
+        "in-window deltas are retained below the floor, not reaped"
+    );
     // Still readable (the GET is index-row-authoritative), so the history feature can serve them.
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), owner)).await.0,
+        send(
+            &app,
+            get_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), owner)
+        )
+        .await
+        .0,
         StatusCode::OK,
         "a retained (in-window) dot is still served"
     );
@@ -2672,7 +3305,13 @@ async fn gc_retains_deltas_within_the_history_window() {
         .execute(&db)
         .await
         .unwrap();
-    assert_eq!(send(&app, post("/dev/log/gc?deletion_grace_secs=0".into())).await.0, StatusCode::OK, "re-sweep");
+    assert_eq!(
+        send(&app, post("/dev/log/gc?deletion_grace_secs=0".into()))
+            .await
+            .0,
+        StatusCode::OK,
+        "re-sweep"
+    );
     let remaining2: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM tree_blob_index WHERE tree_id = $1 AND key LIKE 'log/rH/%'",
     )
@@ -2680,14 +3319,27 @@ async fn gc_retains_deltas_within_the_history_window() {
     .fetch_one(&db)
     .await
     .unwrap();
-    assert_eq!(remaining2, 1, "the aged-out delta is reaped; the in-window one is retained");
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), owner)).await.0,
+        remaining2, 1,
+        "the aged-out delta is reaped; the in-window one is retained"
+    );
+    assert_eq!(
+        send(
+            &app,
+            get_as(format!("/v1/trees/{tree}/blobs/log/rH/0"), owner)
+        )
+        .await
+        .0,
         StatusCode::GONE,
         "the aged-out (reaped) dot is 410"
     );
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rH/1"), owner)).await.0,
+        send(
+            &app,
+            get_as(format!("/v1/trees/{tree}/blobs/log/rH/1"), owner)
+        )
+        .await
+        .0,
         StatusCode::OK,
         "the still-in-window dot is served"
     );
@@ -2706,9 +3358,36 @@ async fn change_history_feed_lists_authored_deltas() {
     grant_role(&db, tree, maint, 3).await;
 
     // The owner writes two deltas on replica rA; the maintainer writes one on rB.
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rA/0"), b"alpha", owner, true)).await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rA/1"), b"beta-long", owner, true)).await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/0"), b"gamma", maint, true)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rA/0"),
+            b"alpha",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rA/1"),
+            b"beta-long",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rB/0"),
+            b"gamma",
+            maint,
+            true,
+        ),
+    )
+    .await;
 
     // The feed lists all three, in insertion order, each attributed to its AUTHOR with the delta coords + size.
     let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/history"), owner)).await;
@@ -2716,38 +3395,71 @@ async fn change_history_feed_lists_authored_deltas() {
     let v: Value = serde_json::from_slice(&b).unwrap();
     let entries = v["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3, "all three deltas in the feed");
-    assert_eq!(entries[0]["member_id"], serde_json::json!(owner.to_string()), "attributed to the author");
+    assert_eq!(
+        entries[0]["member_id"],
+        serde_json::json!(owner.to_string()),
+        "attributed to the author"
+    );
     assert_eq!(entries[0]["replica"], "rA");
     assert_eq!(entries[0]["counter"], 0);
     assert_eq!(entries[0]["size"], 5, "size of \"alpha\"");
-    assert!(entries[0]["created_at"].as_str().is_some(), "carries a timestamp");
-    assert_eq!(entries[2]["member_id"], serde_json::json!(maint.to_string()));
+    assert!(
+        entries[0]["created_at"].as_str().is_some(),
+        "carries a timestamp"
+    );
+    assert_eq!(
+        entries[2]["member_id"],
+        serde_json::json!(maint.to_string())
+    );
     assert_eq!(entries[2]["replica"], "rB");
 
     // Read-gated: a viewer may read history; a non-member is forbidden (identical to the blob read gate).
     let viewer = Uuid::new_v4();
     grant_role(&db, tree, viewer, 5).await;
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/history"), viewer)).await.0,
+        send(&app, get_as(format!("/v1/trees/{tree}/history"), viewer))
+            .await
+            .0,
         StatusCode::OK,
         "a viewer can read history"
     );
     let outsider = Uuid::new_v4();
     assert_eq!(
-        send(&app, get_as(format!("/v1/trees/{tree}/history"), outsider)).await.0,
+        send(&app, get_as(format!("/v1/trees/{tree}/history"), outsider))
+            .await
+            .0,
         StatusCode::FORBIDDEN,
         "a non-member cannot read history"
     );
 
     // Pagination by the seq cursor: limit 2 → first two + a cursor; since=cursor → the remainder.
-    let (_, _, b1) = send(&app, get_as(format!("/v1/trees/{tree}/history?limit=2"), owner)).await;
+    let (_, _, b1) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/history?limit=2"), owner),
+    )
+    .await;
     let v1: Value = serde_json::from_slice(&b1).unwrap();
-    assert_eq!(v1["entries"].as_array().unwrap().len(), 2, "page 1 = 2 entries");
+    assert_eq!(
+        v1["entries"].as_array().unwrap().len(),
+        2,
+        "page 1 = 2 entries"
+    );
     let cursor = v1["next_cursor"].as_i64().unwrap();
-    let (_, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/history?since={cursor}"), owner)).await;
+    let (_, _, b2) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/history?since={cursor}"), owner),
+    )
+    .await;
     let v2: Value = serde_json::from_slice(&b2).unwrap();
-    assert_eq!(v2["entries"].as_array().unwrap().len(), 1, "page 2 = the remaining entry");
-    assert_eq!(v2["entries"][0]["replica"], "rB", "page 2 continues past the cursor");
+    assert_eq!(
+        v2["entries"].as_array().unwrap().len(),
+        1,
+        "page 2 = the remaining entry"
+    );
+    assert_eq!(
+        v2["entries"][0]["replica"], "rB",
+        "page 2 continues past the cursor"
+    );
 }
 
 /// Build a router whose config has the internal-GC shared secret set (the env var is unset under test), so
@@ -2782,7 +3494,11 @@ async fn internal_gc_requires_configured_token() {
     // No secret configured (the default router() — env unset): even presenting a token is refused.
     let app = router().await;
     let (s, _, _) = send(&app, internal_gc_req(Some("anything"), &empty)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "trigger inert without a configured secret");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "trigger inert without a configured secret"
+    );
 
     // Secret configured: absent header, wrong token → 403; exact token → 200.
     let app = router_with_internal_token("s3cret-token").await;
@@ -2807,9 +3523,36 @@ async fn internal_gc_drives_both_sweeps() {
     let tree = new_blob_tree(&app, &db, owner).await;
 
     // Two log dots below a published, covered, in-window frontier — the reapable setup from the dev sweep.
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rI/0"), b"delta-zero", owner, true)).await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rI/1"), b"delta-one", owner, true)).await;
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rI"), b"2", owner, false)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rI/0"),
+            b"delta-zero",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rI/1"),
+            b"delta-one",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/rI"),
+            b"2",
+            owner,
+            false,
+        ),
+    )
+    .await;
     send(
         &app,
         put_json_as(
@@ -2875,9 +3618,26 @@ async fn reads_and_writes_are_metered_into_usage_month() {
     let owner = Uuid::new_v4();
     let tree = new_blob_tree(&app, &db, owner).await;
 
-    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), b"delta", owner, true)).await;
-    send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), owner)).await;
-    send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), owner)).await;
+    send(
+        &app,
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/log/rM/0"),
+            b"delta",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), owner),
+    )
+    .await;
+    send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), owner),
+    )
+    .await;
 
     let row: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT write_ops, bytes_write, read_ops, bytes_read FROM usage_month
@@ -2905,23 +3665,53 @@ async fn head_pointer_is_monotonic() {
     let owner = Uuid::new_v4();
     let tree = new_blob_tree(&app, &db, owner).await;
 
-    let put_head = |n: &str| put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rH"), n.as_bytes(), owner, false);
+    let put_head = |n: &str| {
+        put_bytes_as(
+            format!("/v1/trees/{tree}/blobs/heads/rH"),
+            n.as_bytes(),
+            owner,
+            false,
+        )
+    };
 
-    assert_eq!(send(&app, put_head("3")).await.0, StatusCode::OK, "initial head");
-    assert_eq!(send(&app, put_head("5")).await.0, StatusCode::OK, "advance 3 -> 5");
-    assert_eq!(send(&app, put_head("5")).await.0, StatusCode::OK, "idempotent re-publish of 5");
+    assert_eq!(
+        send(&app, put_head("3")).await.0,
+        StatusCode::OK,
+        "initial head"
+    );
+    assert_eq!(
+        send(&app, put_head("5")).await.0,
+        StatusCode::OK,
+        "advance 3 -> 5"
+    );
+    assert_eq!(
+        send(&app, put_head("5")).await.0,
+        StatusCode::OK,
+        "idempotent re-publish of 5"
+    );
 
     // A rollback to 2 is refused with the typed code, and the stored head stays 5.
     let (s, _, b) = send(&app, put_head("2")).await;
     assert_eq!(s, StatusCode::CONFLICT, "rollback 5 -> 2 refused");
     assert_eq!(body_code(&b), "head_rollback");
 
-    let (gs, _, gb) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/heads/rH"), owner)).await;
+    let (gs, _, gb) = send(
+        &app,
+        get_as(format!("/v1/trees/{tree}/blobs/heads/rH"), owner),
+    )
+    .await;
     assert_eq!(gs, StatusCode::OK, "head still served");
-    assert_eq!(gb, b"5", "the rejected rollback did not overwrite the stored head");
+    assert_eq!(
+        gb, b"5",
+        "the rejected rollback did not overwrite the stored head"
+    );
 
     // And a further legitimate advance past 5 still works (the guard only blocks going backward).
-    assert_eq!(send(&app, put_head("9")).await.0, StatusCode::OK, "advance 5 -> 9");
+    assert_eq!(
+        send(&app, put_head("9")).await.0,
+        StatusCode::OK,
+        "advance 5 -> 9"
+    );
 }
 
 // -- /invites contract + hardening (OPE-454) --------------------------------------------------------------
@@ -2943,7 +3733,13 @@ fn invite_body(invite_id: &str, role: &str, engine: &str, expiry_ms: i64) -> Val
     })
 }
 
-fn invite_body_pinned(invite_id: &str, role: &str, engine: &str, expiry_ms: i64, pin_email: &str) -> Value {
+fn invite_body_pinned(
+    invite_id: &str,
+    role: &str,
+    engine: &str,
+    expiry_ms: i64,
+    pin_email: &str,
+) -> Value {
     let mut b = invite_body(invite_id, role, engine, expiry_ms);
     b["recipient_pin"] = serde_json::Value::String(pin_email.to_string());
     b
@@ -2979,11 +3775,19 @@ async fn invite_lifecycle_two_accounts() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await; // generous create-token bucket
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let iid = fresh_invite_id();
     let body = invite_body(&iid, "editor", "chain", now_ms_test() + 3_600_000);
-    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &body, owner)).await;
+    let (s, _, _) = send(
+        &app,
+        post_json_as(format!("/v1/trees/{tree}/invites"), &body, owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "owner mints an invite");
 
     // A signed-in invitee fetches the authenticated metadata.
@@ -2995,29 +3799,72 @@ async fn invite_lifecycle_two_accounts() {
     assert_eq!(meta["engine"], "chain");
     assert_eq!(meta["status"], "open");
     // A missing invite is an identical 404 (no distinguishing signal).
-    let (s, _, _) = send(&app, get_as(format!("/v1/invites/{}/meta", fresh_invite_id()), invitee)).await;
+    let (s, _, _) = send(
+        &app,
+        get_as(format!("/v1/invites/{}/meta", fresh_invite_id()), invitee),
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "missing invite -> 404");
 
     // The invitee claims the seat -- and a SECOND claim is refused (one live claim).
-    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            format!("/v1/invites/{iid}/claim"),
+            &claim_body(invitee),
+            invitee,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT, "first claim wins");
-    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
-    assert_eq!(s, StatusCode::CONFLICT, "a second claim is refused (one live claim)");
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            format!("/v1/invites/{iid}/claim"),
+            &claim_body(invitee),
+            invitee,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::CONFLICT,
+        "a second claim is refused (one live claim)"
+    );
 
     // The owner REOPENS the slot (claimed -> open) and it can be claimed again.
     let (s, _, _) = send(&app, post_as(format!("/v1/invites/{iid}/reopen"), owner)).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "owner reopens the slot");
     let (_, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), invitee)).await;
-    assert_eq!(serde_json::from_slice::<Value>(&mb).unwrap()["status"], "open", "reopened -> open");
-    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&mb).unwrap()["status"],
+        "open",
+        "reopened -> open"
+    );
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            format!("/v1/invites/{iid}/claim"),
+            &claim_body(invitee),
+            invitee,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT, "the reopened slot re-claims");
 
     // ADMIT marks the invite admitted but does NOT delete it -- /meta still resolves so the joiner can finish.
     let (s, _, _) = send(&app, post_as(format!("/v1/invites/{iid}/admit"), owner)).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "owner admits");
     let (s, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), invitee)).await;
-    assert_eq!(s, StatusCode::OK, "admit does not delete -- meta still resolves");
-    assert_eq!(serde_json::from_slice::<Value>(&mb).unwrap()["status"], "admitted");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "admit does not delete -- meta still resolves"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&mb).unwrap()["status"],
+        "admitted"
+    );
 }
 
 #[tokio::test]
@@ -3030,43 +3877,103 @@ async fn recipient_pinned_invite_is_claimable_only_by_the_matching_verified_emai
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     // A PINNED invite for grandma@family.example.
     let iid = fresh_invite_id();
-    let body = invite_body_pinned(&iid, "editor", "chain", now_ms_test() + 3_600_000, "grandma@family.example");
-    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &body, owner)).await;
+    let body = invite_body_pinned(
+        &iid,
+        "editor",
+        "chain",
+        now_ms_test() + 3_600_000,
+        "grandma@family.example",
+    );
+    let (s, _, _) = send(
+        &app,
+        post_json_as(format!("/v1/trees/{tree}/invites"), &body, owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "owner mints a pinned invite");
 
     // No verified email -> refused with the typed code.
     let invitee = Uuid::new_v4();
-    let (s, _, b) = send(&app, put_json_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "a claimant with no verified email is refused");
+    let (s, _, b) = send(
+        &app,
+        put_json_as(
+            format!("/v1/invites/{iid}/claim"),
+            &claim_body(invitee),
+            invitee,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a claimant with no verified email is refused"
+    );
     assert_eq!(body_code(&b), "recipient_pin_mismatch");
 
     // A DIFFERENT verified email -> still refused.
     let (s, _, _) = send(
         &app,
-        put_json_with_email_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee, "someone@else.example"),
+        put_json_with_email_as(
+            format!("/v1/invites/{iid}/claim"),
+            &claim_body(invitee),
+            invitee,
+            "someone@else.example",
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "a mismatched verified email is refused");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a mismatched verified email is refused"
+    );
 
     // The MATCHING verified email (case-insensitive) -> the claim wins.
     let (s, _, _) = send(
         &app,
-        put_json_with_email_as(format!("/v1/invites/{iid}/claim"), &claim_body(invitee), invitee, "Grandma@Family.Example"),
+        put_json_with_email_as(
+            format!("/v1/invites/{iid}/claim"),
+            &claim_body(invitee),
+            invitee,
+            "Grandma@Family.Example",
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::NO_CONTENT, "the matching verified email claims the seat");
+    assert_eq!(
+        s,
+        StatusCode::NO_CONTENT,
+        "the matching verified email claims the seat"
+    );
 
     // A pin-LESS bearer invite is unaffected: no email needed.
     let bare = fresh_invite_id();
     let bb = invite_body(&bare, "editor", "chain", now_ms_test() + 3_600_000);
-    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &bb, owner)).await;
+    send(
+        &app,
+        post_json_as(format!("/v1/trees/{tree}/invites"), &bb, owner),
+    )
+    .await;
     let other = Uuid::new_v4();
-    let (s, _, _) = send(&app, put_json_as(format!("/v1/invites/{bare}/claim"), &claim_body(other), other)).await;
-    assert_eq!(s, StatusCode::NO_CONTENT, "an unpinned bearer invite claims with no email");
+    let (s, _, _) = send(
+        &app,
+        put_json_as(
+            format!("/v1/invites/{bare}/claim"),
+            &claim_body(other),
+            other,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::NO_CONTENT,
+        "an unpinned bearer invite claims with no email"
+    );
 }
 
 #[tokio::test]
@@ -3079,24 +3986,63 @@ async fn create_invite_enforces_policy_and_role_ceiling() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     // A Maintainer (role 3) is below owner/co-owner -> the 'signer' policy refuses their mint.
     let maint = Uuid::new_v4();
     grant_role(&db, tree, maint, 3).await;
-    let body = invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000);
-    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &body, maint)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "a non-signer (Maintainer) cannot mint under the 'signer' policy");
+    let body = invite_body(
+        &fresh_invite_id(),
+        "editor",
+        "chain",
+        now_ms_test() + 3_600_000,
+    );
+    let (s, _, _) = send(
+        &app,
+        post_json_as(format!("/v1/trees/{tree}/invites"), &body, maint),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a non-signer (Maintainer) cannot mint under the 'signer' policy"
+    );
 
     // A co-owner (role 2) is a signer, but may not mint an OWNER (role 1) -- the role ceiling.
     let coowner = Uuid::new_v4();
     grant_role(&db, tree, coowner, 2).await;
-    let over = invite_body(&fresh_invite_id(), "owner", "chain", now_ms_test() + 3_600_000);
-    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &over, coowner)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "may not mint a role stronger than your own");
+    let over = invite_body(
+        &fresh_invite_id(),
+        "owner",
+        "chain",
+        now_ms_test() + 3_600_000,
+    );
+    let (s, _, _) = send(
+        &app,
+        post_json_as(format!("/v1/trees/{tree}/invites"), &over, coowner),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "may not mint a role stronger than your own"
+    );
     // But the co-owner CAN mint at or below their own rank.
-    let ok = invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000);
-    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &ok, coowner)).await;
+    let ok = invite_body(
+        &fresh_invite_id(),
+        "editor",
+        "chain",
+        now_ms_test() + 3_600_000,
+    );
+    let (s, _, _) = send(
+        &app,
+        post_json_as(format!("/v1/trees/{tree}/invites"), &ok, coowner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "a signer mints at/below their own rank");
 }
 
@@ -3110,25 +4056,72 @@ async fn create_invite_clamps_expiry_and_caps_open() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 100_000).await; // generous bucket for many creates
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     // A wildly-future expiry is clamped down to <= now + the max TTL (90 days).
     let far = now_ms_test() + 10_000 * 24 * 3600 * 1000; // ~27 years out
     let iid = fresh_invite_id();
-    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&iid, "editor", "chain", far), owner)).await;
+    send(
+        &app,
+        post_json_as(
+            format!("/v1/trees/{tree}/invites"),
+            &invite_body(&iid, "editor", "chain", far),
+            owner,
+        ),
+    )
+    .await;
     let (_, _, mb) = send(&app, get_as(format!("/v1/invites/{iid}/meta"), owner)).await;
-    let stored = serde_json::from_slice::<Value>(&mb).unwrap()["expiry"].as_i64().unwrap();
+    let stored = serde_json::from_slice::<Value>(&mb).unwrap()["expiry"]
+        .as_i64()
+        .unwrap();
     let max_ttl_ms: i64 = 90 * 24 * 3600 * 1000;
-    assert!(stored <= now_ms_test() + max_ttl_ms + 60_000, "expiry clamped to the max TTL, not the caller's value");
+    assert!(
+        stored <= now_ms_test() + max_ttl_ms + 60_000,
+        "expiry clamped to the max TTL, not the caller's value"
+    );
 
     // The per-tree open-invite cap: fill to the cap, then the next mint is refused (this invite already used 1).
     let cap = 50;
     for _ in 1..cap {
-        let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+        let (s, _, _) = send(
+            &app,
+            post_json_as(
+                format!("/v1/trees/{tree}/invites"),
+                &invite_body(
+                    &fresh_invite_id(),
+                    "editor",
+                    "chain",
+                    now_ms_test() + 3_600_000,
+                ),
+                owner,
+            ),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK, "mint up to the cap");
     }
-    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "the mint past the open-invite cap is refused");
+    let (s, _, _) = send(
+        &app,
+        post_json_as(
+            format!("/v1/trees/{tree}/invites"),
+            &invite_body(
+                &fresh_invite_id(),
+                "editor",
+                "chain",
+                now_ms_test() + 3_600_000,
+            ),
+            owner,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "the mint past the open-invite cap is refused"
+    );
 }
 
 #[tokio::test]
@@ -3142,12 +4135,46 @@ async fn create_invite_rate_limited_per_account() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 0.001, 2).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
-    let (s, _, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        post_json_as(
+            format!("/v1/trees/{tree}/invites"),
+            &invite_body(
+                &fresh_invite_id(),
+                "editor",
+                "chain",
+                now_ms_test() + 3_600_000,
+            ),
+            owner,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "the first mint spends the single token");
-    let (s, h, _) = send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&fresh_invite_id(), "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
-    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "the empty bucket 429s the next mint");
+    let (s, h, _) = send(
+        &app,
+        post_json_as(
+            format!("/v1/trees/{tree}/invites"),
+            &invite_body(
+                &fresh_invite_id(),
+                "editor",
+                "chain",
+                now_ms_test() + 3_600_000,
+            ),
+            owner,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the empty bucket 429s the next mint"
+    );
     assert!(h.contains_key("retry-after"), "429 carries Retry-After");
 }
 
@@ -3163,18 +4190,46 @@ async fn internal_gc_reaps_admitted_and_expired_invites() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     // Invite A -> claim -> admit (consumed, status='admitted').
     let a = fresh_invite_id();
-    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&a, "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    send(
+        &app,
+        post_json_as(
+            format!("/v1/trees/{tree}/invites"),
+            &invite_body(&a, "editor", "chain", now_ms_test() + 3_600_000),
+            owner,
+        ),
+    )
+    .await;
     let invitee = Uuid::new_v4();
-    send(&app, put_json_as(format!("/v1/invites/{a}/claim"), &claim_body(invitee), invitee)).await;
+    send(
+        &app,
+        put_json_as(
+            format!("/v1/invites/{a}/claim"),
+            &claim_body(invitee),
+            invitee,
+        ),
+    )
+    .await;
     send(&app, post_as(format!("/v1/invites/{a}/admit"), owner)).await;
 
     // Invite B -> backdate its expiry so it's expired.
     let b = fresh_invite_id();
-    send(&app, post_json_as(format!("/v1/trees/{tree}/invites"), &invite_body(&b, "editor", "chain", now_ms_test() + 3_600_000), owner)).await;
+    send(
+        &app,
+        post_json_as(
+            format!("/v1/trees/{tree}/invites"),
+            &invite_body(&b, "editor", "chain", now_ms_test() + 3_600_000),
+            owner,
+        ),
+    )
+    .await;
     sqlx::query("UPDATE pending_invites SET expiry = 0 WHERE invite_id = $1")
         .bind(&b)
         .execute(&db)
@@ -3185,7 +4240,10 @@ async fn internal_gc_reaps_admitted_and_expired_invites() {
     let (s, _, gb) = send(&app, internal_gc_req(Some(token), &serde_json::json!({}))).await;
     assert_eq!(s, StatusCode::OK, "scheduled gc runs");
     assert!(
-        serde_json::from_slice::<Value>(&gb).unwrap()["invites"]["expired"].as_u64().unwrap() >= 2,
+        serde_json::from_slice::<Value>(&gb).unwrap()["invites"]["expired"]
+            .as_u64()
+            .unwrap()
+            >= 2,
         "swept >=2 invites (the admitted one + the expired one)"
     );
     for id in [&a, &b] {
@@ -3223,12 +4281,20 @@ fn hs_jwt(sub: &str) -> String {
     let claims = serde_json::json!({
         "sub": sub, "aud": "authenticated", "iss": JWT_ISS, "exp": 4_102_444_800u64,
     });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(JWT_SECRET.as_bytes())).unwrap()
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
+    )
+    .unwrap()
 }
 
 fn now_secs() -> i64 {
     i64::try_from(
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
     )
     .unwrap()
 }
@@ -3301,7 +4367,15 @@ async fn register_happy_path_binds_and_resolves() {
     let (sk, _pk, member_id) = fresh_author(0x11);
 
     // Valid PoP -> 200 + the bound member_id echoed.
-    let (s, _, body) = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await;
+    let (s, _, body) = send(
+        &app,
+        post_json_jwt(
+            "/v1/register",
+            &token,
+            &register_body(&sub, &sk, member_id, now_secs()),
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "valid PoP registers");
     let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["member_id"], serde_json::json!(member_id.to_string()));
@@ -3310,7 +4384,11 @@ async fn register_happy_path_binds_and_resolves() {
     let (s, _, body) = send(&app, get_jwt("/v1/me", &token)).await;
     assert_eq!(s, StatusCode::OK);
     let me: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(me["member_id"], serde_json::json!(member_id.to_string()), "sub resolved to the durable member_id");
+    assert_eq!(
+        me["member_id"],
+        serde_json::json!(member_id.to_string()),
+        "sub resolved to the durable member_id"
+    );
     assert_eq!(me["keystore"], Value::Null, "no keystore backup yet");
     assert_eq!(me["generation"], serde_json::json!(0));
 }
@@ -3369,7 +4447,15 @@ async fn register_rejects_a_member_id_that_is_not_the_key_hash() {
     // Claim a member_id that is NOT derive(pubkey) - even with an otherwise-valid PoP over it, the
     // self-certifying check refuses (a squatter can't bind an id whose key they don't hold).
     let forged = Uuid::new_v4();
-    let (status, headers, body) = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, forged, now_secs()))).await;
+    let (status, headers, body) = send(
+        &app,
+        post_json_jwt(
+            "/v1/register",
+            &token,
+            &register_body(&sub, &sk, forged, now_secs()),
+        ),
+    )
+    .await;
     assert_problem(
         status,
         &headers,
@@ -3421,10 +4507,26 @@ async fn register_is_idempotent_for_the_same_binding() {
     let token = hs_jwt(&sub);
     let (sk, _pk, member_id) = fresh_author(0x55);
 
-    let first = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await;
+    let first = send(
+        &app,
+        post_json_jwt(
+            "/v1/register",
+            &token,
+            &register_body(&sub, &sk, member_id, now_secs()),
+        ),
+    )
+    .await;
     assert_eq!(first.0, StatusCode::OK, "first bind");
     // A re-register of the SAME (sub, member_id, key) - a fresh signed ts - is an idempotent 200, not a 409.
-    let again = send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await;
+    let again = send(
+        &app,
+        post_json_jwt(
+            "/v1/register",
+            &token,
+            &register_body(&sub, &sk, member_id, now_secs()),
+        ),
+    )
+    .await;
     assert_eq!(again.0, StatusCode::OK, "idempotent re-register");
 }
 
@@ -3438,7 +4540,16 @@ async fn register_conflicts_when_another_sub_claims_the_same_member_id() {
     let sub1 = Uuid::new_v4().to_string();
     let t1 = hs_jwt(&sub1);
     assert_eq!(
-        send(&app, post_json_jwt("/v1/register", &t1, &register_body(&sub1, &sk, member_id, now_secs()))).await.0,
+        send(
+            &app,
+            post_json_jwt(
+                "/v1/register",
+                &t1,
+                &register_body(&sub1, &sk, member_id, now_secs())
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
     );
 
@@ -3446,7 +4557,15 @@ async fn register_conflicts_when_another_sub_claims_the_same_member_id() {
     // -> the squat gate (member_id UNIQUE) refuses with 409, no orphan account left behind.
     let sub2 = Uuid::new_v4().to_string();
     let t2 = hs_jwt(&sub2);
-    let (status, headers, body) = send(&app, post_json_jwt("/v1/register", &t2, &register_body(&sub2, &sk, member_id, now_secs()))).await;
+    let (status, headers, body) = send(
+        &app,
+        post_json_jwt(
+            "/v1/register",
+            &t2,
+            &register_body(&sub2, &sk, member_id, now_secs()),
+        ),
+    )
+    .await;
     assert_problem(
         status,
         &headers,
@@ -3477,7 +4596,11 @@ async fn identity_extractor_403s_an_unregistered_sub_distinctly_from_a_bad_token
     let tree = Uuid::new_v4();
     let (status, headers, body) = send(
         &app,
-        post_json_jwt(&format!("/v1/trees/{tree}"), &unregistered, &serde_json::json!({})),
+        post_json_jwt(
+            &format!("/v1/trees/{tree}"),
+            &unregistered,
+            &serde_json::json!({}),
+        ),
     )
     .await;
     assert_problem(
@@ -3500,7 +4623,10 @@ async fn identity_extractor_403s_an_unregistered_sub_distinctly_from_a_bad_token
 
     let (status, headers, body) = send(
         &app,
-        Request::builder().uri("/v1/whoami").body(Body::empty()).unwrap(),
+        Request::builder()
+            .uri("/v1/whoami")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_problem(
@@ -3516,12 +4642,29 @@ async fn identity_extractor_403s_an_unregistered_sub_distinctly_from_a_bad_token
     let token = hs_jwt(&sub);
     let (sk, _pk, member_id) = fresh_author(0x77);
     assert_eq!(
-        send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await.0,
+        send(
+            &app,
+            post_json_jwt(
+                "/v1/register",
+                &token,
+                &register_body(&sub, &sk, member_id, now_secs())
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
     );
     let tree = Uuid::new_v4();
-    let (s, _, _) = send(&app, post_json_jwt(&format!("/v1/trees/{tree}"), &token, &serde_json::json!({}))).await;
-    assert_eq!(s, StatusCode::CREATED, "a registered caller can create a tree as its resolved member_id");
+    let (s, _, _) = send(
+        &app,
+        post_json_jwt(&format!("/v1/trees/{tree}"), &token, &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::CREATED,
+        "a registered caller can create a tree as its resolved member_id"
+    );
 }
 
 #[tokio::test]
@@ -3532,7 +4675,16 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
     let token = hs_jwt(&sub);
     let (sk, _pk, member_id) = fresh_author(0x88);
     assert_eq!(
-        send(&app, post_json_jwt("/v1/register", &token, &register_body(&sub, &sk, member_id, now_secs()))).await.0,
+        send(
+            &app,
+            post_json_jwt(
+                "/v1/register",
+                &token,
+                &register_body(&sub, &sk, member_id, now_secs())
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
     );
 
@@ -3560,7 +4712,17 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
     // PUT gen 1 (blob A) -> 200; GET reflects it.
     let blob_a = b64(b"encrypted-keystore-A");
     assert_eq!(
-        send(&app, put_json_jwt("/v1/account/keystore", &token, &initial_etag, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await.0,
+        send(
+            &app,
+            put_json_jwt(
+                "/v1/account/keystore",
+                &token,
+                &initial_etag,
+                &serde_json::json!({ "keystore": blob_a, "generation": 1 })
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
     );
     let (_, headers, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
@@ -3572,13 +4734,32 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
     // PUT gen 2 (blob B) -> 200 (advances the floor).
     let blob_b = b64(b"encrypted-keystore-B");
     assert_eq!(
-        send(&app, put_json_jwt("/v1/account/keystore", &token, &blob_a_etag, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
+        send(
+            &app,
+            put_json_jwt(
+                "/v1/account/keystore",
+                &token,
+                &blob_a_etag,
+                &serde_json::json!({ "keystore": blob_b, "generation": 2 })
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
     );
 
     // A rollback PUT (gen 1, below the stored 2) is refused - the load-bearing anti-rollback (a stale blob
     // can't re-arm a revoked recovery code).
-    let (status, headers, body) = send(&app, put_json_jwt("/v1/account/keystore", &token, &blob_a_etag, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await;
+    let (status, headers, body) = send(
+        &app,
+        put_json_jwt(
+            "/v1/account/keystore",
+            &token,
+            &blob_a_etag,
+            &serde_json::json!({ "keystore": blob_a, "generation": 1 }),
+        ),
+    )
+    .await;
     assert_problem(
         status,
         &headers,
@@ -3591,10 +4772,24 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
     let (_, headers, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
     let blob_b_etag = headers.get("etag").unwrap().to_str().unwrap().to_owned();
     let v: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["keystore"], serde_json::json!(blob_b), "rollback did not overwrite");
+    assert_eq!(
+        v["keystore"],
+        serde_json::json!(blob_b),
+        "rollback did not overwrite"
+    );
     assert_eq!(v["generation"], serde_json::json!(2));
     assert_eq!(
-        send(&app, put_json_jwt("/v1/account/keystore", &token, &blob_a_etag, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
+        send(
+            &app,
+            put_json_jwt(
+                "/v1/account/keystore",
+                &token,
+                &blob_a_etag,
+                &serde_json::json!({ "keystore": blob_b, "generation": 2 })
+            )
+        )
+        .await
+        .0,
         StatusCode::OK,
         "an exact replay is idempotent after a lost success response",
     );

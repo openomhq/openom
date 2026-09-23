@@ -19,13 +19,13 @@
 
 use std::collections::BTreeSet;
 
-use store_blob::BlobStore;
 use openom_data_crdt::ChannelItem;
+use openom_data_tree::{Tree, TreeError};
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, SealerError, SealerSet};
-use openom_data_tree::{Tree, TreeError};
 use serde_json::Value;
+use store_blob::BlobStore;
 
 use crate::{Result, SyncError};
 
@@ -58,7 +58,8 @@ impl docsync::Engine for SyncTree {
         }
         // Encode the batch as the delta, then apply it through `Tree::merge` so the clock observes the ops
         // and the live view reflects them immediately; the bytes are what the transport seals.
-        let bytes = codec::encode(&edit).expect("op-batch JSON encoding is infallible for valid items");
+        let bytes =
+            codec::encode(&edit).expect("op-batch JSON encoding is infallible for valid items");
         // A local edit is committed by this replica's own author — the same did:key it attributes to.
         let committer = self.0.author().to_owned();
         self.0
@@ -561,10 +562,10 @@ impl<S: BlobStore> std::fmt::Debug for SyncClient<S> {
 
 #[cfg(test)]
 mod tests {
+    use openom_crypto::{generate_dek, Dek};
+    use openom_data_crdt::{ChannelItem, Op, OpKind};
     use openom_data_model::envelope::{Claim, Record};
     use openom_data_model::Hlc;
-    use openom_data_crdt::{ChannelItem, Op, OpKind};
-    use openom_crypto::{generate_dek, Dek};
     use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
     use openom_sealer::{Sealer, SealerSet};
     use serde_json::json;
@@ -578,8 +579,11 @@ mod tests {
     /// Pull with no §B3 gate (accept every peer delta; ignore covers) — the trusted-DEK path used where a
     /// facade test isn't exercising membership verification (that lives in the app-core tests).
     fn pull_all(c: &mut BlobClient) -> usize {
-        c.pull_verified(|_e, _p, _r, _c| (Verdict::Accept, DEVICE.to_owned()), |_e, _b, _r, _c| {})
-            .unwrap()
+        c.pull_verified(
+            |_e, _p, _r, _c| (Verdict::Accept, DEVICE.to_owned()),
+            |_e, _b, _r, _c| {},
+        )
+        .unwrap()
     }
 
     fn blob_empty(c: &BlobClient) -> bool {
@@ -682,7 +686,11 @@ mod tests {
         a.pull().unwrap();
         b.pull().unwrap();
 
-        assert_eq!(blob_live(&a), blob_live(&b), "both devices converge over the blob seam");
+        assert_eq!(
+            blob_live(&a),
+            blob_live(&b),
+            "both devices converge over the blob seam"
+        );
         assert_eq!(blob_live(&a), set(&[&pa, &na, &nb]));
     }
 
@@ -715,7 +723,8 @@ mod tests {
         let store = Arc::new(MemoryBlob::new());
         let dek = generate_dek().unwrap();
         let mut a = blob_client(b"replica-a", dek, store.clone());
-        a.apply(vec![name_claim("pA", "Ada", "did:key:z6MkA", 1)]).unwrap();
+        a.apply(vec![name_claim("pA", "Ada", "did:key:z6MkA", 1)])
+            .unwrap();
 
         // A wrong DEK reveals nothing and does not wedge: the unopenable object is quarantined + counted.
         let wrong = generate_dek().unwrap();

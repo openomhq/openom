@@ -16,8 +16,8 @@ use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
 use openom_vault::{AccountKeystore, AppVault, Disposition, MembershipResolver};
 // Re-export so the native host (and other rlib consumers) can name the lifecycle API's error type.
 pub use openom_vault::VaultError;
-use sha2::{Digest, Sha256};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use store_blob::{BlobError, BlobStore, MemoryBlob, Precondition};
 
 /// One stored object: its keyspace key and its opaque sealed bytes. The unit of [`AppCore::export`] /
@@ -172,7 +172,10 @@ pub struct AccountBackupVersion {
 impl AccountBackupVersion {
     #[must_use]
     pub const fn new(generation: AccountGeneration, blob_hash: AccountBlobHash) -> Self {
-        Self { generation, blob_hash }
+        Self {
+            generation,
+            blob_hash,
+        }
     }
 
     #[must_use]
@@ -293,7 +296,11 @@ pub fn account_create(passphrase: &Passphrase) -> Result<AccountCreated, VaultEr
     let generation = AccountGeneration::new(keystore.generation);
     let bytes = keystore.to_bytes()?;
     Ok(AccountCreated {
-        handle: AccountHandle { keystore, keystore_bytes: bytes.clone(), account },
+        handle: AccountHandle {
+            keystore,
+            keystore_bytes: bytes.clone(),
+            account,
+        },
         keystore: bytes,
         recovery_code: recovery_code.into_string(),
         generation,
@@ -312,7 +319,11 @@ pub fn account_unlock(
     let exact_bytes = keystore.to_vec();
     let keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor.get())?;
     let account = keystore.unlock(passphrase.expose())?;
-    Ok(AccountHandle { keystore, keystore_bytes: exact_bytes, account })
+    Ok(AccountHandle {
+        keystore,
+        keystore_bytes: exact_bytes,
+        account,
+    })
 }
 
 /// Verify a fetched account blob into temporary custody without mutating persistence or resident state.
@@ -342,7 +353,10 @@ pub fn account_change_passphrase(
     let generation = AccountGeneration::new(keystore.generation);
     handle.keystore = keystore;
     handle.keystore_bytes.clone_from(&bytes);
-    Ok(AccountChanged { keystore: bytes, generation })
+    Ok(AccountChanged {
+        keystore: bytes,
+        generation,
+    })
 }
 
 /// Recover an account and immediately rotate its wrapping root. The submitted recovery code and every
@@ -364,7 +378,11 @@ pub fn account_recover(
     let generation = AccountGeneration::new(keystore.generation);
     let bytes = keystore.to_bytes()?;
     Ok(AccountRecovered {
-        handle: AccountHandle { keystore, keystore_bytes: bytes.clone(), account },
+        handle: AccountHandle {
+            keystore,
+            keystore_bytes: bytes.clone(),
+            account,
+        },
         keystore: bytes,
         recovery_code: next_recovery_code.into_string(),
         generation,
@@ -381,12 +399,7 @@ pub fn account_recover_candidate(
     candidate: &[u8],
     generation_floor: AccountGeneration,
 ) -> Result<AccountRecovered, VaultError> {
-    account_recover(
-        recovery_code,
-        new_passphrase,
-        candidate,
-        generation_floor,
-    )
+    account_recover(recovery_code, new_passphrase, candidate, generation_floor)
 }
 
 /// Rotate the account wrapping root and refresh the live handle to the new root material.
@@ -423,7 +436,13 @@ pub fn account_register_proof(
 ) -> Vec<u8> {
     let member_id = derive_member_id_bytes(handle.author_public_key());
     let message = registration_signing_bytes(issuer, subject, member_id, timestamp);
-    handle.account.root.identity.sign(&message).to_bytes().to_vec()
+    handle
+        .account
+        .root
+        .identity
+        .sign(&message)
+        .to_bytes()
+        .to_vec()
 }
 
 /// Return the account's stable, self-certifying public admission material.
@@ -580,11 +599,21 @@ pub fn provision_tree<S: BlobStore>(
     let tree = TreeId::new(tree_id);
     let member = MemberId::new(account.member_id());
     let replica = ReplicaId::new(replica_id);
-    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
     let provisioned = AppVault::from_kind(engine).provision(&ctx, &account.account)?;
     let did_key = provisioned.did_key.into_string();
     Ok(TreeProvisioned {
-        core: AppCore::new(did_key.clone(), provisioned.sealer, Arc::new(store), doc, replica_id),
+        core: AppCore::new(
+            did_key.clone(),
+            provisioned.sealer,
+            Arc::new(store),
+            doc,
+            replica_id,
+        ),
         keyring: provisioned.anchor,
         did_key,
         watermark: provisioned.watermark,
@@ -607,11 +636,21 @@ pub fn unlock_tree<S: BlobStore>(
     let tree = TreeId::new(tree_id);
     let member = MemberId::new(account.member_id());
     let replica = ReplicaId::new(replica_id);
-    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
     let unlocked = AppVault::from_kind(engine).unlock(&ctx, anchor, &account.account)?;
     let did_key = unlocked.did_key.into_string();
     Ok(Unlocked {
-        core: AppCore::new(did_key.clone(), unlocked.sealer, Arc::new(store), doc, replica_id),
+        core: AppCore::new(
+            did_key.clone(),
+            unlocked.sealer,
+            Arc::new(store),
+            doc,
+            replica_id,
+        ),
         did_key,
         watermark: unlocked.watermark,
         needs_reseal: unlocked.needs_reseal,
@@ -659,7 +698,9 @@ pub fn vault_error_code(e: &VaultError) -> &'static str {
     use error_codes as ec;
     use openom_crypto::CryptoError;
     match e {
-        VaultError::RevisionRollback { .. } | VaultError::WatermarkRollback { .. } => ec::REVISION_ROLLBACK,
+        VaultError::RevisionRollback { .. } | VaultError::WatermarkRollback { .. } => {
+            ec::REVISION_ROLLBACK
+        }
         VaultError::Crypto(CryptoError::Open) | VaultError::MissingWrap => ec::WRONG_PASSPHRASE,
         VaultError::Crypto(CryptoError::RecoveryFormat | CryptoError::RecoveryChecksum) => {
             ec::RECOVERY_CODE_INVALID
@@ -767,14 +808,27 @@ pub fn recover<S: BlobStore>(
     floor: &[u8],
     doc: impl Into<String>,
 ) -> Result<Recovered<S>, VaultError> {
-    let (tree, member, replica) =
-        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
-    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
     // OPE-542/543: the dag recovers via the ACCOUNT keystore blob (restoring the durable identity + re-wrapping
     // under the new passphrase); the chain ignores `keystore` and recovers op-based. `r.keystore` is the new
     // blob the platform layer persists (empty for the chain).
-    let r = AppVault::from_kind(engine)
-        .recover(&ctx, anchor, keystore, recovery_code, new_passphrase, floor)?;
+    let r = AppVault::from_kind(engine).recover(
+        &ctx,
+        anchor,
+        keystore,
+        recovery_code,
+        new_passphrase,
+        floor,
+    )?;
     let did = r.did_key.into_string();
     Ok(Recovered {
         core: AppCore::new(did.clone(), r.sealer, Arc::new(store), doc, replica_id),
@@ -817,14 +871,27 @@ pub fn change_passphrase(
     keystore: &[u8],
     floor: &[u8],
 ) -> Result<PassphraseChanged, VaultError> {
-    let (tree, member, replica) =
-        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
-    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
     // OPE-542/543: the dag re-wraps the ACCOUNT keystore blob under the new passphrase (no on-tree op — the
     // keyring anchor is unchanged); the chain ignores `keystore` and re-keys the keyring op-based. `re.keystore`
     // is the new blob to persist (empty for the chain).
-    let re = AppVault::from_kind(engine)
-        .change_passphrase(&ctx, anchor, keystore, old_passphrase, new_passphrase, floor)?;
+    let re = AppVault::from_kind(engine).change_passphrase(
+        &ctx,
+        anchor,
+        keystore,
+        old_passphrase,
+        new_passphrase,
+        floor,
+    )?;
     Ok(PassphraseChanged {
         keyring: re.anchor,
         recovery_code: re.recovery_code.into_string(),
@@ -917,22 +984,36 @@ mod lifecycle_tests {
 
         // provision yields a working core over the native store: mint + commit + project round-trips in-core.
         let mut p = super::provision(
-            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, "acct-owner", &replica_id, "doc",
+            FsBlob::new(dir.clone()),
+            EngineKind::Chain,
+            &pass,
+            &tree_id,
+            "acct-owner",
+            &replica_id,
+            "doc",
         )
         .unwrap();
         assert!(!p.keyring.is_empty(), "provision yields a keyring anchor");
         assert!(!p.recovery_code.is_empty(), "and a recovery code");
         assert!(!p.did_key.is_empty(), "and the author did:key");
-        p.core.tree_mut().assert_anchor("pAlice", "https://openom.example/person", 1_000_000).unwrap();
+        p.core
+            .tree_mut()
+            .assert_anchor("pAlice", "https://openom.example/person", 1_000_000)
+            .unwrap();
         p.core.commit().unwrap();
         // Own entries fold on commit, so the subsumed frontier now covers this replica — proof the provisioned
         // core is fully wired (engine + sealer + local store), not just constructed.
-        assert!(!p.core.subsumed_frontier().is_empty(), "the provisioned core folds its own committed mint");
+        assert!(
+            !p.core.subsumed_frontier().is_empty(),
+            "the provisioned core folds its own committed mint"
+        );
         let (did, keyring, keystore) = (p.did_key.clone(), p.keyring.clone(), p.keystore.clone());
         // OPE-543: the owner's on-tree id is SELF-CERTIFYING (`derive_member_id(account key)`), read from the
         // keystore's plaintext `member_id` — the owner-path DEK lookup on unlock must be keyed by it, not the
         // "acct-owner" label (which the owner path ignores).
-        let owner_mid = openom_vault::AccountKeystore::from_bytes(&keystore).unwrap().member_id;
+        let owner_mid = openom_vault::AccountKeystore::from_bytes(&keystore)
+            .unwrap()
+            .member_id;
         drop(p); // release the FsBlob handle before re-opening the dir
 
         // unlock reconstructs the SAME identity from the keyring anchor over a fresh native store, and
@@ -940,7 +1021,15 @@ mod lifecycle_tests {
         // host's persist step — the heads pointer — which is the native-host slice's job, like the wasm
         // worker's import+bootstrap; the e2e reload tests already prove that flow in the wasm topology.)
         let mut u = super::unlock(
-            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, &owner_mid, &replica_id, &keyring, &keystore, "doc",
+            FsBlob::new(dir.clone()),
+            EngineKind::Chain,
+            &pass,
+            &tree_id,
+            &owner_mid,
+            &replica_id,
+            &keyring,
+            &keystore,
+            "doc",
         )
         .unwrap();
         assert_eq!(u.did_key, did, "same identity across provision + unlock");
@@ -948,8 +1037,15 @@ mod lifecycle_tests {
 
         assert!(
             super::unlock(
-                FsBlob::new(dir.clone()), EngineKind::Chain, &Passphrase::new(b"wrong".to_vec()),
-                &tree_id, &owner_mid, &replica_id, &keyring, &keystore, "doc",
+                FsBlob::new(dir.clone()),
+                EngineKind::Chain,
+                &Passphrase::new(b"wrong".to_vec()),
+                &tree_id,
+                &owner_mid,
+                &replica_id,
+                &keyring,
+                &keystore,
+                "doc",
             )
             .is_err(),
             "a wrong passphrase is refused"
@@ -978,7 +1074,13 @@ mod lifecycle_tests {
                     format!("doc-{engine_index}-{tree_index}"),
                 )
                 .unwrap();
-                trees.push((engine, tree_id, replica_id, provisioned.keyring, provisioned.did_key));
+                trees.push((
+                    engine,
+                    tree_id,
+                    replica_id,
+                    provisioned.keyring,
+                    provisioned.did_key,
+                ));
             }
         }
 
@@ -1149,7 +1251,10 @@ mod lifecycle_tests {
         .unwrap();
         let snapshot = super::account_snapshot(&recovered.handle);
 
-        assert_eq!(snapshot.version().generation().get(), created.generation.get() + 1);
+        assert_eq!(
+            snapshot.version().generation().get(),
+            created.generation.get() + 1
+        );
         assert_eq!(recovered.handle.member_id(), created.handle.member_id());
         let rotated = openom_vault::AccountKeystore::from_bytes(snapshot.keystore()).unwrap();
         assert!(rotated.unlock_with_recovery(&old_recovery).is_err());
@@ -1173,16 +1278,22 @@ mod lifecycle_tests {
 
         assert_eq!(recovered.generation.get(), created.generation.get() + 1);
         assert_eq!(recovered.handle.member_id(), member_id);
-        assert!(super::account_unlock(&passphrase, &created.keystore, recovered.generation).is_err());
-        let recovered_keystore = openom_vault::AccountKeystore::from_bytes(&recovered.keystore).unwrap();
-        assert!(recovered_keystore.unlock_with_recovery(&old_recovery).is_err());
+        assert!(
+            super::account_unlock(&passphrase, &created.keystore, recovered.generation).is_err()
+        );
+        let recovered_keystore =
+            openom_vault::AccountKeystore::from_bytes(&recovered.keystore).unwrap();
+        assert!(recovered_keystore
+            .unlock_with_recovery(&old_recovery)
+            .is_err());
 
         let recovery_after_recover = recovered.recovery_code.clone();
         let rotated = super::account_rotate_root(&mut recovered.handle, &new_passphrase).unwrap();
         assert_eq!(rotated.generation.get(), recovered.generation.get() + 1);
         assert_eq!(recovered.handle.generation(), rotated.generation);
         assert_eq!(recovered.handle.member_id(), member_id);
-        let rotated_keystore = openom_vault::AccountKeystore::from_bytes(&rotated.keystore).unwrap();
+        let rotated_keystore =
+            openom_vault::AccountKeystore::from_bytes(&rotated.keystore).unwrap();
         assert!(rotated_keystore
             .unlock_with_recovery(&RecoveryCode::new(recovery_after_recover))
             .is_err());
@@ -1200,9 +1311,11 @@ mod lifecycle_tests {
 
     #[test]
     fn registration_proof_matches_the_server_verification_bytes() {
-        let created = super::account_create(&Passphrase::new(b"profile passphrase".to_vec())).unwrap();
+        let created =
+            super::account_create(&Passphrase::new(b"profile passphrase".to_vec())).unwrap();
         let timestamp = 1_700_000_000i64;
-        let signature = super::account_register_proof(&created.handle, "https://issuer", "auth-sub", timestamp);
+        let signature =
+            super::account_register_proof(&created.handle, "https://issuer", "auth-sub", timestamp);
         let signature: [u8; 64] = signature.try_into().unwrap();
         let public_key: [u8; 32] = created.handle.author_public_key().try_into().unwrap();
         let member_id = derive_member_id_bytes(&public_key);
@@ -1237,11 +1350,18 @@ mod lifecycle_tests {
         let (tree_id, replica_id) = ([9u8; 16], [2u8; 16]);
         let pass = Passphrase::new(b"correct horse battery staple".to_vec());
         let p = super::provision(
-            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, "acct-owner", &replica_id, "doc",
+            FsBlob::new(dir.clone()),
+            EngineKind::Chain,
+            &pass,
+            &tree_id,
+            "acct-owner",
+            &replica_id,
+            "doc",
         )
         .unwrap();
 
-        let jpeg: &[u8] = b"\xff\xd8\xff\xe0 pretend-jpeg-bytes \x00\x01\x02 secret-birth-certificate";
+        let jpeg: &[u8] =
+            b"\xff\xd8\xff\xe0 pretend-jpeg-bytes \x00\x01\x02 secret-birth-certificate";
         let (hash, sealed) = p.core.seal_media(jpeg).unwrap();
 
         // Content address = hex SHA-256 of the PLAINTEXT (64 hex chars), independent of the nonced ciphertext.
@@ -1258,7 +1378,10 @@ mod lifecycle_tests {
         // Re-sealing the same bytes yields the SAME address (dedup key stable) but DIFFERENT ciphertext (nonce).
         let (hash2, sealed2) = p.core.seal_media(jpeg).unwrap();
         assert_eq!(hash, hash2, "content address is stable across re-seal");
-        assert_ne!(sealed, sealed2, "a fresh AEAD nonce makes each ciphertext distinct");
+        assert_ne!(
+            sealed, sealed2,
+            "a fresh AEAD nonce makes each ciphertext distinct"
+        );
         assert_eq!(p.core.open_media(&sealed2).unwrap(), jpeg);
 
         drop(p);
@@ -1270,10 +1393,12 @@ mod lifecycle_tests {
 /// valid, injective object-key segment (the sealer keeps the raw bytes for attribution).
 fn replica_key(replica: &[u8]) -> String {
     use std::fmt::Write as _;
-    replica.iter().fold(String::with_capacity(replica.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    replica
+        .iter()
+        .fold(String::with_capacity(replica.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 impl<S: BlobStore> AppCore<S> {
@@ -1621,7 +1746,9 @@ impl<S: BlobStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if a local store read fails (a broken backend — not one bad entry).
     pub fn fold(&mut self) -> Result<usize, CoreError> {
-        Ok(self.verify_gated(|client, classify, fold_cover, _cs| client.pull_verified(classify, fold_cover))?)
+        Ok(self.verify_gated(|client, classify, fold_cover, _cs| {
+            client.pull_verified(classify, fold_cover)
+        })?)
     }
 
     /// Re-attempt every STALLED dot (a pinned blocker: `Unopenable`/`MergeFailed`/`Rejected`/`Vanished`)
@@ -1636,7 +1763,9 @@ impl<S: BlobStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if a local store read fails.
     pub fn retry_stalled(&mut self) -> Result<usize, CoreError> {
-        Ok(self.verify_gated(|client, classify, fold_cover, _cs| client.retry_stalled(classify, fold_cover))?)
+        Ok(self.verify_gated(|client, classify, fold_cover, _cs| {
+            client.retry_stalled(classify, fold_cover)
+        })?)
     }
 
     /// Run a verified-pull op (`pull_verified` / `bootstrap_verified`) behind the §B3 gate closures, shared by
@@ -1663,7 +1792,8 @@ impl<S: BlobStore> AppCore<S> {
         let rejected = Cell::new(0_usize);
         let out = {
             let mut classify = |env: &[u8], pt: &[u8], _r: &str, _c: u64| {
-                let (v, committer) = classify_entry(membership, &covered.borrow(), env, pt, &own_did);
+                let (v, committer) =
+                    classify_entry(membership, &covered.borrow(), env, pt, &own_did);
                 if v == Verdict::Reject {
                     rejected.set(rejected.get() + 1);
                 }
@@ -1685,7 +1815,12 @@ impl<S: BlobStore> AppCore<S> {
                 }
                 v
             };
-            run(&mut self.client, &mut classify, &mut fold_cover, &mut classify_snapshot)
+            run(
+                &mut self.client,
+                &mut classify,
+                &mut fold_cover,
+                &mut classify_snapshot,
+            )
         };
         self.covered = covered.into_inner();
         self.cover_envelopes = cover_envs.into_inner();
@@ -1781,7 +1916,8 @@ impl<S: BlobStore> AppCore<S> {
             self.fold()?
         };
         if compact_k > 0 {
-            self.client.maybe_compact(&EveryNUpdates(u64::from(compact_k)))?;
+            self.client
+                .maybe_compact(&EveryNUpdates(u64::from(compact_k)))?;
         }
         docsync::mirror(&self.store, &view, &self.doc)?;
         // The view now holds the union; whatever it has that the remote lacks must be pushed. `present` is the
@@ -1790,9 +1926,12 @@ impl<S: BlobStore> AppCore<S> {
         // diff splits by kind: an immutable `log/*` object is uploaded only when the remote lacks the key
         // outright (never re-uploaded just because we skipped fetching its bytes); a mutable `snapshot`/`heads`
         // pointer is always fetched, so a byte-compare against `had` correctly re-pushes a changed/absent one.
-        let had: std::collections::HashMap<&str, &[u8]> =
-            remote.iter().map(|(k, b)| (k.as_str(), b.as_slice())).collect();
-        let on_remote: std::collections::HashSet<&str> = present.iter().map(String::as_str).collect();
+        let had: std::collections::HashMap<&str, &[u8]> = remote
+            .iter()
+            .map(|(k, b)| (k.as_str(), b.as_slice()))
+            .collect();
+        let on_remote: std::collections::HashSet<&str> =
+            present.iter().map(String::as_str).collect();
         let mut uploads = Vec::new();
         for (key, _etag) in view.list(&format!("{}/", self.doc))? {
             let Some((bytes, _etag)) = view.get(&key)? else {
@@ -1845,10 +1984,18 @@ impl<S: BlobStore> AppCore<S> {
             .into_iter()
             .map(|(key, bytes)| {
                 let pointer = is_pointer_key(&key);
-                Upload { key, bytes, pointer }
+                Upload {
+                    key,
+                    bytes,
+                    pointer,
+                }
             })
             .collect();
-        Ok(SyncTick { uploads, folded, covered: self.subsumed_frontier() })
+        Ok(SyncTick {
+            uploads,
+            folded,
+            covered: self.subsumed_frontier(),
+        })
     }
 
     /// Data-integrity anomalies observed so far: entries whose header wouldn't decode, the fold's quarantined
@@ -1952,7 +2099,10 @@ impl<S: BlobStore> AppCore<S> {
     ///
     /// # Errors
     /// Returns [`CoreError`] if releasing a now-valid held entry fails to append to the local store or fold.
-    pub fn set_membership(&mut self, membership: Box<dyn MembershipResolver>) -> Result<usize, CoreError> {
+    pub fn set_membership(
+        &mut self,
+        membership: Box<dyn MembershipResolver>,
+    ) -> Result<usize, CoreError> {
         // NOTE (follow-up): a sticky-shared guard here — refuse a resolver that reports `!shared()` when the
         // current one reports `shared()`, so a worker bug feeding a stale pre-share keyring can't downgrade
         // mid-session to accept-all — is worth adding, but must be threaded as a separate `was_shared` flag
@@ -2006,7 +2156,9 @@ impl<S: BlobStore> AppCore<S> {
             let Some(header) = envelope.header.as_ref() else {
                 continue;
             };
-            if header.kind != Kind::Delta as i32 || membership.current_member(&header.author_member_id) {
+            if header.kind != Kind::Delta as i32
+                || membership.current_member(&header.author_member_id)
+            {
                 continue;
             }
             let Some(info) = membership.ever_member_info(&header.author_member_id) else {
@@ -2035,7 +2187,10 @@ impl<S: BlobStore> AppCore<S> {
                 continue;
             }
             // The writer/reader coupling as a live invariant: never push a candidate the reader would reject.
-            debug_assert!(accepts, "author_cover gates every push on verify_covered_entry (the reader's predicate)");
+            debug_assert!(
+                accepts,
+                "author_cover gates every push on verify_covered_entry (the reader's predicate)"
+            );
             // The reader resolves the author's key from its own membership, so the cover binds only (hash, id) —
             // there is no key field to forge.
             covered_entries.push(CoveredEntry {
@@ -2049,10 +2204,15 @@ impl<S: BlobStore> AppCore<S> {
         // Fold our OWN cover locally (the next sweep skips these hashes; the client advances our frontier past
         // the cover object, so `fold` never re-offers our own cover), then publish it as a Cover log object.
         for e in &covered_entries {
-            self.covered.insert(e.ciphertext_hash.clone(), e.author_member_id.clone());
+            self.covered
+                .insert(e.ciphertext_hash.clone(), e.author_member_id.clone());
         }
-        self.client
-            .push_cover(&CoverBody { entries: covered_entries }.encode_to_vec())?;
+        self.client.push_cover(
+            &CoverBody {
+                entries: covered_entries,
+            }
+            .encode_to_vec(),
+        )?;
         Ok(true)
     }
 

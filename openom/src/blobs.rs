@@ -25,10 +25,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::auth::Identity;
 use crate::authz::Access;
 use crate::meter::{MeterCtx, WriteAxis};
-use crate::api_error::ApiError;
 use crate::AppState;
 
 /// A `sub` key's segment/length bounds — defensive validation before it ever touches R2 or Neon,
@@ -64,12 +64,11 @@ fn internal(e: sqlx::Error) -> ApiError {
 /// before it's used to build an R2 key or a LIKE-prefix param.
 fn validate_sub(sub: &str) -> Result<(), ApiError> {
     if sub.is_empty() || sub.len() > MAX_SUB_LEN {
-        return Err(ApiError::BadRequest(
-            "blob key is empty or too long".into(),
-        ));
+        return Err(ApiError::BadRequest("blob key is empty or too long".into()));
     }
     let segs: Vec<&str> = sub.split('/').collect();
-    if segs.len() > MAX_SUB_SEGMENTS || segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
+    if segs.len() > MAX_SUB_SEGMENTS || segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..")
+    {
         return Err(ApiError::BadRequest(
             "blob key has an empty or traversal segment".into(),
         ));
@@ -110,10 +109,12 @@ fn is_if_absent(headers: &HeaderMap) -> bool {
 /// this store and a client reading `MemoryBlob`/`FsBlob` see the same etag convention.
 fn etag_of(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    Sha256::digest(bytes).iter().fold(String::new(), |mut out, b| {
-        let _ = write!(out, "{b:02x}");
-        out
-    })
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 fn etag_header(tag: &str) -> String {
@@ -172,8 +173,19 @@ pub async fn put_blob(
     }
 
     let owner = resolve_owner(&state, tree_id).await?; // 404 if the tree was never created (OPE-407)
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Commit).await?;
-    let cx = MeterCtx { account: owner, tree: tree_id, member: identity.member_id };
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Commit,
+    )
+    .await?;
+    let cx = MeterCtx {
+        account: owner,
+        tree: tree_id,
+        member: identity.member_id,
+    };
 
     // Three write kinds, each with its own precondition + GC invariant (OPE-409): an immutable `log/*` dot
     // (IfAbsent-forced + below-floor guard), the `snapshot` pointer (the covered-frontier ratchet, under the
@@ -260,7 +272,9 @@ async fn put_pointer_blob(
         let new_count = std::str::from_utf8(body)
             .ok()
             .and_then(|s| s.trim().parse::<i64>().ok())
-            .ok_or_else(|| ApiError::BadRequest("heads pointer must be an ASCII decimal count".into()))?;
+            .ok_or_else(|| {
+                ApiError::BadRequest("heads pointer must be an ASCII decimal count".into())
+            })?;
         sqlx::query("SELECT 1 FROM trees WHERE id = $1 FOR UPDATE")
             .bind(cx.tree)
             .fetch_optional(&mut *tx)
@@ -327,7 +341,9 @@ fn parse_log_key(sub: &str) -> Result<(String, i64), ApiError> {
         .parse::<i64>()
         .map_err(|_| ApiError::BadRequest("log counter is not an integer".into()))?;
     if counter < 0 {
-        return Err(ApiError::BadRequest("log counter must be non-negative".into()));
+        return Err(ApiError::BadRequest(
+            "log counter must be non-negative".into(),
+        ));
     }
     Ok((segs[1].to_string(), counter))
 }
@@ -416,14 +432,19 @@ fn parse_covered(headers: &HeaderMap) -> Result<BTreeMap<String, i64>, ApiError>
     let raw = headers
         .get(COVERED_HEADER)
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::BadRequest("a snapshot PUT requires the x-openom-covered header".into()))?;
+        .ok_or_else(|| {
+            ApiError::BadRequest("a snapshot PUT requires the x-openom-covered header".into())
+        })?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(raw.trim())
         .map_err(|_| ApiError::BadRequest("x-openom-covered is not valid base64".into()))?;
-    let map: BTreeMap<String, u64> = serde_json::from_slice(&bytes)
-        .map_err(|_| ApiError::BadRequest("x-openom-covered is not a valid {replica:counter} map".into()))?;
+    let map: BTreeMap<String, u64> = serde_json::from_slice(&bytes).map_err(|_| {
+        ApiError::BadRequest("x-openom-covered is not a valid {replica:counter} map".into())
+    })?;
     if map.len() > MAX_COVERED_REPLICAS
-        || map.keys().any(|r| r.is_empty() || r.len() > MAX_COVERED_REPLICA_LEN)
+        || map
+            .keys()
+            .any(|r| r.is_empty() || r.len() > MAX_COVERED_REPLICA_LEN)
     {
         return Err(ApiError::BadRequest(
             "x-openom-covered exceeds the size limit".into(),
@@ -446,7 +467,11 @@ async fn head_count(state: &AppState, tree_id: Uuid, replica: &str) -> Result<i6
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(val
-        .and_then(|b| std::str::from_utf8(&b).ok().and_then(|s| s.trim().parse::<i64>().ok()))
+        .and_then(|b| {
+            std::str::from_utf8(&b)
+                .ok()
+                .and_then(|s| s.trim().parse::<i64>().ok())
+        })
         .unwrap_or(0))
 }
 
@@ -594,30 +619,36 @@ pub async fn get_blob(
 
     let owner = resolve_owner(&state, tree_id).await?;
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
-    let cx = MeterCtx { account: owner, tree: tree_id, member: identity.member_id };
+    let cx = MeterCtx {
+        account: owner,
+        tree: tree_id,
+        member: identity.member_id,
+    };
 
     // Index-first: the index row arbitrates present / reaped / not-yet-written across the GC-managed log
     // keyspace (C2/M4). A present row (even one marked `pending_delete_at`) serves 200; only a REAPED row is
     // 410 — so the grace window stays a detection window, never a premature Gone.
-    let indexed: Option<i64> =
-        sqlx::query_scalar("SELECT size_bytes FROM tree_blob_index WHERE tree_id = $1 AND key = $2")
-            .bind(tree_id)
-            .bind(&sub)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(internal)?;
+    let indexed: Option<i64> = sqlx::query_scalar(
+        "SELECT size_bytes FROM tree_blob_index WHERE tree_id = $1 AND key = $2",
+    )
+    .bind(tree_id)
+    .bind(&sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal)?;
 
     if namespace_of(&sub) == "log" && indexed.is_none() {
         // No row: distinguish a GC-reaped dot (below the floor → 410 BOOTSTRAP) from a genuinely-not-yet
         // -written one (at/above the floor → 404 graceful-absence). The client never has to guess.
         let (replica, counter) = parse_log_key(&sub)?;
-        let floor: Option<i64> =
-            sqlx::query_scalar("SELECT floor FROM tree_gc_floor WHERE tree_id = $1 AND replica = $2")
-                .bind(tree_id)
-                .bind(&replica)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(internal)?;
+        let floor: Option<i64> = sqlx::query_scalar(
+            "SELECT floor FROM tree_gc_floor WHERE tree_id = $1 AND replica = $2",
+        )
+        .bind(tree_id)
+        .bind(&replica)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
         if floor.is_some_and(|f| counter < f) {
             return Err(ApiError::reaped(
                 "this log entry was reclaimed by GC — bootstrap from a snapshot",
@@ -697,7 +728,11 @@ pub async fn list_blobs(
     .await
     .map_err(internal)?;
 
-    let cx = MeterCtx { account: owner, tree: tree_id, member: identity.member_id };
+    let cx = MeterCtx {
+        account: owner,
+        tree: tree_id,
+        member: identity.member_id,
+    };
     let _ = state.meter.charge_read(&state.db, cx, None).await; // Class B (LIST) op (best-effort)
 
     let keys: Vec<ListedKey> = rows
@@ -749,7 +784,10 @@ pub async fn get_history(
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
 
     let since = q.since.unwrap_or(0);
-    let limit = q.limit.unwrap_or(HISTORY_DEFAULT_LIMIT).clamp(1, HISTORY_MAX_LIMIT);
+    let limit = q
+        .limit
+        .unwrap_or(HISTORY_DEFAULT_LIMIT)
+        .clamp(1, HISTORY_MAX_LIMIT);
 
     // Every retained `log/{replica}/{counter}` row in insertion order, paged by the stable `seq` cursor.
     // `created_at::text` avoids a chrono dependency; the numeric-counter filter guards `parse_log_key` below.
@@ -774,13 +812,28 @@ pub async fn get_history(
         .into_iter()
         .filter_map(|(member_id, key, size, created_at, seq)| {
             let (replica, counter) = parse_log_key(&key).ok()?;
-            Some(HistoryEntry { member_id, replica, counter, size, created_at, seq })
+            Some(HistoryEntry {
+                member_id,
+                replica,
+                counter,
+                size,
+                created_at,
+                seq,
+            })
         })
         .collect();
     let next_cursor = entries.last().map(|e| e.seq);
 
-    let cx = MeterCtx { account: owner, tree: tree_id, member: identity.member_id };
+    let cx = MeterCtx {
+        account: owner,
+        tree: tree_id,
+        member: identity.member_id,
+    };
     let _ = state.meter.charge_read(&state.db, cx, None).await; // Class B (LIST) op (best-effort)
 
-    Ok((StatusCode::OK, Json(json!({ "entries": entries, "next_cursor": next_cursor }))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "entries": entries, "next_cursor": next_cursor })),
+    )
+        .into_response())
 }

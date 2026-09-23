@@ -357,16 +357,32 @@ mod tests {
         let h = attributed();
         let hash = [0x44u8; 32];
         let base = author_signing_bytes(1, &h, &hash);
-        assert_ne!(author_signing_bytes(1, &h, &[0x55; 32]), base, "plaintext hash bound");
+        assert_ne!(
+            author_signing_bytes(1, &h, &[0x55; 32]),
+            base,
+            "plaintext hash bound"
+        );
         let mut a = h.clone();
         a.author_member_id = "member-2".into();
-        assert_ne!(author_signing_bytes(1, &a, &hash), base, "author_member_id bound");
+        assert_ne!(
+            author_signing_bytes(1, &a, &hash),
+            base,
+            "author_member_id bound"
+        );
         let mut r = h.clone();
         r.governing_ref = 4u32.to_be_bytes().to_vec();
-        assert_ne!(author_signing_bytes(1, &r, &hash), base, "governing_ref bound");
+        assert_ne!(
+            author_signing_bytes(1, &r, &hash),
+            base,
+            "governing_ref bound"
+        );
         let mut k = h.clone();
         k.kind = Kind::Proposal as i32;
-        assert_ne!(author_signing_bytes(1, &k, &hash), base, "kind bound (no re-seal a proposal as a delta)");
+        assert_ne!(
+            author_signing_bytes(1, &k, &hash),
+            base,
+            "kind bound (no re-seal a proposal as a delta)"
+        );
     }
 
     /// Domain-separated from every other signed/authenticated byte string, so a signature can't be
@@ -375,7 +391,12 @@ mod tests {
     fn author_signing_bytes_domain_disjoint() {
         let h = attributed();
         let asb = author_signing_bytes(1, &h, &[0x44; 32]);
-        assert_eq!(&asb[..4], &u32::try_from(b"openom:author:v1".len()).unwrap().to_be_bytes());
+        assert_eq!(
+            &asb[..4],
+            &u32::try_from(b"openom:author:v1".len())
+                .unwrap()
+                .to_be_bytes()
+        );
         assert_eq!(&asb[4..20], b"openom:author:v1");
         // header_aad starts with a bare version int (0,0,0,1), not a framed tag → disjoint at byte 0..4.
         assert_ne!(asb[..4], header_aad(1, &h)[..4]);
@@ -392,7 +413,10 @@ mod tests {
         expected.extend_from_slice(b"sub");
         expected.extend_from_slice(&member_id);
         expected.extend_from_slice(&timestamp.to_be_bytes());
-        assert_eq!(registration_signing_bytes("iss", "sub", member_id, timestamp), expected);
+        assert_eq!(
+            registration_signing_bytes("iss", "sub", member_id, timestamp),
+            expected
+        );
     }
 
     #[test]
@@ -402,8 +426,8 @@ mod tests {
             registration_signing_bytes("a", "bc", member_id, 7),
             registration_signing_bytes("ab", "c", member_id, 7),
         );
-        assert!(registration_signing_bytes("", "sub", member_id, 7)
-            .starts_with(b"openom:register:v1"));
+        assert!(
+            registration_signing_bytes("", "sub", member_id, 7).starts_with(b"openom:register:v1")
+        );
     }
-
 }

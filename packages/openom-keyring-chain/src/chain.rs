@@ -8,9 +8,7 @@
 //! accept/reject behavior is unchanged. The engine owns its signed bytes + a payload commitment; this
 //! binding owns the wire, the payload gates, and the governing-ref adapter.
 
-use keyeo_chain::{
-    Anchor, DocHash, Governance, GroupId, Error, Revision, Signer,
-};
+use keyeo_chain::{Anchor, DocHash, Error, Governance, GroupId, Revision, Signer};
 
 use crate::doc::{reset_rvk, to_pk32, KeyringDoc, KeyringRole, S_LAYOUT_AHEAD, S_WRAP_INCOMPLETE};
 use crate::keyring::{keyring_hash, VerifyingKey};
@@ -128,7 +126,10 @@ fn from_linear_anchor(out: LinAnchor) -> KeyringAnchor {
             .collect(),
         governance_kind: out.governance.kind,
         governance_threshold: out.governance.threshold,
-        recovery_verifying_key: out.recovery_authority.map(|k| k.to_vec()).unwrap_or_default(),
+        recovery_verifying_key: out
+            .recovery_authority
+            .map(|k| k.to_vec())
+            .unwrap_or_default(),
         // first_shared_revision is a chain-payload field, opaque to the generic linear anchor — the caller
         // sets it from the keyring it verified (0 here is a placeholder every producer overwrites).
         first_shared_revision: 0,
@@ -206,7 +207,10 @@ impl GoverningKeyring {
     ///
     /// # Errors
     /// Returns [`KeyringError`] if `candidate` is not a valid successor of `prior`.
-    pub fn from_transition(prior: &KeyringAnchor, candidate: Keyring) -> Result<Self, KeyringError> {
+    pub fn from_transition(
+        prior: &KeyringAnchor,
+        candidate: Keyring,
+    ) -> Result<Self, KeyringError> {
         verify_transition(prior, &candidate)?;
         Ok(Self { keyring: candidate })
     }
@@ -215,7 +219,10 @@ impl GoverningKeyring {
     ///
     /// # Errors
     /// Returns [`KeyringError`] if `genesis` is not a valid founder-signed genesis for `own_founder_key`.
-    pub fn from_genesis(genesis: Keyring, own_founder_key: &VerifyingKey) -> Result<Self, KeyringError> {
+    pub fn from_genesis(
+        genesis: Keyring,
+        own_founder_key: &VerifyingKey,
+    ) -> Result<Self, KeyringError> {
         bootstrap_from_genesis(&genesis, own_founder_key)?;
         Ok(Self { keyring: genesis })
     }
@@ -290,7 +297,9 @@ pub fn verify_transition(
     if candidate.first_shared_revision > candidate.revision {
         return Err(KeyringError::FirstSharedRegressed);
     }
-    if prior.first_shared_revision != 0 && candidate.first_shared_revision != prior.first_shared_revision {
+    if prior.first_shared_revision != 0
+        && candidate.first_shared_revision != prior.first_shared_revision
+    {
         return Err(KeyringError::FirstSharedRegressed);
     }
     let anchor = to_linear_anchor(prior);
@@ -325,8 +334,9 @@ pub fn bootstrap_from_genesis(
     genesis: &Keyring,
     own_founder_key: &VerifyingKey,
 ) -> Result<KeyringAnchor, KeyringError> {
-    let out = keyeo_chain::bootstrap_genesis(&KeyringDoc::new(genesis), &own_founder_key.to_bytes())
-        .map_err(map_linear_err)?;
+    let out =
+        keyeo_chain::bootstrap_genesis(&KeyringDoc::new(genesis), &own_founder_key.to_bytes())
+            .map_err(map_linear_err)?;
     let mut a = from_linear_anchor(out);
     a.first_shared_revision = genesis.first_shared_revision; // seed the monotonic marker (0 at a true genesis)
     Ok(a)
@@ -382,11 +392,11 @@ pub fn verify_reset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{keyring_hash, sign_keyring, SigningKey};
     use crate::wire::{Member, RecoveryKey};
     use crate::wire::{MEMBER_CO_OWNER, MEMBER_OWNER, WRAP_RRK_HPKE, WRAP_X25519_HPKE};
+    use crate::{keyring_hash, sign_keyring, SigningKey};
     use keyeo_crypto::{
-        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        codec, EncappedKey, Epoch as KeyeoEpoch, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
         X25519PublicKey,
     };
 
@@ -438,11 +448,21 @@ mod tests {
         let encapped = EncappedKey::from_bytes([0u8; 32]);
         let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
         let m = if method == RRK_HPKE {
-            WrapMethod::RrkHpke { encapped, recipient_key }
+            WrapMethod::RrkHpke {
+                encapped,
+                recipient_key,
+            }
         } else {
-            WrapMethod::MemberHpke { encapped, recipient_key }
+            WrapMethod::MemberHpke {
+                encapped,
+                recipient_key,
+            }
         };
-        KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
+        KeyeoWrap {
+            recipient: id.into(),
+            method: m,
+            ciphertext: WrappedDek::from_bytes([1u8; 48]),
+        }
     }
 
     /// A genesis keyring: founder "owner" + the given co-owner signers + the given plain members, with a
@@ -495,11 +515,17 @@ mod tests {
 
         // rev 3 CLEARING the marker (a compromised co-owner trying to un-share) → REJECTED.
         let rev3_clear = next(&rev2, |k| k.first_shared_revision = 0, &[&f]);
-        assert!(matches!(verify_transition(&anchor2, &rev3_clear), Err(KeyringError::FirstSharedRegressed)));
+        assert!(matches!(
+            verify_transition(&anchor2, &rev3_clear),
+            Err(KeyringError::FirstSharedRegressed)
+        ));
 
         // rev 3 CHANGING the marker to another value → REJECTED.
         let rev3_change = next(&rev2, |k| k.first_shared_revision = 3, &[&f]);
-        assert!(matches!(verify_transition(&anchor2, &rev3_change), Err(KeyringError::FirstSharedRegressed)));
+        assert!(matches!(
+            verify_transition(&anchor2, &rev3_change),
+            Err(KeyringError::FirstSharedRegressed)
+        ));
 
         // A marker naming a revision that doesn't exist yet (> candidate.revision) → REJECTED even from a 0 prior.
         let bad_range = next(&g, |k| k.first_shared_revision = 5, &[&f]); // rev 2, marker 5 > 2
@@ -573,7 +599,10 @@ mod tests {
         };
 
         let ok = verify_transition(&anchor, &rotate(true)).unwrap();
-        assert_eq!(ok.recovery_verifying_key, rvk2_pub, "an old-RVK-signed rotation is accepted");
+        assert_eq!(
+            ok.recovery_verifying_key, rvk2_pub,
+            "an old-RVK-signed rotation is accepted"
+        );
         assert!(verify_transition(&anchor, &rotate(false)).is_err());
     }
 
@@ -617,9 +646,19 @@ mod tests {
         let ring = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
         let anchor0 = KeyringAnchor::from_keyring(&ring);
 
-        let ruled = next(&ring, |key| { key.governance_kind = 2; key.governance_threshold = 2; }, &[&founder]);
+        let ruled = next(
+            &ring,
+            |key| {
+                key.governance_kind = 2;
+                key.governance_threshold = 2;
+            },
+            &[&founder],
+        );
         let anchor = verify_transition(&anchor0, &ruled).expect("founder may set the rule");
-        assert_eq!((anchor.governance_kind, anchor.governance_threshold), (2, 2));
+        assert_eq!(
+            (anchor.governance_kind, anchor.governance_threshold),
+            (2, 2)
+        );
 
         assert!(verify_transition(&anchor, &next(&ruled, add_coowner(&d), &[&a, &b])).is_ok());
         assert!(verify_transition(&anchor, &next(&ruled, add_coowner(&d), &[&founder])).is_ok());
@@ -633,27 +672,50 @@ mod tests {
     fn governance_change_is_anti_downgrade() {
         let (founder, a, b, c) = (key(), key(), key(), key());
         let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
-        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let ruled = next(
+            &g,
+            |k| {
+                k.governance_kind = 2;
+                k.governance_threshold = 2;
+            },
+            &[&founder],
+        );
         let anchor = verify_transition(&KeyringAnchor::from_keyring(&g), &ruled).unwrap();
 
         assert!(matches!(
             verify_transition(&anchor, &next(&ruled, |k| k.governance_kind = 0, &[&a])),
             Err(KeyringError::UnendorsedSetChange)
         ));
-        assert!(verify_transition(&anchor, &next(&ruled, |k| k.governance_kind = 0, &[&a, &b])).is_ok());
+        assert!(
+            verify_transition(&anchor, &next(&ruled, |k| k.governance_kind = 0, &[&a, &b])).is_ok()
+        );
     }
 
     #[test]
     fn governance_lockout_is_refused() {
         let (founder, a, b, c) = (key(), key(), key(), key());
         let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
-        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let ruled = next(
+            &g,
+            |k| {
+                k.governance_kind = 2;
+                k.governance_threshold = 2;
+            },
+            &[&founder],
+        );
         let anchor = verify_transition(&KeyringAnchor::from_keyring(&g), &ruled).unwrap();
 
         assert!(matches!(
             verify_transition(
                 &anchor,
-                &next(&ruled, |k| { k.governance_kind = 3; k.governance_threshold = 5; }, &[&a, &b]),
+                &next(
+                    &ruled,
+                    |k| {
+                        k.governance_kind = 3;
+                        k.governance_threshold = 5;
+                    },
+                    &[&a, &b]
+                ),
             ),
             Err(KeyringError::UnendorsedSetChange)
         ));
@@ -662,13 +724,20 @@ mod tests {
     #[test]
     fn draft_exchange_collects_signatures_then_promotes() {
         use crate::blob_sync::{KeyringChainBlobSync, Promotion};
-        use store_blob::MemoryBlob;
         use prost::Message;
         use std::sync::Arc;
+        use store_blob::MemoryBlob;
 
         let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
         let ring = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
-        let ruled = next(&ring, |key| { key.governance_kind = 2; key.governance_threshold = 2; }, &[&founder]);
+        let ruled = next(
+            &ring,
+            |key| {
+                key.governance_kind = 2;
+                key.governance_threshold = 2;
+            },
+            &[&founder],
+        );
 
         let store = Arc::new(MemoryBlob::new());
         let mut owner = KeyringChainBlobSync::new(store.clone());
@@ -682,7 +751,9 @@ mod tests {
         promoter.bootstrap().unwrap();
         assert_eq!(promoter.promote("p1").unwrap(), Promotion::NotReady);
 
-        owner.countersign("p1", &candidate.encode_to_vec(), &b).unwrap();
+        owner
+            .countersign("p1", &candidate.encode_to_vec(), &b)
+            .unwrap();
         assert_eq!(promoter.promote("p1").unwrap(), Promotion::Promoted);
         assert_eq!(promoter.revision(), Some(candidate.revision));
         assert!(promoter.get_draft("p1").unwrap().is_none());
@@ -691,13 +762,20 @@ mod tests {
     #[test]
     fn countersign_refuses_a_draft_swapped_since_review() {
         use crate::blob_sync::{KeyringChainBlobSync, SyncError};
-        use store_blob::MemoryBlob;
         use prost::Message;
         use std::sync::Arc;
+        use store_blob::MemoryBlob;
 
         let (founder, a, b, d) = (key(), key(), key(), key());
         let g = genesis(&founder, &[(&a, "a"), (&b, "b")], &[]);
-        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let ruled = next(
+            &g,
+            |k| {
+                k.governance_kind = 2;
+                k.governance_threshold = 2;
+            },
+            &[&founder],
+        );
 
         let store = Arc::new(MemoryBlob::new());
         let mut owner = KeyringChainBlobSync::new(store.clone());
@@ -707,7 +785,13 @@ mod tests {
         let in_store = next(&ruled, add_coowner(&d), &[&a]);
         owner.propose("p1", &in_store.encode_to_vec()).unwrap();
 
-        let reviewed = next(&ruled, |k| { k.governance_threshold = 1; }, &[&a]);
+        let reviewed = next(
+            &ruled,
+            |k| {
+                k.governance_threshold = 1;
+            },
+            &[&a],
+        );
         assert!(matches!(
             owner.countersign("p1", &reviewed.encode_to_vec(), &b),
             Err(SyncError::DraftContentChanged)
@@ -720,13 +804,20 @@ mod tests {
     #[test]
     fn a_stale_draft_is_detected_not_corrupting() {
         use crate::blob_sync::{KeyringChainBlobSync, Promotion};
-        use store_blob::MemoryBlob;
         use prost::Message;
         use std::sync::Arc;
+        use store_blob::MemoryBlob;
 
         let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
         let ring = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
-        let ruled = next(&ring, |key| { key.governance_kind = 2; key.governance_threshold = 2; }, &[&founder]);
+        let ruled = next(
+            &ring,
+            |key| {
+                key.governance_kind = 2;
+                key.governance_threshold = 2;
+            },
+            &[&founder],
+        );
         let store = Arc::new(MemoryBlob::new());
         let mut owner = KeyringChainBlobSync::new(store.clone());
         owner.publish(&ring.encode_to_vec()).unwrap();
@@ -756,7 +847,11 @@ mod tests {
     }
 
     /// A well-formed successor: revision+1, chained hash, `mutate` applied, then signed by each key.
-    fn next(prior: &Keyring, mutate: impl FnOnce(&mut Keyring), sign_with: &[&SigningKey]) -> Keyring {
+    fn next(
+        prior: &Keyring,
+        mutate: impl FnOnce(&mut Keyring),
+        sign_with: &[&SigningKey],
+    ) -> Keyring {
         let mut k = prior.clone();
         k.revision = prior.revision + 1;
         k.prev_keyring_hash = keyring_hash(prior).to_vec();
@@ -789,7 +884,10 @@ mod tests {
             },
             &[&f],
         );
-        assert!(matches!(verify_transition(&a, &bad), Err(KeyringError::BadStructure(_))));
+        assert!(matches!(
+            verify_transition(&a, &bad),
+            Err(KeyringError::BadStructure(_))
+        ));
     }
 
     #[test]
@@ -803,19 +901,29 @@ mod tests {
         let bad = next(
             &g,
             |k| {
-                let carol = k.members.iter_mut().find(|m| m.member_id == "carol").unwrap();
+                let carol = k
+                    .members
+                    .iter_mut()
+                    .find(|m| m.member_id == "carol")
+                    .unwrap();
                 carol.author_public_key = bad_pt.to_vec();
             },
             &[&f],
         );
-        assert!(matches!(verify_transition(&a, &bad), Err(KeyringError::BadStructure(_))));
+        assert!(matches!(
+            verify_transition(&a, &bad),
+            Err(KeyringError::BadStructure(_))
+        ));
     }
 
     #[test]
     fn an_out_of_range_epoch_ordinal_is_rejected() {
         let f = key();
         let g = genesis(&f, &[], &[]);
-        assert!(verify_reset(None, &g).is_ok(), "honest genesis (epoch 0, len 1) is in range");
+        assert!(
+            verify_reset(None, &g).is_ok(),
+            "honest genesis (epoch 0, len 1) is in range"
+        );
         let a = anchor(&g);
         let grind = |ordinal: u64| {
             next(
@@ -828,10 +936,16 @@ mod tests {
                 &[&f],
             )
         };
-        assert!(matches!(verify_transition(&a, &grind(u64::MAX)), Err(KeyringError::BadStructure(_))));
+        assert!(matches!(
+            verify_transition(&a, &grind(u64::MAX)),
+            Err(KeyringError::BadStructure(_))
+        ));
         // 2^32 is the wasm32 tripwire: the bound compares in u64, so it is rejected on every target. An
         // `as usize` cast would truncate this to 0 on wasm32 and wrongly accept it.
-        assert!(matches!(verify_transition(&a, &grind(1u64 << 32)), Err(KeyringError::BadStructure(_))));
+        assert!(matches!(
+            verify_transition(&a, &grind(1u64 << 32)),
+            Err(KeyringError::BadStructure(_))
+        ));
     }
 
     #[test]
@@ -856,7 +970,10 @@ mod tests {
         g.revision = 2;
         g.signatures.clear();
         sign_keyring(&mut g, &f);
-        assert_eq!(bootstrap_from_genesis(&g, &f.verifying_key()), Err(KeyringError::BadBootstrap));
+        assert_eq!(
+            bootstrap_from_genesis(&g, &f.verifying_key()),
+            Err(KeyringError::BadBootstrap)
+        );
     }
 
     #[test]
@@ -866,7 +983,10 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
         let ahead = next(&g, |k| k.layout_version = KEYRING_LAYOUT_VERSION + 1, &[&f]);
-        assert_eq!(verify_transition(&a, &ahead), Err(KeyringError::LayoutAhead));
+        assert_eq!(
+            verify_transition(&a, &ahead),
+            Err(KeyringError::LayoutAhead)
+        );
 
         let mut reset = genesis(&f, &[], &[]);
         reset.layout_version = KEYRING_LAYOUT_VERSION + 1;
@@ -884,13 +1004,20 @@ mod tests {
             &g,
             |k| {
                 let mut eps = epochs_of(k);
-                let w = eps[0].wraps.iter_mut().find(|w| w.recipient == "bob").unwrap();
+                let w = eps[0]
+                    .wraps
+                    .iter_mut()
+                    .find(|w| w.recipient == "bob")
+                    .unwrap();
                 w.recipient = "carol".into();
                 set_epochs(k, &eps);
             },
             &[&f],
         );
-        assert_eq!(verify_transition(&a, &bad), Err(KeyringError::WrapIncomplete));
+        assert_eq!(
+            verify_transition(&a, &bad),
+            Err(KeyringError::WrapIncomplete)
+        );
     }
 
     #[test]
@@ -902,7 +1029,10 @@ mod tests {
         while k.members.len() <= MAX_MEMBERS {
             k.members.push(d.clone());
         }
-        assert_eq!(verify_reset(None, &k), Err(KeyringError::BadStructure("list too large")));
+        assert_eq!(
+            verify_reset(None, &k),
+            Err(KeyringError::BadStructure("list too large"))
+        );
     }
 
     #[test]
@@ -916,7 +1046,10 @@ mod tests {
             eps.push(e.clone());
         }
         set_epochs(&mut k, &eps);
-        assert_eq!(verify_reset(None, &k), Err(KeyringError::BadStructure("list too large")));
+        assert_eq!(
+            verify_reset(None, &k),
+            Err(KeyringError::BadStructure("list too large"))
+        );
     }
 
     #[test]
@@ -925,12 +1058,29 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
 
-        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&f]);
+        let ok = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                push_wrap(k, wrap("bob", HPKE));
+            },
+            &[&f],
+        );
         assert_eq!(verify_transition(&a, &ok).unwrap().revision, 2);
 
         let stranger = key();
-        let bad = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&stranger]);
-        assert_eq!(verify_transition(&a, &bad), Err(KeyringError::UnendorsedOrdinaryChange));
+        let bad = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                push_wrap(k, wrap("bob", HPKE));
+            },
+            &[&stranger],
+        );
+        assert_eq!(
+            verify_transition(&a, &bad),
+            Err(KeyringError::UnendorsedOrdinaryChange)
+        );
     }
 
     #[test]
@@ -939,7 +1089,14 @@ mod tests {
         let c = key();
         let g = genesis(&f, &[(&c, "carol")], &[]);
         let a = anchor(&g);
-        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&c]);
+        let ok = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                push_wrap(k, wrap("bob", HPKE));
+            },
+            &[&c],
+        );
         verify_transition(&a, &ok).unwrap();
     }
 
@@ -954,7 +1111,10 @@ mod tests {
         skip.prev_keyring_hash = keyring_hash(&g).to_vec();
         skip.signatures.clear();
         sign_keyring(&mut skip, &f);
-        assert_eq!(verify_transition(&a, &skip), Err(KeyringError::NonSequential));
+        assert_eq!(
+            verify_transition(&a, &skip),
+            Err(KeyringError::NonSequential)
+        );
 
         let fork = next(&g, |k| k.prev_keyring_hash = vec![9; 32], &[&f]);
         assert_eq!(verify_transition(&a, &fork), Err(KeyringError::Fork));
@@ -971,11 +1131,34 @@ mod tests {
         sign_keyring(&mut g, &f);
         let a = anchor(&g);
 
-        let promote = next(&g, |k| k.members.iter_mut().find(|m| m.member_id == "carol").unwrap().role = CO_OWNER_MEMBER, &[&f]);
+        let promote = next(
+            &g,
+            |k| {
+                k.members
+                    .iter_mut()
+                    .find(|m| m.member_id == "carol")
+                    .unwrap()
+                    .role = CO_OWNER_MEMBER
+            },
+            &[&f],
+        );
         verify_transition(&a, &promote).unwrap();
 
-        let mutiny = next(&g, |k| k.members.iter_mut().find(|m| m.member_id == "carol").unwrap().role = CO_OWNER_MEMBER, &[&carol]);
-        assert_eq!(verify_transition(&a, &mutiny), Err(KeyringError::UnendorsedSetChange));
+        let mutiny = next(
+            &g,
+            |k| {
+                k.members
+                    .iter_mut()
+                    .find(|m| m.member_id == "carol")
+                    .unwrap()
+                    .role = CO_OWNER_MEMBER
+            },
+            &[&carol],
+        );
+        assert_eq!(
+            verify_transition(&a, &mutiny),
+            Err(KeyringError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -987,12 +1170,16 @@ mod tests {
         let attack = next(
             &g,
             |k| {
-                k.members.push(keyed_member(&rogue, "rogue", CO_OWNER_MEMBER));
+                k.members
+                    .push(keyed_member(&rogue, "rogue", CO_OWNER_MEMBER));
                 push_wrap(k, wrap("rogue", HPKE));
             },
             &[&rogue],
         );
-        assert_eq!(verify_transition(&a, &attack), Err(KeyringError::UnendorsedSetChange));
+        assert_eq!(
+            verify_transition(&a, &attack),
+            Err(KeyringError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -1006,11 +1193,34 @@ mod tests {
         sign_keyring(&mut g, &f);
         let a = anchor(&g);
 
-        let ordinary = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&carol]);
-        assert_eq!(verify_transition(&a, &ordinary), Err(KeyringError::UnendorsedOrdinaryChange));
+        let ordinary = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                push_wrap(k, wrap("bob", HPKE));
+            },
+            &[&carol],
+        );
+        assert_eq!(
+            verify_transition(&a, &ordinary),
+            Err(KeyringError::UnendorsedOrdinaryChange)
+        );
 
-        let promote_self = next(&g, |k| k.members.iter_mut().find(|m| m.member_id == "carol").unwrap().role = CO_OWNER_MEMBER, &[&carol]);
-        assert_eq!(verify_transition(&a, &promote_self), Err(KeyringError::UnendorsedSetChange));
+        let promote_self = next(
+            &g,
+            |k| {
+                k.members
+                    .iter_mut()
+                    .find(|m| m.member_id == "carol")
+                    .unwrap()
+                    .role = CO_OWNER_MEMBER
+            },
+            &[&carol],
+        );
+        assert_eq!(
+            verify_transition(&a, &promote_self),
+            Err(KeyringError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -1020,7 +1230,14 @@ mod tests {
         let g = genesis(&f, &[(&bob, "bob")], &[]);
         assert!(verify_reset(None, &g).is_ok());
         let a = anchor(&g);
-        let ok = next(&g, |k| { k.members.push(dummy_member("carol")); push_wrap(k, wrap("carol", HPKE)); }, &[&bob]);
+        let ok = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("carol"));
+                push_wrap(k, wrap("carol", HPKE));
+            },
+            &[&bob],
+        );
         assert_eq!(verify_transition(&a, &ok).unwrap().revision, 2);
     }
 
@@ -1032,7 +1249,17 @@ mod tests {
         let g = genesis(&f, &[(&carol, "carol"), (&dave, "dave")], &[]);
         let a = anchor(&g);
 
-        let ok = next(&g, |k| k.members.iter_mut().find(|m| m.member_id == "carol").unwrap().role = EDITOR, &[&carol]);
+        let ok = next(
+            &g,
+            |k| {
+                k.members
+                    .iter_mut()
+                    .find(|m| m.member_id == "carol")
+                    .unwrap()
+                    .role = EDITOR
+            },
+            &[&carol],
+        );
         verify_transition(&a, &ok).unwrap();
 
         let bundled = next(
@@ -1046,7 +1273,10 @@ mod tests {
             },
             &[&carol],
         );
-        assert_eq!(verify_transition(&a, &bundled), Err(KeyringError::UnendorsedSetChange));
+        assert_eq!(
+            verify_transition(&a, &bundled),
+            Err(KeyringError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -1075,11 +1305,24 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
         let no_wrap = next(&g, |k| k.members.push(dummy_member("bob")), &[&f]);
-        assert_eq!(verify_transition(&a, &no_wrap), Err(KeyringError::WrapIncomplete));
+        assert_eq!(
+            verify_transition(&a, &no_wrap),
+            Err(KeyringError::WrapIncomplete)
+        );
 
         let carol = key();
-        let two = next(&g, |k| { k.members.push(keyed_member(&carol, "carol", OWNER_MEMBER)); push_wrap(k, wrap("carol", HPKE)); }, &[&f]);
-        assert!(matches!(verify_transition(&a, &two), Err(KeyringError::BadStructure(_))));
+        let two = next(
+            &g,
+            |k| {
+                k.members.push(keyed_member(&carol, "carol", OWNER_MEMBER));
+                push_wrap(k, wrap("carol", HPKE));
+            },
+            &[&f],
+        );
+        assert!(matches!(
+            verify_transition(&a, &two),
+            Err(KeyringError::BadStructure(_))
+        ));
     }
 
     #[test]
@@ -1096,12 +1339,18 @@ mod tests {
         reset.signatures.clear();
         sign_keyring(&mut reset, &f2);
         assert_eq!(verify_reset(None, &reset).unwrap().revision, 5);
-        assert_eq!(verify_transition(&anchor(&g), &reset).unwrap_err(), KeyringError::NonSequential);
+        assert_eq!(
+            verify_transition(&anchor(&g), &reset).unwrap_err(),
+            KeyringError::NonSequential
+        );
 
         let mut unsigned = g.clone();
         unsigned.signatures.clear();
         sign_keyring(&mut unsigned, &key());
-        assert_eq!(verify_reset(None, &unsigned), Err(KeyringError::BadBootstrap));
+        assert_eq!(
+            verify_reset(None, &unsigned),
+            Err(KeyringError::BadBootstrap)
+        );
     }
 
     // --- Differential oracle ---------------------------------------------------------------
@@ -1171,10 +1420,18 @@ mod tests {
                 push_wrap(k, wrap("new", HPKE));
             }
             Mutation::Promote => {
-                k.members.iter_mut().find(|m| m.member_id == "pend").unwrap().role = CO_OWNER_MEMBER;
+                k.members
+                    .iter_mut()
+                    .find(|m| m.member_id == "pend")
+                    .unwrap()
+                    .role = CO_OWNER_MEMBER;
             }
             Mutation::RemoveCoOwner => {
-                k.members.iter_mut().find(|m| m.member_id == "co0").unwrap().role = EDITOR;
+                k.members
+                    .iter_mut()
+                    .find(|m| m.member_id == "co0")
+                    .unwrap()
+                    .role = EDITOR;
             }
             Mutation::RotateFounder => {
                 let np = pubv(&new_founder_k());
@@ -1185,10 +1442,18 @@ mod tests {
                 }
             }
         };
-        let roster: [SigningKey; 6] =
-            [founder_k(), co_k(0), co_k(1), co_k(2), pend_k(), stranger_k()];
-        let signers: Vec<&SigningKey> =
-            (0..6).filter(|i| sign_mask & (1 << i) != 0).map(|i| &roster[i]).collect();
+        let roster: [SigningKey; 6] = [
+            founder_k(),
+            co_k(0),
+            co_k(1),
+            co_k(2),
+            pend_k(),
+            stranger_k(),
+        ];
+        let signers: Vec<&SigningKey> = (0..6)
+            .filter(|i| sign_mask & (1 << i) != 0)
+            .map(|i| &roster[i])
+            .collect();
         next(prior, mutate, &signers)
     }
 
@@ -1248,9 +1513,26 @@ mod tests {
             Err(KeyringError::BadBootstrap)
         ));
 
-        let c1 = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&f]);
-        let c2 = next(&c1, |k| { k.members.push(dummy_member("eve")); push_wrap(k, wrap("eve", HPKE)); }, &[&f]);
-        assert_eq!(verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision, 3);
+        let c1 = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                push_wrap(k, wrap("bob", HPKE));
+            },
+            &[&f],
+        );
+        let c2 = next(
+            &c1,
+            |k| {
+                k.members.push(dummy_member("eve"));
+                push_wrap(k, wrap("eve", HPKE));
+            },
+            &[&f],
+        );
+        assert_eq!(
+            verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision,
+            3
+        );
         assert_eq!(verify_walk(&a, &[c2]), Err(KeyringError::NonSequential));
     }
 
@@ -1270,7 +1552,12 @@ mod tests {
             push_wrap(k, wrap("bob", HPKE));
         };
         let ok = next(&g, add_bob, &[&f]);
-        assert_eq!(GoverningKeyring::from_transition(&a, ok).unwrap().revision(), 2);
+        assert_eq!(
+            GoverningKeyring::from_transition(&a, ok)
+                .unwrap()
+                .revision(),
+            2
+        );
         let bad = next(&g, add_bob, &[&key()]);
         assert_eq!(
             GoverningKeyring::from_transition(&a, bad).unwrap_err(),
@@ -1281,7 +1568,11 @@ mod tests {
     #[test]
     fn governing_ref_encodes_a_revision_and_round_trips() {
         for n in [0u32, 1, 255, 256, 65_536, u32::MAX] {
-            assert_eq!(decode_governing_ref(&encode_governing_ref(n)), Some(n), "round-trip {n}");
+            assert_eq!(
+                decode_governing_ref(&encode_governing_ref(n)),
+                Some(n),
+                "round-trip {n}"
+            );
         }
         // A ref that isn't exactly 4 bytes is foreign / malformed and does not resolve.
         assert_eq!(decode_governing_ref(&[1, 2, 3]), None);
@@ -1291,7 +1582,10 @@ mod tests {
         let f = key();
         let gk = GoverningKeyring::from_genesis(genesis(&f, &[], &[]), &f.verifying_key()).unwrap();
         assert_eq!(gk.governing_ref(), encode_governing_ref(gk.revision()));
-        assert_eq!(decode_governing_ref(&gk.governing_ref()), Some(gk.revision()));
+        assert_eq!(
+            decode_governing_ref(&gk.governing_ref()),
+            Some(gk.revision())
+        );
     }
 
     #[test]

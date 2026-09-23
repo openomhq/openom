@@ -239,7 +239,10 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
     /// `ReFound`. openom sets this on the engine's construction base (the out-of-band-seeded genesis) so
     /// the RVK is trusted from first sight, exactly as the genesis membership is.
     #[must_use]
-    pub fn with_reset_authority(mut self, reset_authority: Option<<S as SignatureScheme>::PublicKey>) -> Self {
+    pub fn with_reset_authority(
+        mut self,
+        reset_authority: Option<<S as SignatureScheme>::PublicKey>,
+    ) -> Self {
         self.reset_authority = reset_authority;
         self
     }
@@ -362,8 +365,12 @@ pub enum ApplyOutcome<Id: MemberId, OId: OpId> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error<Id: Debug + Clone> {
     BadSignature,
-    UnknownAuthor { author: Id },
-    Unauthorized { author: Id },
+    UnknownAuthor {
+        author: Id,
+    },
+    Unauthorized {
+        author: Id,
+    },
     InvalidAction(String),
     MissingParents(Vec<Id>),
     DagCycle,

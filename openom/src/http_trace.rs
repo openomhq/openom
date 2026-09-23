@@ -66,7 +66,10 @@ pub(crate) fn make_span(req: &Request) -> Span {
     // Matched route only (`/v1/trees/{id}`) — never the concrete/probed path, which is unbounded
     // cardinality and can carry scanner junk / PII-ish payloads (SERVER-DATA-FORMAT §7). Unmatched
     // (404/fallback) requests collapse to one constant name.
-    let matched = req.extensions().get::<MatchedPath>().map(MatchedPath::as_str);
+    let matched = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
     let route = matched.unwrap_or_default();
     let otel_name = match matched {
         Some(r) => format!("{method} {r}"),

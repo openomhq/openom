@@ -20,18 +20,18 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
+use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipView, VerifyError};
 use openom_keyring_chain::decode_governing_ref;
 use openom_keyring_chain::verifier::ChainVerifier;
-use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipView, VerifyError};
 use openom_protocol::v1::KeyringUpdate;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::auth::Identity;
 use crate::authz::Access;
-use crate::api_error::ApiError;
 use crate::AppState;
 
 /// Keyrings are small (a handful of members/epochs). A hard ceiling stops a hostile client forcing
@@ -169,7 +169,9 @@ fn parse_update(
     body: &Bytes,
 ) -> Result<(KeyringUpdate, Box<dyn KeyringVerifier + Send + Sync>), ApiError> {
     if body.len() > MAX_KEYRING_BYTES {
-        return Err(ApiError::BadRequest("keyring exceeds the size limit".into()));
+        return Err(ApiError::BadRequest(
+            "keyring exceeds the size limit".into(),
+        ));
     }
     let update = KeyringUpdate::decode(body.as_ref())
         .map_err(|_| ApiError::BadRequest("not a valid keyring update".into()))?;
@@ -194,13 +196,14 @@ async fn load_prior_state(
     if head_rev == 0 {
         return Ok(None);
     }
-    let payload =
-        sqlx::query_scalar("SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2")
-            .bind(tree_id)
-            .bind(head_rev)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(internal)?;
+    let payload = sqlx::query_scalar(
+        "SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2",
+    )
+    .bind(tree_id)
+    .bind(head_rev)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?;
     Ok(Some(payload))
 }
 

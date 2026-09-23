@@ -92,7 +92,14 @@ impl CanonicalBytes for MemberStateDto {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new member field is a compile error until it is in the signed
         // bytes. All fields are length-bounded scalars/keys, so this is a plain, deterministic encoding.
-        let Self { id, role, member_counter, access_counter, author_public_key, hpke_public_key } = self;
+        let Self {
+            id,
+            role,
+            member_counter,
+            access_counter,
+            author_public_key,
+            hpke_public_key,
+        } = self;
         let idb = id.as_bytes();
         out.extend_from_slice(&(idb.len() as u64).to_le_bytes());
         out.extend_from_slice(idb);
@@ -181,7 +188,16 @@ impl CanonicalBytes for Checkpoint {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new checkpoint field is a compile error until it is encoded here,
         // so nothing trust-relevant can slip out of the signed bytes.
-        let Self { frontier_depths, state, prev_snapshot, has_been_shared, reset_authority, sealing, minting_ops_baseline, author } = self;
+        let Self {
+            frontier_depths,
+            state,
+            prev_snapshot,
+            has_been_shared,
+            reset_authority,
+            sealing,
+            minting_ops_baseline,
+            author,
+        } = self;
         out.extend_from_slice(b"openom:checkpoint:v1");
         // frontier_depths — sorted, length-prefixed. The (op-id) keys ARE the dominating cut; the paired depths
         // seed the strong-remove tiebreak across the prune.
@@ -207,7 +223,12 @@ impl CanonicalBytes for Checkpoint {
         // op_id ‖ origin-tag ‖ length-prefixed opaque bytes ‖ length-prefixed author.
         out.extend_from_slice(&(sealing.len() as u64).to_le_bytes());
         for e in sealing {
-            let SealingEntry { op_id, origin, author, bytes } = e;
+            let SealingEntry {
+                op_id,
+                origin,
+                author,
+                bytes,
+            } = e;
             out.extend_from_slice(op_id);
             out.push(match origin {
                 SealingOrigin::Genesis => 0,
@@ -269,7 +290,8 @@ mod tests {
     #[test]
     fn group_state_view_round_trips_members_losslessly() {
         let gid = GroupId::new(b"tree".to_vec());
-        let mut state = KeyringState::create(gid.clone(), &[]).with_reset_authority(Some([9u8; 32]));
+        let mut state =
+            KeyringState::create(gid.clone(), &[]).with_reset_authority(Some([9u8; 32]));
         // Two members with DISTINCT, non-zero counters — exactly the fields a `MemberInit` re-genesis would
         // lose. bob's ODD member_counter models a removed-but-present member. OPE-543: `into_state` enforces
         // the self-cert admission gate, so each member's id MUST bind its carried author key.
@@ -279,18 +301,39 @@ mod tests {
         let bob = openom_keyring_api::derive_member_id(&bob_key);
         state.members.insert(
             alice.clone(),
-            MemberState { role: KeyringRole(3), member_counter: 4, access_counter: 2, author_public_key: alice_key, hpke_public_key: [2u8; 32] },
+            MemberState {
+                role: KeyringRole(3),
+                member_counter: 4,
+                access_counter: 2,
+                author_public_key: alice_key,
+                hpke_public_key: [2u8; 32],
+            },
         );
         state.members.insert(
             bob.clone(),
-            MemberState { role: KeyringRole(1), member_counter: 1, access_counter: 0, author_public_key: bob_key, hpke_public_key: [4u8; 32] },
+            MemberState {
+                role: KeyringRole(1),
+                member_counter: 1,
+                access_counter: 0,
+                author_public_key: bob_key,
+                hpke_public_key: [4u8; 32],
+            },
         );
 
         let view = GroupStateView::of(&state);
-        let rebuilt = view.clone().into_state(gid.clone(), Some([9u8; 32])).expect("self-certifying members");
+        let rebuilt = view
+            .clone()
+            .into_state(gid.clone(), Some([9u8; 32]))
+            .expect("self-certifying members");
 
-        assert_eq!(rebuilt.members, state.members, "members (roles + keys + both counters) round-trip losslessly");
-        assert_eq!(rebuilt.reset_authority, state.reset_authority, "reset_authority is restored");
+        assert_eq!(
+            rebuilt.members, state.members,
+            "members (roles + keys + both counters) round-trip losslessly"
+        );
+        assert_eq!(
+            rebuilt.reset_authority, state.reset_authority,
+            "reset_authority is restored"
+        );
         assert_eq!(rebuilt.group_id, state.group_id, "group_id is restored");
 
         // The view rides the wire inside the checkpoint, so it must serialize deterministically.
@@ -300,11 +343,17 @@ mod tests {
     }
 
     fn sample_state() -> KeyringState {
-        let mut state =
-            KeyringState::create(GroupId::new(b"tree".to_vec()), &[]).with_reset_authority(Some([9u8; 32]));
+        let mut state = KeyringState::create(GroupId::new(b"tree".to_vec()), &[])
+            .with_reset_authority(Some([9u8; 32]));
         state.members.insert(
             "owner".into(),
-            MemberState { role: KeyringRole(3), member_counter: 0, access_counter: 0, author_public_key: [1u8; 32], hpke_public_key: [2u8; 32] },
+            MemberState {
+                role: KeyringRole(3),
+                member_counter: 0,
+                access_counter: 0,
+                author_public_key: [1u8; 32],
+                hpke_public_key: [2u8; 32],
+            },
         );
         state
     }
@@ -316,7 +365,12 @@ mod tests {
             prev_snapshot: Some([9u8; 32]),
             has_been_shared: true,
             reset_authority: Some([7u8; 32]),
-            sealing: vec![SealingEntry { op_id: [8u8; 32], origin: SealingOrigin::Genesis, author: "owner".into(), bytes: vec![1, 2, 3] }],
+            sealing: vec![SealingEntry {
+                op_id: [8u8; 32],
+                origin: SealingOrigin::Genesis,
+                author: "owner".into(),
+                bytes: vec![1, 2, 3],
+            }],
             minting_ops_baseline: 2,
             author: "owner".into(),
         }
@@ -330,7 +384,11 @@ mod tests {
 
         let bytes = postcard::to_allocvec(&signed).unwrap();
         let back: SignedCheckpoint = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(back.verify(), Some(&cp), "the checkpoint signs, serdes, and verifies end-to-end");
+        assert_eq!(
+            back.verify(),
+            Some(&cp),
+            "the checkpoint signs, serdes, and verifies end-to-end"
+        );
     }
 
     #[test]
@@ -345,7 +403,11 @@ mod tests {
 
         let mut t = base.clone();
         t.frontier_depths.push(([7u8; 32], 3));
-        assert_ne!(canon(&t), baseline, "frontier_depths keys (the cut) are signed");
+        assert_ne!(
+            canon(&t),
+            baseline,
+            "frontier_depths keys (the cut) are signed"
+        );
         let mut t = base.clone();
         t.frontier_depths[0].1 = 99;
         assert_ne!(canon(&t), baseline, "frontier_depths depths are signed");
@@ -374,7 +436,13 @@ mod tests {
         let mut other = sample_state();
         other.members.insert(
             "bob".into(),
-            MemberState { role: KeyringRole(1), member_counter: 0, access_counter: 0, author_public_key: [3u8; 32], hpke_public_key: [4u8; 32] },
+            MemberState {
+                role: KeyringRole(1),
+                member_counter: 0,
+                access_counter: 0,
+                author_public_key: [3u8; 32],
+                hpke_public_key: [4u8; 32],
+            },
         );
         let mut t = base.clone();
         t.state = GroupStateView::of(&other);

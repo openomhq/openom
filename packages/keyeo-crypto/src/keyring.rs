@@ -9,8 +9,8 @@ use std::hash::Hash;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{Dek, GroupId, KeyId};
 use crate::KdfParams;
+use crate::{Dek, GroupId, KeyId};
 use crate::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 
 /// The per-epoch DEK commitment: SHA-256 over the raw 32-byte DEK.

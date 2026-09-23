@@ -84,7 +84,9 @@ impl WasmTree {
 
     /// Undo a same-author `Remove` by its operation id. Buffers the op; call `flush()`.
     pub fn revoke(&mut self, removal_op_id: &str) -> Result<(), JsError> {
-        self.inner.revoke(removal_op_id, now_millis()).map_err(to_js)
+        self.inner
+            .revoke(removal_op_id, now_millis())
+            .map_err(to_js)
     }
 
     /// Merge a peer's (or replayed) op batch into the set. Returns the number of items ingested. This veneer

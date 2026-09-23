@@ -16,9 +16,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::auth::Identity;
 use crate::authz::{authorize, Access};
-use crate::api_error::ApiError;
 use crate::AppState;
 use openom_roles::{ROLE_CO_OWNER, ROLE_EDITOR, ROLE_MAINTAINER, ROLE_OWNER, ROLE_VIEWER};
 
@@ -27,7 +27,9 @@ const MAX_INVITE_TTL_MS: i64 = 90 * 24 * 3600 * 1000; // an invite lives at most
 const MAX_OPEN_INVITES_PER_TREE: i64 = 50; // a hostile/buggy client can't flood the invites table
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 // The client's role STRING → the numeric role rank (power-descending, owner=1). The server otherwise treats role
@@ -44,7 +46,12 @@ fn role_rank(role: &str) -> Option<i16> {
 }
 
 /// The caller's role rank for a tree (owner fast-path = strongest), or `None` if not a member.
-async fn caller_rank(db: &sqlx::PgPool, tree_id: Uuid, owner: Uuid, caller: Uuid) -> Result<Option<i16>, ApiError> {
+async fn caller_rank(
+    db: &sqlx::PgPool,
+    tree_id: Uuid,
+    owner: Uuid,
+    caller: Uuid,
+) -> Result<Option<i16>, ApiError> {
     if caller == owner {
         return Ok(Some(ROLE_OWNER));
     }
@@ -77,9 +84,9 @@ async fn tree_owner(db: &sqlx::PgPool, tree_id: Uuid) -> Result<Uuid, ApiError> 
 pub struct CreateInvite {
     invite_id: String, // base64url of 16 CSPRNG bytes
     role: String,
-    engine: String,    // 'chain' | 'dag'
-    pin: String,       // base64 (STANDARD) — the opaque engine-specific trust anchor
-    meta_mac: String,  // base64 (STANDARD) — HMAC(s_mac_meta, framed(invite_id||uuid||role||engine||pin))
+    engine: String,   // 'chain' | 'dag'
+    pin: String,      // base64 (STANDARD) — the opaque engine-specific trust anchor
+    meta_mac: String, // base64 (STANDARD) — HMAC(s_mac_meta, framed(invite_id||uuid||role||engine||pin))
     #[serde(default)]
     recipient_pin: Option<String>,
     expiry: i64,
@@ -109,17 +116,25 @@ pub async fn create_invite(
     // Rate-gate per caller-account BEFORE any other work (like POST /trees): invite creation is otherwise a
     // scriptable DB-load vector beyond the per-tree open cap. A rejected attempt still consumes a token; an
     // unknown account isn't gated (the authority checks below forbid it anyway).
-    state.meter.charge_create(&state.db, identity.member_id).await?;
+    state
+        .meter
+        .charge_create(&state.db, identity.member_id)
+        .await?;
     let owner = tree_owner(&state.db, tree_id).await?;
 
     // Field validation up front (fail closed before any authority query).
     if unb64url(&body.invite_id)?.len() != 16 {
-        return Err(ApiError::BadRequest("invite_id must be 16 bytes (base64url)".into()));
+        return Err(ApiError::BadRequest(
+            "invite_id must be 16 bytes (base64url)".into(),
+        ));
     }
     if body.engine != "chain" && body.engine != "dag" {
-        return Err(ApiError::BadRequest("engine must be 'chain' or 'dag'".into()));
+        return Err(ApiError::BadRequest(
+            "engine must be 'chain' or 'dag'".into(),
+        ));
     }
-    let minted_rank = role_rank(&body.role).ok_or_else(|| ApiError::BadRequest("unknown role".into()))?;
+    let minted_rank =
+        role_rank(&body.role).ok_or_else(|| ApiError::BadRequest("unknown role".into()))?;
     let pin = unb64(&body.pin)?;
     let meta_mac = unb64(&body.meta_mac)?;
     if pin.is_empty() || pin.len() > 4096 || meta_mac.len() != 32 {
@@ -134,7 +149,14 @@ pub async fn create_invite(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
     if policy == "maintainer" {
-        authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+        authorize(
+            &state.db,
+            tree_id,
+            owner,
+            identity.member_id,
+            Access::Administer,
+        )
+        .await?;
     }
     // A signer check (owner/co-owner) covers BOTH the 'signer' policy and the role-ceiling rule below.
     let rank = caller_rank(&state.db, tree_id, owner, identity.member_id)
@@ -159,7 +181,9 @@ pub async fn create_invite(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
     if open >= MAX_OPEN_INVITES_PER_TREE {
-        return Err(ApiError::BadRequest("too many open invites for this tree".into()));
+        return Err(ApiError::BadRequest(
+            "too many open invites for this tree".into(),
+        ));
     }
 
     sqlx::query(
@@ -204,7 +228,15 @@ pub async fn get_invite_meta(
     _identity: Identity,
     Path(invite_id): Path<String>,
 ) -> Result<Json<InviteMeta>, ApiError> {
-    type Row = (Uuid, String, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>, i64, String);
+    type Row = (
+        Uuid,
+        String,
+        Option<String>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        i64,
+        String,
+    );
     let row: Option<Row> = sqlx::query_as(
         "SELECT tree_id, role, engine, pin, meta_mac, expiry, status FROM pending_invites WHERE invite_id = $1",
     )
@@ -266,12 +298,13 @@ pub async fn claim_invite(
     if hpke.len() != 32 || author.len() != 32 {
         return Err(ApiError::BadRequest("keys must be 32 bytes".into()));
     }
-    let row: Option<(String, i64, Option<String>)> =
-        sqlx::query_as("SELECT status, expiry, recipient_pin FROM pending_invites WHERE invite_id = $1")
-            .bind(&invite_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let row: Option<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT status, expiry, recipient_pin FROM pending_invites WHERE invite_id = $1",
+    )
+    .bind(&invite_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
     let (status, expiry, recipient_pin) = row.ok_or(ApiError::NotFound)?;
     if status != "open" {
         return Err(ApiError::Conflict); // already claimed — one live claim
@@ -354,7 +387,14 @@ pub async fn list_invites(
     Path(tree_id): Path<Uuid>,
 ) -> Result<Json<Vec<InviteView>>, ApiError> {
     let owner = tree_owner(&state.db, tree_id).await?;
-    authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+    authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Administer,
+    )
+    .await?;
     let rows: Vec<InviteRow> = sqlx::query_as(
         "SELECT invite_id, role, recipient_pin, expiry, status,
                 claim_member_id, claim_hpke_public, claim_author_public, claim_tag
@@ -366,18 +406,27 @@ pub async fn list_invites(
     .map_err(|e| ApiError::Internal(e.to_string()))?;
     let out = rows
         .into_iter()
-        .map(|(invite_id, role, recipient_pin, expiry, status, cm, ch, ca, ct)| {
-            let claim = match (cm, ch, ca, ct) {
-                (Some(m), Some(h), Some(a), Some(t)) => Some(ClaimView {
-                    member_id: m.to_string(),
-                    hpke_public: b64(&h),
-                    author_public: b64(&a),
-                    tag: b64(&t),
-                }),
-                _ => None,
-            };
-            InviteView { invite_id, role, recipient_pin, expiry, status, claim }
-        })
+        .map(
+            |(invite_id, role, recipient_pin, expiry, status, cm, ch, ca, ct)| {
+                let claim = match (cm, ch, ca, ct) {
+                    (Some(m), Some(h), Some(a), Some(t)) => Some(ClaimView {
+                        member_id: m.to_string(),
+                        hpke_public: b64(&h),
+                        author_public: b64(&a),
+                        tag: b64(&t),
+                    }),
+                    _ => None,
+                };
+                InviteView {
+                    invite_id,
+                    role,
+                    recipient_pin,
+                    expiry,
+                    status,
+                    claim,
+                }
+            },
+        )
         .collect();
     Ok(Json(out))
 }
@@ -404,7 +453,14 @@ pub async fn admit_invite(
         return Ok(StatusCode::NO_CONTENT); // already gone — idempotent
     };
     let owner = tree_owner(&state.db, tree_id).await?;
-    authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+    authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Administer,
+    )
+    .await?;
     sqlx::query("UPDATE pending_invites SET status = 'admitted' WHERE invite_id = $1 AND status = 'claimed'")
         .bind(&invite_id)
         .execute(&state.db)
@@ -434,7 +490,14 @@ pub async fn reopen_invite(
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tree_id = tree_id.ok_or(ApiError::NotFound)?;
     let owner = tree_owner(&state.db, tree_id).await?;
-    authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+    authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Administer,
+    )
+    .await?;
     sqlx::query(
         "UPDATE pending_invites
          SET status = 'open', claim_member_id = NULL, claim_hpke_public = NULL, claim_author_public = NULL,
@@ -467,7 +530,14 @@ pub async fn delete_invite(
         return Ok(StatusCode::NO_CONTENT); // already gone — idempotent
     };
     let owner = tree_owner(&state.db, tree_id).await?;
-    authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+    authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Administer,
+    )
+    .await?;
     sqlx::query("DELETE FROM pending_invites WHERE invite_id = $1")
         .bind(&invite_id)
         .execute(&state.db)

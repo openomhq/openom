@@ -85,7 +85,10 @@ async fn gate2(
 
     let mut by_member: BTreeMap<Uuid, BTreeMap<String, i64>> = BTreeMap::new();
     for (member, replica, counter) in rows {
-        by_member.entry(member).or_default().insert(replica, counter);
+        by_member
+            .entry(member)
+            .or_default()
+            .insert(replica, counter);
     }
     Ok(Gate2 {
         members: by_member.into_values().collect(),
@@ -95,6 +98,8 @@ async fn gate2(
 /// MARK one tree under its per-tree ratchet lock (the SAME `SELECT … FOR UPDATE` the snapshot PUT takes).
 /// Advances `tree_gc_floor` (GREATEST — never regresses) and sets `pending_delete_at` on the log rows now
 /// below the floor. Returns the number of rows newly marked.
+// The gate reads, ratchet update, and mark query intentionally share one lock-bound transaction.
+#[allow(clippy::too_many_lines)]
 async fn mark_tree(state: &AppState, tree_id: Uuid, window_secs: i64) -> Result<u64, ApiError> {
     let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree_id)
@@ -105,12 +110,13 @@ async fn mark_tree(state: &AppState, tree_id: Uuid, window_secs: i64) -> Result<
 
     // The owner's plan history window: raw deltas newer than this survive the reap even below the covered floor
     // (the change-history feature reads them). 0 (default / free tier) = no retention = reap everything below.
-    let retained_days: i32 = sqlx::query_scalar("SELECT retained_history_days FROM accounts WHERE id = $1")
-        .bind(owner)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?
-        .unwrap_or(0);
+    let retained_days: i32 =
+        sqlx::query_scalar("SELECT retained_history_days FROM accounts WHERE id = $1")
+            .bind(owner)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal)?
+            .unwrap_or(0);
     let retained_secs = f64::from(retained_days) * 86_400.0;
 
     let mut tx = state.db.begin().await.map_err(internal)?;
@@ -123,12 +129,13 @@ async fn mark_tree(state: &AppState, tree_id: Uuid, window_secs: i64) -> Result<
 
     // Gate 1: the covered frontier, ONLY the rows still bound to the live snapshot object's etag (fail-closed
     // ETAG-BINDING). No live snapshot object → no trusted coverage → nothing advances (floor stays put).
-    let live_etag: Option<String> =
-        sqlx::query_scalar("SELECT etag FROM tree_blob_index WHERE tree_id = $1 AND key = 'snapshot'")
-            .bind(tree_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(internal)?;
+    let live_etag: Option<String> = sqlx::query_scalar(
+        "SELECT etag FROM tree_blob_index WHERE tree_id = $1 AND key = 'snapshot'",
+    )
+    .bind(tree_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?;
     let covered: BTreeMap<String, i64> = match &live_etag {
         Some(live) => sqlx::query_as(
             "SELECT replica, counter FROM tree_snapshot_covered WHERE tree_id = $1 AND snapshot_etag = $2",
@@ -333,15 +340,25 @@ pub struct GcParams {
 ///
 /// # Errors
 /// Returns [`ApiError`] if the store or DB access fails.
-pub async fn gc_dev(State(state): State<AppState>, Query(p): Query<GcParams>) -> Result<Response, ApiError> {
+pub async fn gc_dev(
+    State(state): State<AppState>,
+    Query(p): Query<GcParams>,
+) -> Result<Response, ApiError> {
     let (marked, reaped, reclaimed) = run_log_gc(
         &state,
-        p.activity_window_secs.unwrap_or(DEFAULT_ACTIVITY_WINDOW_SECS),
+        p.activity_window_secs
+            .unwrap_or(DEFAULT_ACTIVITY_WINDOW_SECS),
         p.deletion_grace_secs.unwrap_or(DEFAULT_DELETION_GRACE_SECS),
         None, // dev: sweep every tree (no batch cap)
     )
     .await?;
-    tracing::info!(event = "log_gc", marked, reaped, reclaimed_bytes = reclaimed, "log GC sweep");
+    tracing::info!(
+        event = "log_gc",
+        marked,
+        reaped,
+        reclaimed_bytes = reclaimed,
+        "log GC sweep"
+    );
     Ok(Json(json!({
         "marked": marked,
         "reaped": reaped,
@@ -426,7 +443,8 @@ pub async fn internal_gc(
     // satisfied, so reaping is now safe behind the 7d grace). Media owns its own default windows behind
     // sweep_with_defaults — this orchestrator only forwards the caller's optional overrides.
     let (media_deleted, media_expired, proposals_expired) =
-        crate::media::sweep_with_defaults(&state, p.tombstone_grace_secs, p.pending_expiry_secs).await?;
+        crate::media::sweep_with_defaults(&state, p.tombstone_grace_secs, p.pending_expiry_secs)
+            .await?;
 
     // Reap consumed (admitted) + expired invites so `pending_invites` doesn't accumulate (admit marks, never
     // deletes). Independent of the log-GC floor, like the media/proposals reaps above.
@@ -438,7 +456,8 @@ pub async fn internal_gc(
     };
     let (marked, reaped, reclaimed) = run_log_gc(
         &state,
-        p.activity_window_secs.unwrap_or(DEFAULT_ACTIVITY_WINDOW_SECS),
+        p.activity_window_secs
+            .unwrap_or(DEFAULT_ACTIVITY_WINDOW_SECS),
         p.deletion_grace_secs.unwrap_or(DEFAULT_DELETION_GRACE_SECS),
         Some(batch),
     )

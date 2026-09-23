@@ -25,9 +25,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::auth::Identity;
 use crate::authz::Access;
-use crate::api_error::ApiError;
 use crate::AppState;
 
 /// Absolute per-proposal ceiling regardless of plan — a bundle near this should be a snapshot, not a
@@ -58,8 +58,8 @@ fn validate_proposal(
     tree_id: Uuid,
     reject_dev_key: bool,
 ) -> Result<Vec<u8>, ApiError> {
-    let env = Envelope::decode(body)
-        .map_err(|_| ApiError::BadRequest("not a valid envelope".into()))?;
+    let env =
+        Envelope::decode(body).map_err(|_| ApiError::BadRequest("not a valid envelope".into()))?;
     if env.version != ENVELOPE_VERSION {
         return Err(ApiError::BadRequest(format!(
             "unsupported envelope version {} (server speaks {ENVELOPE_VERSION})",

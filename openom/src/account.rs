@@ -69,7 +69,11 @@ fn now_unix() -> i64 {
 }
 
 fn invalid_json(rejection: &JsonRejection) -> ApiError {
-    ApiError::coded(rejection.status(), ec::INVALID_REQUEST, "invalid JSON request")
+    ApiError::coded(
+        rejection.status(),
+        ec::INVALID_REQUEST,
+        "invalid JSON request",
+    )
 }
 
 // A value-to-value conversion used as a `.map_err(fn)` argument.
@@ -97,11 +101,14 @@ fn account_etag(keystore: Option<&[u8]>, generation: i64) -> String {
         }
         None => digest.update([0]),
     }
-    let hex = digest.finalize().iter().fold(String::new(), |mut out, byte| {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-        out
-    });
+    let hex = digest
+        .finalize()
+        .iter()
+        .fold(String::new(), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
     format!("\"{hex}\"")
 }
 
@@ -196,8 +203,16 @@ pub async fn register(
             "registration key is not a valid Ed25519 point",
         ));
     };
-    let msg = register_signing_bytes(raw.iss.as_deref().unwrap_or(""), &raw.sub, body.member_id, body.ts);
-    if vk.verify(&msg, &edsign::Signature::from_bytes(&sig_arr)).is_err() {
+    let msg = register_signing_bytes(
+        raw.iss.as_deref().unwrap_or(""),
+        &raw.sub,
+        body.member_id,
+        body.ts,
+    );
+    if vk
+        .verify(&msg, &edsign::Signature::from_bytes(&sig_arr))
+        .is_err()
+    {
         return Err(ApiError::coded(
             StatusCode::UNAUTHORIZED,
             ec::BAD_SIGNATURE,
@@ -210,7 +225,11 @@ pub async fn register(
     match bind_identity(&state, &raw.sub, body.member_id, &pubkey).await {
         Ok(BindOutcome::Bound | BindOutcome::Idempotent) => {
             // Positive-cache the immutable mapping so the caller's very next request skips the DB.
-            state.identity_cache.write().await.insert(raw.sub.clone(), body.member_id);
+            state
+                .identity_cache
+                .write()
+                .await
+                .insert(raw.sub.clone(), body.member_id);
             tracing::info!(event = "identity_registered", sub = %raw.sub, member = %body.member_id);
             Ok((StatusCode::OK, Json(json!({ "member_id": body.member_id }))).into_response())
         }
@@ -297,11 +316,14 @@ pub async fn me(State(state): State<AppState>, id: Identity) -> Result<Response,
         ));
     };
     let etag = account_etag(keystore.as_deref(), generation);
-    Ok(json_with_etag(json!({
-        "member_id": id.member_id,
-        "keystore": keystore.as_deref().map(b64_encode),
-        "generation": generation,
-    }), &etag))
+    Ok(json_with_etag(
+        json!({
+            "member_id": id.member_id,
+            "keystore": keystore.as_deref().map(b64_encode),
+            "generation": generation,
+        }),
+        &etag,
+    ))
 }
 
 /// `PUT /account/keystore` body: the E2E-wrapped keystore blob (base64) + its monotonic generation.
@@ -361,10 +383,10 @@ pub async fn put_keystore(
     let stored: Option<(Option<Vec<u8>>, i64)> = sqlx::query_as(
         "SELECT keystore, generation FROM identities WHERE member_id = $1 FOR UPDATE",
     )
-        .bind(id.member_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(internal)?;
+    .bind(id.member_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?;
     let Some((stored_blob, stored_generation)) = stored else {
         return Err(ApiError::forbidden(
             ec::UNREGISTERED,
@@ -416,7 +438,10 @@ pub async fn put_keystore(
 ///
 /// # Errors
 /// `403 unregistered` (no `identities` row), `500 unavailable`.
-pub async fn get_keystore(State(state): State<AppState>, id: Identity) -> Result<Response, ApiError> {
+pub async fn get_keystore(
+    State(state): State<AppState>,
+    id: Identity,
+) -> Result<Response, ApiError> {
     let row: Option<(Option<Vec<u8>>, i64)> =
         sqlx::query_as("SELECT keystore, generation FROM identities WHERE member_id = $1")
             .bind(id.member_id)

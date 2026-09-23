@@ -87,7 +87,13 @@ mod tests {
         let s = RecordSchema::new();
         let d = did();
 
-        let mut good = Claim::attestation(&AttestTarget::Claim("sha256:aa".into()), Verdict::Support, None, &d, hlc(1));
+        let mut good = Claim::attestation(
+            &AttestTarget::Claim("sha256:aa".into()),
+            Verdict::Support,
+            None,
+            &d,
+            hlc(1),
+        );
         good.compute_id().unwrap();
         assert!(s.is_valid(&good.to_value()));
 

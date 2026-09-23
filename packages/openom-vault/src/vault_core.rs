@@ -76,7 +76,12 @@ impl From<&RecoveryEscrow> for RecoveryKey {
 /// stored `kdf`) — the durable-account escrow wrap below, mirroring `account_keystore::inner_placeholder_kdf`
 /// and `open_rrk_secret`'s unused-`kdf` convention.
 fn placeholder_kdf() -> KeyeoKdfParams {
-    KeyeoKdfParams { salt: Vec::new(), memory_kib: 0, iterations: 0, parallelism: 0 }
+    KeyeoKdfParams {
+        salt: Vec::new(),
+        memory_kib: 0,
+        iterations: 0,
+        parallelism: 0,
+    }
 }
 
 /// Build the owner's [`RecoveryEscrow`] for the DURABLE-IDENTITY chain (OPE-543): the per-tree recovery root
@@ -218,14 +223,20 @@ pub(crate) fn open_epoch_dek(
             let mut w = w.clone();
             // Bind the AAD to the founder (the wrap's recipient IS the founder; explicit matches wrap time).
             w.recipient = founder_id.to_string();
-            keyeo_unwrap_dek(&w, rrk_secret.expose(), &epoch_ctx(&group_id, &epoch.key_id))
-                .ok()
-                // Verify the decrypted DEK against the epoch's commitment (OPE-381 / F3): reject a wrap
-                // that opens but doesn't reproduce the committed DEK, so a hostile member can't censor the
-                // owner's read by flooding the epoch with junk RRK wraps of a bogus DEK.
-                .filter(|dek| epoch.dek_matches_commitment(dek))
+            keyeo_unwrap_dek(
+                &w,
+                rrk_secret.expose(),
+                &epoch_ctx(&group_id, &epoch.key_id),
+            )
+            .ok()
+            // Verify the decrypted DEK against the epoch's commitment (OPE-381 / F3): reject a wrap
+            // that opens but doesn't reproduce the committed DEK, so a hostile member can't censor the
+            // owner's read by flooding the epoch with junk RRK wraps of a bogus DEK.
+            .filter(|dek| epoch.dek_matches_commitment(dek))
         })
-        .ok_or_else(|| VaultError::BadKeyring("epoch has no rrk wrap openable by this secret".into()))
+        .ok_or_else(|| {
+            VaultError::BadKeyring("epoch has no rrk wrap openable by this secret".into())
+        })
 }
 
 /// Every epoch's `(key_id, epoch, DEK)`, opened via the founder's recovery root secret.

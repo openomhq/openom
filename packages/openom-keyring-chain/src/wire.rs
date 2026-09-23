@@ -186,7 +186,9 @@ pub struct KeyMaterialError;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keyeo_crypto::{codec, EncappedKey, Wrap as KeyeoWrap, WrapMethod, WrappedDek, X25519PublicKey};
+    use keyeo_crypto::{
+        codec, EncappedKey, Wrap as KeyeoWrap, WrapMethod, WrappedDek, X25519PublicKey,
+    };
 
     #[test]
     fn max_key_material_bytes_is_four_mib() {

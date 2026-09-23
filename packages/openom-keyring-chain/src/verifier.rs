@@ -8,14 +8,15 @@
 //! [`VerifyError`] (the full detail stays available inside the chain layer for diagnostics).
 
 use openom_keyring_api::{
-    Admitted, EngineKind, KeyringVerifier, MemberView, MembershipEnvelope, MembershipView, VerifyError,
+    Admitted, EngineKind, KeyringVerifier, MemberView, MembershipEnvelope, MembershipView,
+    VerifyError,
 };
 use prost::Message;
 
 use crate::wire::{Keyring, MEMBER_OWNER};
 use crate::{
-    bootstrap_from_genesis, keyring_hash, verify_reset, verify_transition, KeyringError, KeyringAnchor,
-    VerifyingKey,
+    bootstrap_from_genesis, keyring_hash, verify_reset, verify_transition, KeyringAnchor,
+    KeyringError, VerifyingKey,
 };
 
 /// The chain keyring's keyless verifier. Holds no secrets and no state.
@@ -144,9 +145,7 @@ impl KeyringVerifier for ChainVerifier {
                     Err(transition_err) => {
                         let chains_on_head = candidate.revision == head.revision + 1
                             && candidate.prev_keyring_hash == keyring_hash(&head);
-                        match chains_on_head
-                            .then(|| verify_reset(prior_rvk(&anchor), &candidate))
-                        {
+                        match chains_on_head.then(|| verify_reset(prior_rvk(&anchor), &candidate)) {
                             Some(Ok(_)) => Ok(Admitted {
                                 state: update.to_vec(),
                                 view: view_of(&candidate, true),
@@ -168,10 +167,10 @@ impl KeyringVerifier for ChainVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{keyring_hash, sign_keyring, SigningKey};
     use crate::wire::{Member, WRAP_RRK_HPKE, WRAP_X25519_HPKE};
+    use crate::{keyring_hash, sign_keyring, SigningKey};
     use keyeo_crypto::{
-        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        codec, EncappedKey, Epoch as KeyeoEpoch, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
         X25519PublicKey,
     };
 
@@ -192,11 +191,21 @@ mod tests {
         let encapped = EncappedKey::from_bytes([0u8; 32]);
         let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
         let m = if method == WRAP_RRK_HPKE {
-            WrapMethod::RrkHpke { encapped, recipient_key }
+            WrapMethod::RrkHpke {
+                encapped,
+                recipient_key,
+            }
         } else {
-            WrapMethod::MemberHpke { encapped, recipient_key }
+            WrapMethod::MemberHpke {
+                encapped,
+                recipient_key,
+            }
         };
-        KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
+        KeyeoWrap {
+            recipient: id.into(),
+            method: m,
+            ciphertext: WrappedDek::from_bytes([1u8; 48]),
+        }
     }
 
     /// A one-founder genesis re-keyed to `founder_seed`, self-signed — a valid genesis AND a valid reset.
@@ -267,7 +276,10 @@ mod tests {
         let boot = v.admit(None, &env(&g)).unwrap();
 
         // garbage bytes → Malformed
-        assert_eq!(v.admit(Some(&boot.state), b"not a keyring").unwrap_err(), VerifyError::Malformed);
+        assert_eq!(
+            v.admit(Some(&boot.state), b"not a keyring").unwrap_err(),
+            VerifyError::Malformed
+        );
 
         // A self-signed re-founding under a fresh founder identity (seed 7) that still CHAINS onto the head
         // (rev 2, prev-hash = hash(g)) is not an ordinary successor, so it's admitted via verify_reset with
@@ -278,8 +290,15 @@ mod tests {
         reset.signatures.clear();
         sign_keyring(&mut reset, &sk(7));
         let out = v.admit(Some(&boot.state), &env(&reset)).unwrap();
-        assert!(out.view.reset_boundary, "a re-founding is admitted as a reset");
-        assert_eq!(out.view.owner().unwrap().author_public_key, pk(7), "owner re-keyed");
+        assert!(
+            out.view.reset_boundary,
+            "a re-founding is admitted as a reset"
+        );
+        assert_eq!(
+            out.view.owner().unwrap().author_public_key,
+            pk(7),
+            "owner re-keyed"
+        );
 
         // But a FORK — a rev-2 re-founding with a BOGUS prev-hash — is refused as a rollback/fork, NOT
         // smuggled in as a reset (the reset fallback is gated on head continuity).

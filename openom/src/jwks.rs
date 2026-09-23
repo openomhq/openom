@@ -93,9 +93,15 @@ impl JwtVerifier {
     pub async fn verify(&self, token: &str) -> Result<VerifiedClaims, &'static str> {
         match self {
             Self::Hs256 { key, validation } => decode_claims(token, key, validation),
-            Self::Jwks { cache, audience, issuer } => {
+            Self::Jwks {
+                cache,
+                audience,
+                issuer,
+            } => {
                 let header = decode_header(token).map_err(|_| "invalid token header")?;
-                let kid = header.kid.ok_or("token has no kid (JWKS verification requires one)")?;
+                let kid = header
+                    .kid
+                    .ok_or("token has no kid (JWKS verification requires one)")?;
                 // The algorithm comes from the resolved KEY, not the header — no alg confusion.
                 let (key, alg) = cache.key(&kid).await?;
                 let validation = validation(alg, audience.as_deref(), issuer.as_deref());
@@ -133,7 +139,11 @@ fn decode_claims(
         (Some(e), Some(true)) => Some(e.trim().to_lowercase()),
         _ => None,
     };
-    Ok(VerifiedClaims { sub: data.claims.sub, iss: data.claims.iss, verified_email })
+    Ok(VerifiedClaims {
+        sub: data.claims.sub,
+        iss: data.claims.iss,
+        verified_email,
+    })
 }
 
 /// A JWKS key cache: `kid → (DecodingKey, Algorithm)`, populated by fetching the JWKS URL.
@@ -204,9 +214,11 @@ impl JwksCache {
 fn jwks_to_keys(set: &JwkSet) -> HashMap<String, (Arc<DecodingKey>, Algorithm)> {
     let mut map = HashMap::new();
     for jwk in &set.keys {
-        if let (Some(kid), Some(alg), Ok(key)) =
-            (jwk.common.key_id.clone(), alg_of(jwk), DecodingKey::from_jwk(jwk))
-        {
+        if let (Some(kid), Some(alg), Ok(key)) = (
+            jwk.common.key_id.clone(),
+            alg_of(jwk),
+            DecodingKey::from_jwk(jwk),
+        ) {
             map.insert(kid, (Arc::new(key), alg));
         }
     }
@@ -252,15 +264,30 @@ mod tests {
     const MEMBER: &str = "00000000-0000-0000-0000-0000000000ab";
 
     fn hs_token(secret: &[u8], sub: &str, aud: &str) -> String {
-        let claims = TestClaims { sub: sub.into(), aud: aud.into(), exp: 4_102_444_800 };
-        encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(secret)).unwrap()
+        let claims = TestClaims {
+            sub: sub.into(),
+            aud: aud.into(),
+            exp: 4_102_444_800,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
     async fn hs256_accepts_a_matching_audience() {
         let v = JwtVerifier::hs256("test-secret", Some("authenticated"), None);
-        let c = v.verify(&hs_token(HS_SECRET, MEMBER, "authenticated")).await.expect("valid aud accepted");
-        assert_eq!(c.sub, MEMBER, "the raw sub is extracted verbatim (no member-id mapping here)");
+        let c = v
+            .verify(&hs_token(HS_SECRET, MEMBER, "authenticated"))
+            .await
+            .expect("valid aud accepted");
+        assert_eq!(
+            c.sub, MEMBER,
+            "the raw sub is extracted verbatim (no member-id mapping here)"
+        );
         assert_eq!(c.verified_email, None, "no email claim → no verified email");
     }
 
@@ -268,7 +295,12 @@ mod tests {
     async fn hs256_extracts_a_verified_email_only_when_verified() {
         let v = JwtVerifier::hs256("test-secret", Some("authenticated"), None);
         let tok = |claims: serde_json::Value| {
-            encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(HS_SECRET)).unwrap()
+            encode(
+                &Header::new(Algorithm::HS256),
+                &claims,
+                &EncodingKey::from_secret(HS_SECRET),
+            )
+            .unwrap()
         };
         // A VERIFIED email is extracted, trimmed + lowercased.
         let verified = tok(serde_json::json!({
@@ -284,23 +316,47 @@ mod tests {
             "sub": MEMBER, "aud": "authenticated", "exp": 4_102_444_800usize,
             "email": "grandma@family.example", "email_verified": false,
         }));
-        assert_eq!(v.verify(&unverified).await.unwrap().verified_email, None, "unverified email dropped");
+        assert_eq!(
+            v.verify(&unverified).await.unwrap().verified_email,
+            None,
+            "unverified email dropped"
+        );
         // An email with no `email_verified` claim is likewise untrusted.
         let no_flag = tok(serde_json::json!({
             "sub": MEMBER, "aud": "authenticated", "exp": 4_102_444_800usize, "email": "x@y.z",
         }));
-        assert_eq!(v.verify(&no_flag).await.unwrap().verified_email, None, "email without the verified flag dropped");
+        assert_eq!(
+            v.verify(&no_flag).await.unwrap().verified_email,
+            None,
+            "email without the verified flag dropped"
+        );
     }
 
     #[tokio::test]
     async fn hs256_rejects_wrong_audience_signature_and_missing_aud() {
         let v = JwtVerifier::hs256("test-secret", Some("authenticated"), None);
-        assert!(v.verify(&hs_token(HS_SECRET, MEMBER, "some-other-service")).await.is_err(), "wrong aud");
-        assert!(v.verify(&hs_token(b"a-different-secret", MEMBER, "authenticated")).await.is_err(), "bad sig");
-        let no_aud = encode(&Header::new(Algorithm::HS256),
+        assert!(
+            v.verify(&hs_token(HS_SECRET, MEMBER, "some-other-service"))
+                .await
+                .is_err(),
+            "wrong aud"
+        );
+        assert!(
+            v.verify(&hs_token(b"a-different-secret", MEMBER, "authenticated"))
+                .await
+                .is_err(),
+            "bad sig"
+        );
+        let no_aud = encode(
+            &Header::new(Algorithm::HS256),
             &serde_json::json!({ "sub": MEMBER, "exp": 4_102_444_800usize }),
-            &EncodingKey::from_secret(HS_SECRET)).unwrap();
-        assert!(v.verify(&no_aud).await.is_err(), "missing aud rejected when pinned");
+            &EncodingKey::from_secret(HS_SECRET),
+        )
+        .unwrap();
+        assert!(
+            v.verify(&no_aud).await.is_err(),
+            "missing aud rejected when pinned"
+        );
     }
 
     #[tokio::test]
@@ -335,13 +391,20 @@ mod tests {
         let v = jwks_verifier(Some("authenticated"), Some("https://issuer.example"));
         let id = v.verify(RS_JWT).await.expect("valid RS256 token accepted");
         assert_eq!(id.sub, RS_SUB);
-        assert_eq!(id.iss.as_deref(), Some("https://issuer.example"), "iss is extracted for the register PoP");
+        assert_eq!(
+            id.iss.as_deref(),
+            Some("https://issuer.example"),
+            "iss is extracted for the register PoP"
+        );
     }
 
     #[tokio::test]
     async fn jwks_rejects_wrong_audience() {
         let v = jwks_verifier(Some("some-other-service"), None);
-        assert!(v.verify(RS_JWT).await.is_err(), "mismatched aud rejected on the JWKS path");
+        assert!(
+            v.verify(RS_JWT).await.is_err(),
+            "mismatched aud rejected on the JWKS path"
+        );
     }
 
     #[tokio::test]
@@ -352,6 +415,9 @@ mod tests {
             audience: None,
             issuer: None,
         };
-        assert!(v.verify(RS_JWT).await.is_err(), "unresolved signing key must be rejected, never accepted");
+        assert!(
+            v.verify(RS_JWT).await.is_err(),
+            "unresolved signing key must be rejected, never accepted"
+        );
     }
 }

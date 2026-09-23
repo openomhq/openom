@@ -246,7 +246,9 @@ impl Config {
                 Runtime::Local => OpenomEnv::Development,
             }
         });
-        let stack = env::var("OPENOM_STACK").ok().filter(|s| !s.trim().is_empty());
+        let stack = env::var("OPENOM_STACK")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
         // Each axis defaults from the OPENOM_RUNTIME preset, then its own env overrides it.
         let storage = match env::var("STORAGE").ok().as_deref() {
             Some("cloud") => StorageMode::Cloud,
@@ -290,8 +292,12 @@ impl Config {
             jwt_secret: env::var("AUTH_JWT_SECRET")
                 .or_else(|_| env::var("SUPABASE_JWT_SECRET"))
                 .ok(),
-            jwks_url: env::var("AUTH_JWKS_URL").ok().filter(|s| !s.trim().is_empty()),
-            jwt_issuer: env::var("AUTH_JWT_ISS").ok().filter(|s| !s.trim().is_empty()),
+            jwks_url: env::var("AUTH_JWKS_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            jwt_issuer: env::var("AUTH_JWT_ISS")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             jwt_audience: match env::var("AUTH_JWT_AUD").or_else(|_| env::var("SUPABASE_JWT_AUD")) {
                 Ok(v) if v.trim().is_empty() => None, // explicit opt-out
                 Ok(v) => Some(v),
@@ -310,7 +316,9 @@ impl Config {
             otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:4318".into()),
             otlp_headers: env::var("OTEL_EXPORTER_OTLP_HEADERS").ok(),
-            internal_gc_token: env::var("OPENOM_INTERNAL_GC_TOKEN").ok().filter(|s| !s.trim().is_empty()),
+            internal_gc_token: env::var("OPENOM_INTERNAL_GC_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             web_origins: parse_web_origins(env::var("OPENOM_WEB_ORIGINS").ok().as_deref()),
         };
         config.validate();
@@ -468,7 +476,10 @@ mod tests {
         ] {
             assert!(!dbg.contains(secret), "Debug leaked a secret: {secret}");
         }
-        assert!(dbg.contains("<redacted>"), "secrets should be marked redacted");
+        assert!(
+            dbg.contains("<redacted>"),
+            "secrets should be marked redacted"
+        );
         // Non-secret fields still print — Debug stays useful for diagnostics.
         assert!(dbg.contains("Production") && dbg.contains("app.example"));
     }

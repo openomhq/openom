@@ -1,7 +1,7 @@
 use keyeo_dag::{
     self, dag::lamport::LamportTiebreak, dag::strong_remove::StrongRemove, keyeo as keyeo_fn,
-    ApplyOutcome, DefaultAccessControl, Ed25519, Error, GroupId,
-    GroupState, Keyeo, MemberInit, MembershipAction, Op, Role,
+    ApplyOutcome, DefaultAccessControl, Ed25519, Error, GroupId, GroupState, Keyeo, MemberInit,
+    MembershipAction, Op, Role,
 };
 use proptest::prelude::*;
 
@@ -38,12 +38,15 @@ fn cpk() -> [u8; 32] {
 
 fn alice_admin_state() -> GroupState<[u8; 32], TestRole, Ed25519> {
     let pk = alice_pk();
-    GroupState::create(GroupId::unscoped(), &[MemberInit {
-        id: pk,
-        role: TestRole::Admin,
-        author_public_key: pk,
-        hpke_public_key: [0xaa; 32],
-    }])
+    GroupState::create(
+        GroupId::unscoped(),
+        &[MemberInit {
+            id: pk,
+            role: TestRole::Admin,
+            author_public_key: pk,
+            hpke_public_key: [0xaa; 32],
+        }],
+    )
 }
 
 fn make_op(
@@ -115,10 +118,12 @@ fn golden_add_action_canonical_bytes_are_stable() {
         &action,
         &[0x55u8; 3],
     );
-    let hex = bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    });
+    let hex = bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
     // Layout: "keyeo:op:v3" | group_id | parents | author | Add{member, role, author_public_key,
     // hpke_public_key, member_proof} | sealing. The member-field run is the middle — reordering the
     // encoder would move it and break this.
@@ -203,9 +208,35 @@ fn adopt_from_a_checkpoint_resolves_identically_to_full_history() {
     //   1 Create{alice}  2 Add bob  3 Add carol  4 Remove bob  5 Reseal(tail)
     let mk = |id: u64, parents: Vec<u64>, action| make_op(id, parents, &[1u8; 32], action);
     let ops = vec![
-        mk(1, vec![], MembershipAction::Create { initial_members: genesis.to_vec() }),
-        mk(2, vec![1], MembershipAction::Add { member: bob, role: TestRole::Editor, author_public_key: bob, hpke_public_key: [0xbb; 32], member_proof: None }),
-        mk(3, vec![2], MembershipAction::Add { member: carol, role: TestRole::Editor, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None }),
+        mk(
+            1,
+            vec![],
+            MembershipAction::Create {
+                initial_members: genesis.to_vec(),
+            },
+        ),
+        mk(
+            2,
+            vec![1],
+            MembershipAction::Add {
+                member: bob,
+                role: TestRole::Editor,
+                author_public_key: bob,
+                hpke_public_key: [0xbb; 32],
+                member_proof: None,
+            },
+        ),
+        mk(
+            3,
+            vec![2],
+            MembershipAction::Add {
+                member: carol,
+                role: TestRole::Editor,
+                author_public_key: carol,
+                hpke_public_key: [0xcc; 32],
+                member_proof: None,
+            },
+        ),
         mk(4, vec![3], MembershipAction::Remove { member: bob }),
         mk(5, vec![4], MembershipAction::Reseal),
     ];
@@ -250,8 +281,14 @@ fn adopt_from_a_checkpoint_resolves_identically_to_full_history() {
     let mut adopt_m = adopted.state().active_members();
     full_m.sort();
     adopt_m.sort();
-    assert_eq!(adopt_m, full_m, "adopt resolves the same active membership as full history");
-    assert!(!is_member(&adopted, &bob), "the retained Remove acted on bob though bob's Add (op 2) was pruned");
+    assert_eq!(
+        adopt_m, full_m,
+        "adopt resolves the same active membership as full history"
+    );
+    assert!(
+        !is_member(&adopted, &bob),
+        "the retained Remove acted on bob though bob's Add (op 2) was pruned"
+    );
     assert!(is_member(&adopted, &alice) && is_member(&adopted, &carol));
     assert!(
         adopted.has_been_shared() && full.has_been_shared(),
@@ -276,29 +313,70 @@ fn adopt_from_a_multi_tip_checkpoint_resolves_identically() {
     //   branch B (shorter): 4 Add carol (p1)                       depth 1
     //   merge:              5 Reseal (p[3,4])  6 Remove bob (p5)   depths 3, 4
     let ops = vec![
-        mk(1, vec![], MembershipAction::Create { initial_members: genesis.to_vec() }),
-        mk(2, vec![1], MembershipAction::Add { member: bob, role: TestRole::Editor, author_public_key: bob, hpke_public_key: [0xbb; 32], member_proof: None }),
+        mk(
+            1,
+            vec![],
+            MembershipAction::Create {
+                initial_members: genesis.to_vec(),
+            },
+        ),
+        mk(
+            2,
+            vec![1],
+            MembershipAction::Add {
+                member: bob,
+                role: TestRole::Editor,
+                author_public_key: bob,
+                hpke_public_key: [0xbb; 32],
+                member_proof: None,
+            },
+        ),
         mk(3, vec![2], MembershipAction::Reseal),
-        mk(4, vec![1], MembershipAction::Add { member: carol, role: TestRole::Editor, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None }),
+        mk(
+            4,
+            vec![1],
+            MembershipAction::Add {
+                member: carol,
+                role: TestRole::Editor,
+                author_public_key: carol,
+                hpke_public_key: [0xcc; 32],
+                member_proof: None,
+            },
+        ),
         mk(5, vec![3, 4], MembershipAction::Reseal),
         mk(6, vec![5], MembershipAction::Remove { member: bob }),
     ];
 
-    let mut full: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    let mut full: TestEngine = Keyeo::new(
+        GroupState::create(GroupId::unscoped(), &genesis),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+    );
     for op in &ops {
         full.apply(op.clone()).unwrap();
     }
     full.flush().unwrap();
 
     // Dominating cut {3, 4} — tips at depths 2 and 1. Base = fold(1..4) = {alice, bob, carol}.
-    let mut base: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    let mut base: TestEngine = Keyeo::new(
+        GroupState::create(GroupId::unscoped(), &genesis),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+    );
     for op in ops.iter().take(4) {
         base.apply(op.clone()).unwrap();
     }
     base.flush().unwrap();
     let base_frontier_depths = HashMap::from([(3u64, 2usize), (4u64, 1usize)]);
 
-    let mut adopted = Keyeo::adopt(base.state().clone(), base_frontier_depths, base.has_been_shared(), DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    let mut adopted = Keyeo::adopt(
+        base.state().clone(),
+        base_frontier_depths,
+        base.has_been_shared(),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+        Individual,
+    );
     adopted.apply(ops[4].clone()).unwrap(); // Reseal — parents [3, 4], BOTH pruned frontier tips
     adopted.apply(ops[5].clone()).unwrap(); // Remove bob
     adopted.flush().unwrap();
@@ -307,13 +385,25 @@ fn adopt_from_a_multi_tip_checkpoint_resolves_identically() {
     let mut adopt_m = adopted.state().active_members();
     full_m.sort();
     adopt_m.sort();
-    assert_eq!(adopt_m, full_m, "multi-tip adopt resolves the same active membership as full history");
-    assert!(!is_member(&adopted, &bob) && is_member(&adopted, &alice) && is_member(&adopted, &carol));
+    assert_eq!(
+        adopt_m, full_m,
+        "multi-tip adopt resolves the same active membership as full history"
+    );
+    assert!(
+        !is_member(&adopted, &bob) && is_member(&adopted, &alice) && is_member(&adopted, &carol)
+    );
 
     // A legitimate op that continues just ONE branch of the multi-tip cut (parents [3] only) must be ADMITTED,
     // not StaleFork-rejected — requiring descent from every tip would foreclose concurrent authorship (both
     // Sonnet reviews' confirmed bug). Build it on a fresh adopt so the merge op above hasn't collapsed the tips.
-    let mut adopted2 = Keyeo::adopt(base.state().clone(), HashMap::from([(3u64, 2usize), (4u64, 1usize)]), base.has_been_shared(), DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    let mut adopted2 = Keyeo::adopt(
+        base.state().clone(),
+        HashMap::from([(3u64, 2usize), (4u64, 1usize)]),
+        base.has_been_shared(),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+        Individual,
+    );
     let single_branch = make_op(7, vec![3], &[1u8; 32], MembershipAction::Reseal);
     let outcome = adopted2.apply(single_branch);
     assert!(
@@ -375,12 +465,15 @@ proptest! {
 #[test]
 fn test_genesis() {
     let pk = alice_pk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
-        id: pk,
-        role: TestRole::Admin,
-        author_public_key: pk,
-        hpke_public_key: [0xaa; 32],
-    }]);
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+        GroupId::unscoped(),
+        &[MemberInit {
+            id: pk,
+            role: TestRole::Admin,
+            author_public_key: pk,
+            hpke_public_key: [0xaa; 32],
+        }],
+    );
     let mut k = keyeo_fn(state, TestRole::Admin);
     assert!(k
         .apply(make_op(
@@ -490,12 +583,15 @@ fn test_unauthorized_add_has_no_effect() {
     // then the causal rebuild drops it — so it has no effect and emits no event. (Authorization is
     // no longer a synchronous apply() error; only authentication — bad sig / unknown author — is.)
     let pk = alice_pk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
-        id: pk,
-        role: TestRole::Viewer,
-        author_public_key: pk,
-        hpke_public_key: [0xaa; 32],
-    }]);
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+        GroupId::unscoped(),
+        &[MemberInit {
+            id: pk,
+            role: TestRole::Viewer,
+            author_public_key: pk,
+            hpke_public_key: [0xaa; 32],
+        }],
+    );
     let mut k = keyeo_fn(state, TestRole::Admin);
     let r = k
         .apply(make_op(
@@ -640,7 +736,10 @@ fn an_op_for_another_group_is_refused() {
         pk,
     )
     .sign(&sk);
-    assert!(matches!(k.apply(wrong_group).unwrap_err(), Error::WrongGroup));
+    assert!(matches!(
+        k.apply(wrong_group).unwrap_err(),
+        Error::WrongGroup
+    ));
 
     // The group_id is inside the SIGNED bytes, not merely gate-checked: sign an op under a DIFFERENT group
     // (tree-Z), then relabel its group_id field to the genesis group (so the group gate passes) WITHOUT
@@ -659,7 +758,10 @@ fn an_op_for_another_group_is_refused() {
         group_id: group_a.clone(),
         ..signed_elsewhere
     };
-    assert!(matches!(k.apply(relabeled).unwrap_err(), Error::BadSignature));
+    assert!(matches!(
+        k.apply(relabeled).unwrap_err(),
+        Error::BadSignature
+    ));
 }
 
 #[test]
@@ -832,20 +934,23 @@ fn test_pending_buffer_bounded() {
 
 #[test]
 fn test_group_state_ops() {
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
-        MemberInit {
-            id: [1u8; 32],
-            role: TestRole::Admin,
-            author_public_key: [1u8; 32],
-            hpke_public_key: [0xaa; 32],
-        },
-        MemberInit {
-            id: [2u8; 32],
-            role: TestRole::Editor,
-            author_public_key: [2u8; 32],
-            hpke_public_key: [0xbb; 32],
-        },
-    ]);
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+        GroupId::unscoped(),
+        &[
+            MemberInit {
+                id: [1u8; 32],
+                role: TestRole::Admin,
+                author_public_key: [1u8; 32],
+                hpke_public_key: [0xaa; 32],
+            },
+            MemberInit {
+                id: [2u8; 32],
+                role: TestRole::Editor,
+                author_public_key: [2u8; 32],
+                hpke_public_key: [0xbb; 32],
+            },
+        ],
+    );
     assert!(state.has_access(&[1u8; 32], &TestRole::Admin));
     assert!(!state.has_access(&[2u8; 32], &TestRole::Admin));
 }
@@ -907,12 +1012,15 @@ fn test_concurrent_ops_converge() {
     let pk = alice_pk();
     let bpk = bob_pk();
     let cpk = cpk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
-        id: pk,
-        role: TestRole::Admin,
-        author_public_key: pk,
-        hpke_public_key: [0xaa; 32],
-    }]);
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+        GroupId::unscoped(),
+        &[MemberInit {
+            id: pk,
+            role: TestRole::Admin,
+            author_public_key: pk,
+            hpke_public_key: [0xaa; 32],
+        }],
+    );
     let mut k = Keyeo::new(
         state,
         DefaultAccessControl::new(TestRole::Admin),
@@ -977,51 +1085,64 @@ fn test_strong_remove_state_rebuild() {
 
     // Both replicas apply the SAME three ops (genesis, add-bob, add-charlie); only the ORDER differs.
     let genesis = || {
-        let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
-            id: pk,
-            role: TestRole::Admin,
-            author_public_key: pk,
-            hpke_public_key: [0xaa; 32],
-        }]);
-        Keyeo::new(state, DefaultAccessControl::new(TestRole::Admin), StrongRemove)
-    };
-    let create = || make_op(
-        1,
-        vec![],
-        &[1u8; 32],
-        MembershipAction::Create {
-            initial_members: vec![MemberInit {
+        let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+            GroupId::unscoped(),
+            &[MemberInit {
                 id: pk,
                 role: TestRole::Admin,
                 author_public_key: pk,
                 hpke_public_key: [0xaa; 32],
             }],
-        },
-    );
-    let add_bob = || make_op(
-        2,
-        vec![1],
-        &[1u8; 32],
-        MembershipAction::Add {
-            member: bpk,
-            role: TestRole::Editor,
-            author_public_key: bpk,
-            hpke_public_key: [0xbb; 32],
-            member_proof: None,
-        },
-    );
-    let add_charlie = || make_op(
-        3,
-        vec![1],
-        &[1u8; 32],
-        MembershipAction::Add {
-            member: cpk,
-            role: TestRole::Viewer,
-            author_public_key: cpk,
-            hpke_public_key: [0xcc; 32],
-            member_proof: None,
-        },
-    );
+        );
+        Keyeo::new(
+            state,
+            DefaultAccessControl::new(TestRole::Admin),
+            StrongRemove,
+        )
+    };
+    let create = || {
+        make_op(
+            1,
+            vec![],
+            &[1u8; 32],
+            MembershipAction::Create {
+                initial_members: vec![MemberInit {
+                    id: pk,
+                    role: TestRole::Admin,
+                    author_public_key: pk,
+                    hpke_public_key: [0xaa; 32],
+                }],
+            },
+        )
+    };
+    let add_bob = || {
+        make_op(
+            2,
+            vec![1],
+            &[1u8; 32],
+            MembershipAction::Add {
+                member: bpk,
+                role: TestRole::Editor,
+                author_public_key: bpk,
+                hpke_public_key: [0xbb; 32],
+                member_proof: None,
+            },
+        )
+    };
+    let add_charlie = || {
+        make_op(
+            3,
+            vec![1],
+            &[1u8; 32],
+            MembershipAction::Add {
+                member: cpk,
+                role: TestRole::Viewer,
+                author_public_key: cpk,
+                hpke_public_key: [0xcc; 32],
+                member_proof: None,
+            },
+        )
+    };
 
     // Replica A applies in order 1, 2, 3.
     let mut k_a = genesis();
@@ -1055,20 +1176,23 @@ fn test_strong_remove_ignores_removed_author_ops() {
     let bpk = bob_pk();
     let cpk = make_keypair(&[3u8; 32]).verifying_key().to_bytes();
 
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
-        MemberInit {
-            id: pk,
-            role: TestRole::Admin,
-            author_public_key: pk,
-            hpke_public_key: [0xaa; 32],
-        },
-        MemberInit {
-            id: bpk,
-            role: TestRole::Admin,
-            author_public_key: bpk,
-            hpke_public_key: [0xbb; 32],
-        },
-    ]);
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+        GroupId::unscoped(),
+        &[
+            MemberInit {
+                id: pk,
+                role: TestRole::Admin,
+                author_public_key: pk,
+                hpke_public_key: [0xaa; 32],
+            },
+            MemberInit {
+                id: bpk,
+                role: TestRole::Admin,
+                author_public_key: bpk,
+                hpke_public_key: [0xbb; 32],
+            },
+        ],
+    );
     let mut k = Keyeo::new(
         state,
         DefaultAccessControl::new(TestRole::Admin),
@@ -1147,20 +1271,23 @@ fn strong_remove_transitively_invalidates_accomplice_chain() {
     let b = bob_pk();
     let c = cpk(); // Charlie's key == keypair seed [3;32]
     let dave = make_keypair(&[4u8; 32]).verifying_key().to_bytes();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
-        MemberInit {
-            id: a,
-            role: TestRole::Admin,
-            author_public_key: a,
-            hpke_public_key: [0xaa; 32],
-        },
-        MemberInit {
-            id: b,
-            role: TestRole::Admin,
-            author_public_key: b,
-            hpke_public_key: [0xbb; 32],
-        },
-    ]);
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+        GroupId::unscoped(),
+        &[
+            MemberInit {
+                id: a,
+                role: TestRole::Admin,
+                author_public_key: a,
+                hpke_public_key: [0xaa; 32],
+            },
+            MemberInit {
+                id: b,
+                role: TestRole::Admin,
+                author_public_key: b,
+                hpke_public_key: [0xbb; 32],
+            },
+        ],
+    );
     let mut k = Keyeo::new(
         state,
         DefaultAccessControl::new(TestRole::Admin),
@@ -1251,20 +1378,23 @@ fn mutual_remove_resolves_by_tiebreak() {
     // Bob (op 3).
     let a = alice_pk();
     let b = bob_pk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
-        MemberInit {
-            id: a,
-            role: TestRole::Admin,
-            author_public_key: a,
-            hpke_public_key: [0xaa; 32],
-        },
-        MemberInit {
-            id: b,
-            role: TestRole::Admin,
-            author_public_key: b,
-            hpke_public_key: [0xbb; 32],
-        },
-    ]);
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(
+        GroupId::unscoped(),
+        &[
+            MemberInit {
+                id: a,
+                role: TestRole::Admin,
+                author_public_key: a,
+                hpke_public_key: [0xaa; 32],
+            },
+            MemberInit {
+                id: b,
+                role: TestRole::Admin,
+                author_public_key: b,
+                hpke_public_key: [0xbb; 32],
+            },
+        ],
+    );
     let mut k = Keyeo::new(
         state,
         DefaultAccessControl::new(TestRole::Admin),
@@ -1450,10 +1580,28 @@ fn two_party_mutual_remove_leaves_one_survivor() {
         minit(bob, TestRole::Admin, [0xbb; 32]),
         minit(claire, TestRole::Editor, [0xcc; 32]),
     ]);
-    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Remove { member: bob })).unwrap(); // alice → bob
-    k.apply(make_op(3, vec![1], &[2u8; 32], MembershipAction::Remove { member: alice })).unwrap(); // bob → alice
-    assert!(is_member(&k, &alice), "keyeo: lower-id remover (alice) survives");
-    assert!(!is_member(&k, &bob), "keyeo: bob removed by alice's surviving remove");
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Remove { member: bob },
+    ))
+    .unwrap(); // alice → bob
+    k.apply(make_op(
+        3,
+        vec![1],
+        &[2u8; 32],
+        MembershipAction::Remove { member: alice },
+    ))
+    .unwrap(); // bob → alice
+    assert!(
+        is_member(&k, &alice),
+        "keyeo: lower-id remover (alice) survives"
+    );
+    assert!(
+        !is_member(&k, &bob),
+        "keyeo: bob removed by alice's surviving remove"
+    );
     assert!(is_member(&k, &claire));
 }
 
@@ -1468,26 +1616,80 @@ fn three_way_remove_cycle_resolves_to_one_removal() {
         minit(c, TestRole::Admin, [0xcc; 32]),
         minit(dave, TestRole::Editor, [0xdd; 32]),
     ]);
-    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Remove { member: b })).unwrap(); // A → B
-    k.apply(make_op(3, vec![1], &[2u8; 32], MembershipAction::Remove { member: c })).unwrap(); // B → C
-    k.apply(make_op(4, vec![1], &[3u8; 32], MembershipAction::Remove { member: a })).unwrap(); // C → A
-    let survivors: std::collections::BTreeSet<[u8; 32]> =
-        k.state().active_members().into_iter().map(|(m, _)| m).collect();
-    assert_eq!(survivors.len(), 3, "keyeo one-removal semantics (p2panda would leave 1)");
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Remove { member: b },
+    ))
+    .unwrap(); // A → B
+    k.apply(make_op(
+        3,
+        vec![1],
+        &[2u8; 32],
+        MembershipAction::Remove { member: c },
+    ))
+    .unwrap(); // B → C
+    k.apply(make_op(
+        4,
+        vec![1],
+        &[3u8; 32],
+        MembershipAction::Remove { member: a },
+    ))
+    .unwrap(); // C → A
+    let survivors: std::collections::BTreeSet<[u8; 32]> = k
+        .state()
+        .active_members()
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
+    assert_eq!(
+        survivors.len(),
+        3,
+        "keyeo one-removal semantics (p2panda would leave 1)"
+    );
     assert!(survivors.contains(&dave));
 }
 
 fn convergence_ops() -> Vec<Op<u64, [u8; 32], TestRole, Ed25519>> {
     let (bob, carol, dave, erin) = (bob_pk(), cpk(), dave_pk(), erin_pk());
     vec![
-        make_op(2, vec![1], &[1u8; 32], MembershipAction::Remove { member: bob }), // alice → bob
-        make_op(3, vec![1], &[2u8; 32], MembershipAction::Remove { member: carol }), // bob → carol (concurrent)
-        make_op(4, vec![1], &[3u8; 32], MembershipAction::Add {
-            member: dave, role: TestRole::Editor, author_public_key: dave, hpke_public_key: [0xd0; 32], member_proof: None,
-        }), // carol adds dave (concurrent)
-        make_op(5, vec![2], &[1u8; 32], MembershipAction::Add {
-            member: erin, role: TestRole::Editor, author_public_key: erin, hpke_public_key: [0xe0; 32], member_proof: None,
-        }), // alice adds erin (after op2)
+        make_op(
+            2,
+            vec![1],
+            &[1u8; 32],
+            MembershipAction::Remove { member: bob },
+        ), // alice → bob
+        make_op(
+            3,
+            vec![1],
+            &[2u8; 32],
+            MembershipAction::Remove { member: carol },
+        ), // bob → carol (concurrent)
+        make_op(
+            4,
+            vec![1],
+            &[3u8; 32],
+            MembershipAction::Add {
+                member: dave,
+                role: TestRole::Editor,
+                author_public_key: dave,
+                hpke_public_key: [0xd0; 32],
+                member_proof: None,
+            },
+        ), // carol adds dave (concurrent)
+        make_op(
+            5,
+            vec![2],
+            &[1u8; 32],
+            MembershipAction::Add {
+                member: erin,
+                role: TestRole::Editor,
+                author_public_key: erin,
+                hpke_public_key: [0xe0; 32],
+                member_proof: None,
+            },
+        ), // alice adds erin (after op2)
     ]
 }
 
@@ -1503,7 +1705,11 @@ fn resolve_convergence(order: &[usize]) -> std::collections::BTreeSet<[u8; 32]> 
         let _ = k.apply(ops[i].clone());
     }
     let _ = k.flush();
-    k.state().active_members().into_iter().map(|(m, _)| m).collect()
+    k.state()
+        .active_members()
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect()
 }
 
 proptest! {
@@ -1534,15 +1740,41 @@ fn strong_demote_voids_the_demoted_authors_concurrent_ops() {
         minit(bob, TestRole::Admin, [0xbb; 32]),
     ]);
     // Concurrent (both parent = genesis op 1): Bob adds Charlie (op 2); Alice demotes Bob to Viewer (op 3).
-    k.apply(make_op(2, vec![1], &[2u8; 32], MembershipAction::Add {
-        member: charlie, role: TestRole::Viewer, author_public_key: charlie, hpke_public_key: [0xcc; 32], member_proof: None,
-    })).unwrap();
-    k.apply(make_op(3, vec![1], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Viewer })).unwrap();
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[2u8; 32],
+        MembershipAction::Add {
+            member: charlie,
+            role: TestRole::Viewer,
+            author_public_key: charlie,
+            hpke_public_key: [0xcc; 32],
+            member_proof: None,
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        3,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::ChangeRole {
+            member: bob,
+            new_role: TestRole::Viewer,
+        },
+    ))
+    .unwrap();
     let _ = k.flush();
 
     let members = k.state().active_members();
-    let bob_role = members.iter().find(|(id, _)| *id == bob).map(|(_, r)| r.clone());
-    assert_eq!(bob_role, Some(TestRole::Viewer), "Bob remains, demoted to Viewer (not removed)");
+    let bob_role = members
+        .iter()
+        .find(|(id, _)| *id == bob)
+        .map(|(_, r)| r.clone());
+    assert_eq!(
+        bob_role,
+        Some(TestRole::Viewer),
+        "Bob remains, demoted to Viewer (not removed)"
+    );
     assert!(!members.iter().any(|(id, _)| *id == charlie),
         "Charlie NOT added — Bob's concurrent Add is voided by the demote (the puppet-add race is closed)");
 }
@@ -1551,11 +1783,33 @@ fn demote_convergence_ops() -> Vec<Op<u64, [u8; 32], TestRole, Ed25519>> {
     let (bob, carol, dave) = (bob_pk(), cpk(), dave_pk());
     vec![
         // Alice demotes Bob Admin→Viewer (op 2); CONCURRENTLY Bob adds Dave (op 3) and Bob removes Carol (op 4).
-        make_op(2, vec![1], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Viewer }),
-        make_op(3, vec![1], &[2u8; 32], MembershipAction::Add {
-            member: dave, role: TestRole::Editor, author_public_key: dave, hpke_public_key: [0xd0; 32], member_proof: None,
-        }),
-        make_op(4, vec![1], &[2u8; 32], MembershipAction::Remove { member: carol }),
+        make_op(
+            2,
+            vec![1],
+            &[1u8; 32],
+            MembershipAction::ChangeRole {
+                member: bob,
+                new_role: TestRole::Viewer,
+            },
+        ),
+        make_op(
+            3,
+            vec![1],
+            &[2u8; 32],
+            MembershipAction::Add {
+                member: dave,
+                role: TestRole::Editor,
+                author_public_key: dave,
+                hpke_public_key: [0xd0; 32],
+                member_proof: None,
+            },
+        ),
+        make_op(
+            4,
+            vec![1],
+            &[2u8; 32],
+            MembershipAction::Remove { member: carol },
+        ),
     ]
 }
 
@@ -1571,7 +1825,11 @@ fn resolve_demote_convergence(order: &[usize]) -> std::collections::BTreeSet<[u8
         let _ = k.apply(ops[i].clone());
     }
     let _ = k.flush();
-    k.state().active_members().into_iter().map(|(m, _)| m).collect()
+    k.state()
+        .active_members()
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect()
 }
 
 proptest! {
@@ -1615,8 +1873,12 @@ impl keyeo_dag::QuorumPolicy<[u8; 32], TestRole, Ed25519> for AllAdmins {
     }
 }
 
-type QuorumEngine =
-    Keyeo<Op<u64, [u8; 32], TestRole, Ed25519>, DefaultAccessControl<TestRole>, StrongRemove, AllAdmins>;
+type QuorumEngine = Keyeo<
+    Op<u64, [u8; 32], TestRole, Ed25519>,
+    DefaultAccessControl<TestRole>,
+    StrongRemove,
+    AllAdmins,
+>;
 
 fn quorum_engine(genesis: &[MemberInit<[u8; 32], TestRole, Ed25519>]) -> QuorumEngine {
     let mut k = Keyeo::with_quorum(
@@ -1625,9 +1887,14 @@ fn quorum_engine(genesis: &[MemberInit<[u8; 32], TestRole, Ed25519>]) -> QuorumE
         StrongRemove,
         AllAdmins,
     );
-    k.apply(make_op(1, vec![], &[1u8; 32], MembershipAction::Create {
-        initial_members: genesis.to_vec(),
-    }))
+    k.apply(make_op(
+        1,
+        vec![],
+        &[1u8; 32],
+        MembershipAction::Create {
+            initial_members: genesis.to_vec(),
+        },
+    ))
     .unwrap();
     k
 }
@@ -1655,14 +1922,41 @@ fn quorum_unanimity_applies_the_target() {
     ]);
     let pid = [7u8; 32];
     // alice proposes to add dave; bob and carol approve; alice commits — all three Admins → quorum met.
-    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Propose {
-        proposal_id: pid,
-        target: Box::new(add_editor(dave, 0xd0)),
-    })).unwrap();
-    k.apply(make_op(3, vec![2], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
-    k.apply(make_op(4, vec![3], &[3u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
-    k.apply(make_op(5, vec![4], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
-    assert!(qmember(&k, &dave), "unanimity of Admins committed → target applied");
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Propose {
+            proposal_id: pid,
+            target: Box::new(add_editor(dave, 0xd0)),
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        3,
+        vec![2],
+        &[2u8; 32],
+        MembershipAction::Approve { proposal_id: pid },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        4,
+        vec![3],
+        &[3u8; 32],
+        MembershipAction::Approve { proposal_id: pid },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        5,
+        vec![4],
+        &[1u8; 32],
+        MembershipAction::Commit { proposal_id: pid },
+    ))
+    .unwrap();
+    assert!(
+        qmember(&k, &dave),
+        "unanimity of Admins committed → target applied"
+    );
 }
 
 #[test]
@@ -1675,13 +1969,34 @@ fn quorum_one_short_does_not_apply() {
     ]);
     let pid = [7u8; 32];
     // alice proposes (implicit approval) + bob approves, then alice commits — carol never approved.
-    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Propose {
-        proposal_id: pid,
-        target: Box::new(add_editor(dave, 0xd0)),
-    })).unwrap();
-    k.apply(make_op(3, vec![2], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
-    k.apply(make_op(4, vec![3], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
-    assert!(!qmember(&k, &dave), "only 2 of 3 Admins approved → quorum not met → target NOT applied");
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Propose {
+            proposal_id: pid,
+            target: Box::new(add_editor(dave, 0xd0)),
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        3,
+        vec![2],
+        &[2u8; 32],
+        MembershipAction::Approve { proposal_id: pid },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        4,
+        vec![3],
+        &[1u8; 32],
+        MembershipAction::Commit { proposal_id: pid },
+    ))
+    .unwrap();
+    assert!(
+        !qmember(&k, &dave),
+        "only 2 of 3 Admins approved → quorum not met → target NOT applied"
+    );
 }
 
 #[test]
@@ -1696,15 +2011,44 @@ fn quorum_a_concurrent_signer_add_joins_the_denominator() {
     ]);
     let pid = [7u8; 32];
     // carol is added as a 3rd Admin ...
-    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Add {
-        member: carol, role: TestRole::Admin, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None,
-    })).unwrap();
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Add {
+            member: carol,
+            role: TestRole::Admin,
+            author_public_key: carol,
+            hpke_public_key: [0xcc; 32],
+            member_proof: None,
+        },
+    ))
+    .unwrap();
     // ... while alice concurrently proposes (parents [1]) + bob approves + alice commits.
-    k.apply(make_op(3, vec![1], &[1u8; 32], MembershipAction::Propose {
-        proposal_id: pid, target: Box::new(add_editor(mallory, 0xee)),
-    })).unwrap();
-    k.apply(make_op(4, vec![3], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
-    k.apply(make_op(5, vec![4], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    k.apply(make_op(
+        3,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Propose {
+            proposal_id: pid,
+            target: Box::new(add_editor(mallory, 0xee)),
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        4,
+        vec![3],
+        &[2u8; 32],
+        MembershipAction::Approve { proposal_id: pid },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        5,
+        vec![4],
+        &[1u8; 32],
+        MembershipAction::Commit { proposal_id: pid },
+    ))
+    .unwrap();
     assert!(
         !qmember(&k, &mallory),
         "carol (concurrently added) is in the denominator; alice+bob alone is not unanimity"
@@ -1725,17 +2069,64 @@ fn quorum_backdating_across_a_deep_concurrent_signer_add_still_fails() {
     ]);
     let pid = [7u8; 32];
     // Attacker chain (alice+bob), rooted at the Create, adds mallory without carol.
-    k.apply(make_op(10, vec![1], &[1u8; 32], MembershipAction::Propose {
-        proposal_id: pid, target: Box::new(add_editor(mallory, 0xee)),
-    })).unwrap();
-    k.apply(make_op(11, vec![10], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
-    k.apply(make_op(12, vec![11], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    k.apply(make_op(
+        10,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Propose {
+            proposal_id: pid,
+            target: Box::new(add_editor(mallory, 0xee)),
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        11,
+        vec![10],
+        &[2u8; 32],
+        MembershipAction::Approve { proposal_id: pid },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        12,
+        vec![11],
+        &[1u8; 32],
+        MembershipAction::Commit { proposal_id: pid },
+    ))
+    .unwrap();
     // Concurrent deep chain (also rooted at the Create) that adds carol at depth 3, ids > 12.
-    k.apply(make_op(20, vec![1], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Admin })).unwrap();
-    k.apply(make_op(21, vec![20], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Admin })).unwrap();
-    k.apply(make_op(22, vec![21], &[1u8; 32], MembershipAction::Add {
-        member: carol, role: TestRole::Admin, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None,
-    })).unwrap();
+    k.apply(make_op(
+        20,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::ChangeRole {
+            member: bob,
+            new_role: TestRole::Admin,
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        21,
+        vec![20],
+        &[1u8; 32],
+        MembershipAction::ChangeRole {
+            member: bob,
+            new_role: TestRole::Admin,
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        22,
+        vec![21],
+        &[1u8; 32],
+        MembershipAction::Add {
+            member: carol,
+            role: TestRole::Admin,
+            author_public_key: carol,
+            hpke_public_key: [0xcc; 32],
+            member_proof: None,
+        },
+    ))
+    .unwrap();
     assert!(qmember(&k, &carol), "sanity: carol was added");
     assert!(
         !qmember(&k, &mallory),
@@ -1756,16 +2147,45 @@ fn quorum_a_signer_added_after_the_proposal_does_not_raise_the_bar() {
         minit(bob, TestRole::Admin, [0xbb; 32]),
     ]);
     let pid = [7u8; 32];
-    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Propose {
-        proposal_id: pid, target: Box::new(add_editor(mallory, 0xee)),
-    })).unwrap();
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Propose {
+            proposal_id: pid,
+            target: Box::new(add_editor(mallory, 0xee)),
+        },
+    ))
+    .unwrap();
     // carol is added as a 3rd Admin strictly AFTER the proposal ...
-    k.apply(make_op(3, vec![2], &[1u8; 32], MembershipAction::Add {
-        member: carol, role: TestRole::Admin, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None,
-    })).unwrap();
+    k.apply(make_op(
+        3,
+        vec![2],
+        &[1u8; 32],
+        MembershipAction::Add {
+            member: carol,
+            role: TestRole::Admin,
+            author_public_key: carol,
+            hpke_public_key: [0xcc; 32],
+            member_proof: None,
+        },
+    ))
+    .unwrap();
     // ... bob (a proposal-time signer) approves, alice commits.
-    k.apply(make_op(4, vec![3], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
-    k.apply(make_op(5, vec![4], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    k.apply(make_op(
+        4,
+        vec![3],
+        &[2u8; 32],
+        MembershipAction::Approve { proposal_id: pid },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        5,
+        vec![4],
+        &[1u8; 32],
+        MembershipAction::Commit { proposal_id: pid },
+    ))
+    .unwrap();
     assert!(qmember(&k, &carol), "sanity: carol was added");
     assert!(
         qmember(&k, &mallory),
@@ -1780,10 +2200,18 @@ fn quorum_a_signer_added_after_the_proposal_does_not_raise_the_bar() {
 #[test]
 fn op_depth_of_a_frontier_tip_is_invariant_over_pre_cut_vs_full_ops() {
     let genesis = [minit(alice_pk(), TestRole::Admin, [0xaa; 32])];
-    let reseal = |id: u64, parents: Vec<u64>| make_op(id, parents, &[1u8; 32], MembershipAction::Reseal);
+    let reseal =
+        |id: u64, parents: Vec<u64>| make_op(id, parents, &[1u8; 32], MembershipAction::Reseal);
     // genesis(1) → 2 → 3 (branch A); 1 → 4 (branch B, fork); 3 → 5; 4 → 6 (5, 6 sit ABOVE the {3,4} frontier).
     let ops = vec![
-        make_op(1, vec![], &[1u8; 32], MembershipAction::Create { initial_members: genesis.to_vec() }),
+        make_op(
+            1,
+            vec![],
+            &[1u8; 32],
+            MembershipAction::Create {
+                initial_members: genesis.to_vec(),
+            },
+        ),
         reseal(2, vec![1]),
         reseal(3, vec![2]),
         reseal(4, vec![1]),
@@ -1791,14 +2219,22 @@ fn op_depth_of_a_frontier_tip_is_invariant_over_pre_cut_vs_full_ops() {
         reseal(6, vec![4]),
     ];
 
-    let mut full: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    let mut full: TestEngine = Keyeo::new(
+        GroupState::create(GroupId::unscoped(), &genesis),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+    );
     for op in &ops {
         full.apply(op.clone()).unwrap();
     }
     full.flush().unwrap();
 
     // Pre-cut engine: only the ops at/below the {3,4} frontier (1..=4).
-    let mut pre: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    let mut pre: TestEngine = Keyeo::new(
+        GroupState::create(GroupId::unscoped(), &genesis),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+    );
     for op in ops.iter().take(4) {
         pre.apply(op.clone()).unwrap();
     }
@@ -1807,7 +2243,11 @@ fn op_depth_of_a_frontier_tip_is_invariant_over_pre_cut_vs_full_ops() {
     let full_d = full.op_depths();
     let pre_d = pre.op_depths();
     for tip in [3u64, 4] {
-        assert_eq!(full_d.get(&tip), pre_d.get(&tip), "tip {tip} depth differs between full and pre-cut engines");
+        assert_eq!(
+            full_d.get(&tip),
+            pre_d.get(&tip),
+            "tip {tip} depth differs between full and pre-cut engines"
+        );
     }
     // The absolute depths the author would record: 1→2→3 gives depth 2; 1→4 gives depth 1.
     assert_eq!(pre_d.get(&3), Some(&2));
@@ -1830,14 +2270,28 @@ fn depth_seed_changes_the_tiebreak_order_for_single_branch_ops_on_different_tips
     let y = make_op(2, vec![tip2], &[1u8; 32], MembershipAction::Reseal); // continues tip2 only
 
     // Correctly seeded: tip1 deep (5), tip2 shallow (0).
-    let mut seeded = Keyeo::adopt(base(), HashMap::from([(tip1, 5usize), (tip2, 0)]), false, DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    let mut seeded = Keyeo::adopt(
+        base(),
+        HashMap::from([(tip1, 5usize), (tip2, 0)]),
+        false,
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+        Individual,
+    );
     seeded.apply(x.clone()).unwrap();
     seeded.apply(y.clone()).unwrap();
     seeded.flush().unwrap();
     let sd = seeded.op_depths();
 
     // Zero-seeded: both tips at 0 (what a naive prune would give).
-    let mut zero = Keyeo::adopt(base(), HashMap::from([(tip1, 0usize), (tip2, 0)]), false, DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    let mut zero = Keyeo::adopt(
+        base(),
+        HashMap::from([(tip1, 0usize), (tip2, 0)]),
+        false,
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+        Individual,
+    );
     zero.apply(x).unwrap();
     zero.apply(y).unwrap();
     zero.flush().unwrap();
@@ -1850,5 +2304,8 @@ fn depth_seed_changes_the_tiebreak_order_for_single_branch_ops_on_different_tips
     // Zero-seeded: they tie at 1 → the (depth, op_id) order between X and Y is DIFFERENT without the seed.
     assert_eq!(zd.get(&1), Some(&1));
     assert_eq!(zd.get(&2), Some(&1));
-    assert_eq!(zd[&1], zd[&2], "zero-seed: X and Y tie — the seed is load-bearing for the tiebreak");
+    assert_eq!(
+        zd[&1], zd[&2],
+        "zero-seed: X and Y tie — the seed is load-bearing for the tiebreak"
+    );
 }

@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::auth::Identity;
 use crate::api_error::ApiError;
+use crate::auth::Identity;
 use crate::AppState;
 
 // A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
@@ -168,7 +168,9 @@ pub async fn put_access(
         return Err(ApiError::BadRequest("basis exceeds the size limit".into()));
     }
     if body.members.len() > MAX_MEMBERS {
-        return Err(ApiError::BadRequest("member list exceeds the size limit".into()));
+        return Err(ApiError::BadRequest(
+            "member list exceeds the size limit".into(),
+        ));
     }
     // Parse + validate before touching the db: member_id MUST be an account UUID (the whole advisory layer
     // — gate, notifications, joins — keys on it), and the role must be in the 1..=5 axis.
@@ -184,22 +186,24 @@ pub async fn put_access(
 
     let mut tx = state.db.begin().await.map_err(internal)?;
     // Serialize concurrent pushes on this tree; read the owner under the lock.
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1 FOR UPDATE")
-        .bind(tree_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(internal)?;
+    let owner: Option<Uuid> =
+        sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1 FOR UPDATE")
+            .bind(tree_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
 
     // Signer gate: owner fast-path, else a current co-owner-or-stronger in the (pre-write) ACL.
     if identity.member_id != owner {
-        let role: Option<i16> =
-            sqlx::query_scalar("SELECT role FROM tree_access WHERE tree_id = $1 AND member_id = $2")
-                .bind(tree_id)
-                .bind(identity.member_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(internal)?;
+        let role: Option<i16> = sqlx::query_scalar(
+            "SELECT role FROM tree_access WHERE tree_id = $1 AND member_id = $2",
+        )
+        .bind(tree_id)
+        .bind(identity.member_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
         match role {
             Some(r) if r <= openom_roles::ROLE_CO_OWNER => {}
             _ => return Err(ApiError::Forbidden),

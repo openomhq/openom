@@ -24,9 +24,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::auth::Identity;
 use crate::authz::Access;
-use crate::api_error::ApiError;
 use crate::AppState;
 
 /// Hard caps on a report — a member's own frontier is small (one entry per replica it knows of); these
@@ -67,7 +67,8 @@ pub async fn put_frontier(
     Json(body): Json<FrontierBody>,
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("frontier.put");
-    if body.frontier.len() > MAX_REPLICAS || body.frontier.keys().any(|r| r.len() > MAX_REPLICA_LEN) {
+    if body.frontier.len() > MAX_REPLICAS || body.frontier.keys().any(|r| r.len() > MAX_REPLICA_LEN)
+    {
         return Err(ApiError::BadRequest(
             "frontier exceeds the size limit".into(),
         ));
@@ -127,7 +128,14 @@ pub async fn get_frontier(
         .await
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Administer,
+    )
+    .await?;
 
     let rows: Vec<(Uuid, String, i64, String)> = sqlx::query_as(
         "SELECT member_id, replica, counter, reported_at::text FROM tree_member_seen

@@ -88,12 +88,22 @@ fn compact_writes_a_snapshot_and_publishes_the_subsumed_frontier() {
     a.commit().unwrap();
 
     a.compact().unwrap();
-    assert!(store.get("tree/snapshot").unwrap().is_some(), "compaction wrote a snapshot object");
+    assert!(
+        store.get("tree/snapshot").unwrap().is_some(),
+        "compaction wrote a snapshot object"
+    );
     let covered = a.subsumed_frontier();
-    assert!(!covered.is_empty(), "subsumed frontier is non-empty after compaction");
+    assert!(
+        !covered.is_empty(),
+        "subsumed frontier is non-empty after compaction"
+    );
     // Own entries are always coverable (folded on commit), so the frontier covers this replica.
     let replica_hex = super::replica_key(b"replica-A");
-    assert_eq!(covered.get(&replica_hex).copied(), Some(1), "covers this replica's own committed entry");
+    assert_eq!(
+        covered.get(&replica_hex).copied(),
+        Some(1),
+        "covers this replica's own committed entry"
+    );
 }
 
 #[test]
@@ -107,15 +117,28 @@ fn sync_against_compacts_and_surfaces_the_snapshot_in_uploads() {
     a.commit().unwrap();
 
     let (uploads, _folded) = a.sync_against(&[], &[], 1).unwrap();
-    assert!(uploads.iter().any(|(k, _)| k.ends_with("/snapshot")), "the fresh snapshot is in the uploads");
-    assert!(!a.subsumed_frontier().is_empty(), "the covered frontier for the header is available");
+    assert!(
+        uploads.iter().any(|(k, _)| k.ends_with("/snapshot")),
+        "the fresh snapshot is in the uploads"
+    );
+    assert!(
+        !a.subsumed_frontier().is_empty(),
+        "the covered frontier for the header is available"
+    );
 
     // A fresh core with compaction disabled (0) produces no snapshot.
-    let mut b = core(b"replica-B", generate_dek().unwrap(), Arc::new(MemoryBlob::new()));
+    let mut b = core(
+        b"replica-B",
+        generate_dek().unwrap(),
+        Arc::new(MemoryBlob::new()),
+    );
     b.tree_mut().assert_anchor("p2", PERSON, 2).unwrap();
     b.commit().unwrap();
     let (ub, _) = b.sync_against(&[], &[], 0).unwrap();
-    assert!(!ub.iter().any(|(k, _)| k.ends_with("/snapshot")), "no snapshot when compaction is off");
+    assert!(
+        !ub.iter().any(|(k, _)| k.ends_with("/snapshot")),
+        "no snapshot when compaction is off"
+    );
 }
 
 #[test]
@@ -141,8 +164,14 @@ fn a_straggler_adopts_a_snapshot_when_the_covered_log_was_reaped() {
             remote_view.push((key, bytes));
         }
     }
-    assert!(remote_view.iter().any(|(k, _)| k.ends_with("/snapshot")), "the remote carries the snapshot");
-    assert!(!remote_view.iter().any(|(k, _)| k.starts_with("tree/log/")), "the covered log is reaped");
+    assert!(
+        remote_view.iter().any(|(k, _)| k.ends_with("/snapshot")),
+        "the remote carries the snapshot"
+    );
+    assert!(
+        !remote_view.iter().any(|(k, _)| k.starts_with("tree/log/")),
+        "the covered log is reaped"
+    );
 
     // A fresh straggler over its own empty store, same DEK. Fold alone sees no log; adoption recovers p.
     let mut b = core(b"replica-b", dek, Arc::new(MemoryBlob::new()));
@@ -176,26 +205,42 @@ fn plan_fetch_skips_already_pulled_log_objects_and_never_re_uploads_them() {
         }
     }
     let present: Vec<String> = remote.iter().map(|(k, _)| k.clone()).collect();
-    assert!(present.iter().filter(|k| k.contains("/log/")).count() >= 2, "A wrote ≥2 log objects");
+    assert!(
+        present.iter().filter(|k| k.contains("/log/")).count() >= 2,
+        "A wrote ≥2 log objects"
+    );
 
     // B pulls A's whole log once and folds it.
     let mut b = core(b"replica-B", dek, Arc::new(MemoryBlob::new()));
     b.sync_against(&remote, &present, 0).unwrap();
-    assert!(live_ids(&b).contains("pA") && live_ids(&b).contains("pA2"), "B folded A's log");
+    assert!(
+        live_ids(&b).contains("pA") && live_ids(&b).contains("pA2"),
+        "B folded A's log"
+    );
 
     // Next tick: B lists the SAME remote. plan_fetch must drop every log object it already pulled.
     let plan = b.plan_fetch(&present);
-    assert!(plan.iter().all(|k| !k.contains("/log/")), "already-pulled log objects are not re-fetched: {plan:?}");
+    assert!(
+        plan.iter().all(|k| !k.contains("/log/")),
+        "already-pulled log objects are not re-fetched: {plan:?}"
+    );
 
     // And fetching only the (log-free) plan, B's upload diff must NOT re-push A's remote-present log objects.
-    let fetched: Vec<_> = remote.iter().filter(|(k, _)| plan.contains(k)).cloned().collect();
+    let fetched: Vec<_> = remote
+        .iter()
+        .filter(|(k, _)| plan.contains(k))
+        .cloned()
+        .collect();
     let (uploads, _folded) = b.sync_against(&fetched, &present, 0).unwrap();
     assert!(
         uploads.iter().all(|(k, _)| !k.contains("/log/")),
         "a below-frontier log object already on the remote is never re-uploaded: {:?}",
         uploads.iter().map(|(k, _)| k).collect::<Vec<_>>()
     );
-    assert!(live_ids(&b).contains("pA"), "B's state is intact after the skipping tick");
+    assert!(
+        live_ids(&b).contains("pA"),
+        "B's state is intact after the skipping tick"
+    );
 }
 
 #[test]
@@ -207,13 +252,26 @@ fn app_secret_round_trips_through_the_core_and_is_kind_separated() {
     let secret = b"the invite mint record's s_mac_claim".to_vec();
 
     let sealed = a.seal_app_secret(&secret).unwrap();
-    assert_ne!(sealed, secret, "the stored bytes are ciphertext, not the plaintext secret");
-    assert_eq!(a.open_app_secret(&sealed).unwrap(), secret, "it opens back to the plaintext");
+    assert_ne!(
+        sealed, secret,
+        "the stored bytes are ciphertext, not the plaintext secret"
+    );
+    assert_eq!(
+        a.open_app_secret(&sealed).unwrap(),
+        secret,
+        "it opens back to the plaintext"
+    );
 
     // A media envelope must NOT open as an app secret (wrong kind), and vice versa — no cross-channel confusion.
     let (_hash, media) = a.seal_media(&secret).unwrap();
-    assert!(a.open_app_secret(&media).is_err(), "a media envelope can't open as an app secret");
-    assert!(a.open_media(&sealed).is_err(), "an app secret can't open as media");
+    assert!(
+        a.open_app_secret(&media).is_err(),
+        "a media envelope can't open as an app secret"
+    );
+    assert!(
+        a.open_media(&sealed).is_err(),
+        "an app secret can't open as media"
+    );
 }
 
 fn live_ids(core: &AppCore<MemoryBlob>) -> BTreeSet<String> {
@@ -270,7 +328,11 @@ fn two_cores_converge_through_a_ferried_snapshot() {
     tick(&mut a, &remote);
     tick(&mut b, &remote);
 
-    assert_eq!(live_ids(&a), live_ids(&b), "both devices converge through the ferried snapshot");
+    assert_eq!(
+        live_ids(&a),
+        live_ids(&b),
+        "both devices converge through the ferried snapshot"
+    );
     assert!(live_ids(&a).contains("pA") && live_ids(&a).contains("pB"));
 
     // Idempotent: a further tick with nothing new folds nothing and uploads nothing.
@@ -285,7 +347,9 @@ fn two_cores_converge_through_the_remote() {
     let mut b = core(b"replica-b", dek, Arc::new(MemoryBlob::new()));
 
     a.tree_mut().assert_anchor("pA", PERSON, 1).unwrap();
-    a.tree_mut().assert_claim("pA", NAME, json_name("Ada"), 1).unwrap();
+    a.tree_mut()
+        .assert_claim("pA", NAME, json_name("Ada"), 1)
+        .unwrap();
     a.commit().unwrap();
     b.tree_mut().assert_anchor("pB", PERSON, 2).unwrap();
     b.commit().unwrap();
@@ -318,14 +382,24 @@ fn an_offline_mint_survives_a_reload() {
     // "Reload": a fresh core over the SAME local store, its in-memory frontier reset.
     let mut a2 = core(b"replica-a", dek.clone(), Arc::clone(&store));
     a2.bootstrap().unwrap();
-    assert!(live_ids(&a2).contains("pA"), "the offline mint is back in the engine after reload");
+    assert!(
+        live_ids(&a2).contains("pA"),
+        "the offline mint is back in the engine after reload"
+    );
 
     // The un-pushed mint is still in the local store, so a push mirrors it up to the remote.
-    assert_eq!(push(&a2, &remote), 1, "the un-pushed offline mint reaches the remote");
+    assert_eq!(
+        push(&a2, &remote),
+        1,
+        "the un-pushed offline mint reaches the remote"
+    );
 
     let mut b = core(b"replica-b", dek, Arc::new(MemoryBlob::new()));
     pull(&mut b, &remote);
-    assert!(live_ids(&b).contains("pA"), "the peer receives the mint that survived the reload");
+    assert!(
+        live_ids(&b).contains("pA"),
+        "the peer receives the mint that survived the reload"
+    );
 }
 
 #[test]
@@ -343,8 +417,16 @@ fn our_own_entries_are_not_re_folded_or_re_pushed() {
     // A pulls the remote tail — which holds only its own entry. The mirror is an IfAbsent no-op (already
     // present), and the fold skips our own entry (past the frontier), so nothing folds.
     let before = log_len(&store);
-    assert_eq!(pull(&mut a, &remote), 0, "our own entry pulled back does not re-fold");
-    assert_eq!(log_len(&store), before, "our own entry pulled back is not re-appended locally");
+    assert_eq!(
+        pull(&mut a, &remote),
+        0,
+        "our own entry pulled back does not re-fold"
+    );
+    assert_eq!(
+        log_len(&store),
+        before,
+        "our own entry pulled back is not re-appended locally"
+    );
 
     // ...nor re-pushed (the remote already has it; the mirror is a no-op).
     assert_eq!(push(&a, &remote), 0, "no echo back to the remote");
@@ -367,19 +449,28 @@ fn export_then_import_reconstructs_the_core_on_a_fresh_store() {
         a.commit().unwrap();
         a.export().unwrap()
     };
-    assert!(!exported.is_empty(), "the committed batch is captured for persistence");
+    assert!(
+        !exported.is_empty(),
+        "the committed batch is captured for persistence"
+    );
 
     // "Reload": a brand-new core over a fresh store, hydrated only from the persisted bytes.
     let mut a2 = core(b"replica-a", dek.clone(), Arc::new(MemoryBlob::new()));
     a2.import(&exported).unwrap();
     a2.bootstrap().unwrap();
-    assert!(live_ids(&a2).contains("pA"), "the persisted mint is back after reload");
+    assert!(
+        live_ids(&a2).contains("pA"),
+        "the persisted mint is back after reload"
+    );
 
     // ...and it's still in the local store, so it reaches a peer through the remote.
     assert_eq!(push(&a2, &remote), 1);
     let mut b = core(b"replica-b", dek, Arc::new(MemoryBlob::new()));
     pull(&mut b, &remote);
-    assert!(live_ids(&b).contains("pA"), "the peer receives the reloaded mint");
+    assert!(
+        live_ids(&b).contains("pA"),
+        "the peer receives the reloaded mint"
+    );
 }
 
 #[test]
@@ -395,7 +486,11 @@ fn fold_is_idempotent() {
     assert_eq!(pull(&mut b, &remote), 1);
     let before = live_ids(&b);
     // Re-pull: the mirror brings nothing new and the frontier has advanced, so nothing folds.
-    assert_eq!(pull(&mut b, &remote), 0, "re-folding the same entries is a no-op");
+    assert_eq!(
+        pull(&mut b, &remote),
+        0,
+        "re-folding the same entries is a no-op"
+    );
     assert_eq!(live_ids(&b), before);
 }
 
@@ -424,7 +519,11 @@ fn a_reload_does_not_re_append_peer_entries() {
     b2.bootstrap().unwrap();
     pull(&mut b2, &remote); // frontier is empty → re-mirrors, but IfAbsent dedups
 
-    assert_eq!(log_len(&reload_store), 1, "the peer entry is deduped, not re-appended on a reload re-pull");
+    assert_eq!(
+        log_len(&reload_store),
+        1,
+        "the peer entry is deduped, not re-appended on a reload re-pull"
+    );
     assert!(live_ids(&b2).contains("pA"));
 }
 
@@ -450,9 +549,18 @@ fn a_poison_entry_is_quarantined_not_wedged() {
     let mut b = core(b"replica-b", dek, Arc::new(MemoryBlob::new()));
     pull(&mut b, &remote); // must not wedge
 
-    assert!(live_ids(&b).contains("pGood"), "the valid entry still merges");
-    assert!(!live_ids(&b).contains("pEvil"), "the wrong-key entry never decrypts into the tree");
-    assert!(b.anomalies() >= 1, "the poison entry is surfaced as an anomaly, not silently dropped or wedging");
+    assert!(
+        live_ids(&b).contains("pGood"),
+        "the valid entry still merges"
+    );
+    assert!(
+        !live_ids(&b).contains("pEvil"),
+        "the wrong-key entry never decrypts into the tree"
+    );
+    assert!(
+        b.anomalies() >= 1,
+        "the poison entry is surfaced as an anomaly, not silently dropped or wedging"
+    );
 }
 
 #[test]
@@ -474,7 +582,10 @@ fn reset_clears_the_tree_and_store_then_reseeds_cleanly() {
     a.tree_mut().assert_anchor("pNew", PERSON, 2).unwrap();
     a.commit().unwrap();
     assert!(live_ids(&a).contains("pNew"));
-    assert!(!live_ids(&a).contains("pOld"), "no resurrected old id after reset+reseed");
+    assert!(
+        !live_ids(&a).contains("pOld"),
+        "no resurrected old id after reset+reseed"
+    );
 }
 
 /// Set up a remote holding ONE peer entry (anchor `pA`, authored by replica-a) plus a fresh core B over its
@@ -502,19 +613,39 @@ fn a_rejected_peer_entry_never_folds_now_or_after_a_reload() {
     let (remote, mut b, b_store) = peer_entry_and_core_b(Route::Reject);
     pull(&mut b, &remote);
 
-    assert!(!live_ids(&b).contains("pA"), "a rejected entry never folds into the tree");
-    assert!(b.anomalies() >= 1, "a rejected forgery is surfaced as an anomaly");
-    assert_eq!(log_len(&b_store), 1, "the mirror is a dumb cache — the forgery IS in the local store");
+    assert!(
+        !live_ids(&b).contains("pA"),
+        "a rejected entry never folds into the tree"
+    );
+    assert!(
+        b.anomalies() >= 1,
+        "a rejected forgery is surfaced as an anomaly"
+    );
+    assert_eq!(
+        log_len(&b_store),
+        1,
+        "the mirror is a dumb cache — the forgery IS in the local store"
+    );
 
     // Recovery invariant: reload from the persisted objects and re-fold — still rejected, never folds.
     let exported = b.export().unwrap();
     let reload_store = Arc::new(MemoryBlob::new());
-    let mut b2 = core(b"replica-b", generate_dek().unwrap(), Arc::clone(&reload_store));
+    let mut b2 = core(
+        b"replica-b",
+        generate_dek().unwrap(),
+        Arc::clone(&reload_store),
+    );
     b2.set_membership(Box::new(Fake(Route::Reject))).unwrap();
     b2.import(&exported).unwrap();
     b2.bootstrap().unwrap();
-    assert!(!live_ids(&b2).contains("pA"), "the persisted forgery still never folds after a reload");
-    assert!(b2.anomalies() >= 1, "the reload re-verifies and re-rejects the forgery");
+    assert!(
+        !live_ids(&b2).contains("pA"),
+        "the persisted forgery still never folds after a reload"
+    );
+    assert!(
+        b2.anomalies() >= 1,
+        "the reload re-verifies and re-rejects the forgery"
+    );
 }
 
 #[test]
@@ -526,11 +657,18 @@ fn a_held_peer_entry_is_buffered_then_released_on_set_membership() {
     pull(&mut b, &remote);
     assert!(!live_ids(&b).contains("pA"), "a held entry is not folded");
     assert_eq!(b.anomalies(), 0, "a hold is not an anomaly");
-    assert_eq!(log_len(&b_store), 1, "the mirror still cached the entry locally");
+    assert_eq!(
+        log_len(&b_store),
+        1,
+        "the mirror still cached the entry locally"
+    );
 
     let folded = b.set_membership(Box::new(Fake(Route::Accept))).unwrap();
     assert_eq!(folded, 1, "the released entry folds in on set_membership");
-    assert!(live_ids(&b).contains("pA"), "the released entry is now in the tree");
+    assert!(
+        live_ids(&b).contains("pA"),
+        "the released entry is now in the tree"
+    );
 }
 
 #[test]
@@ -542,12 +680,24 @@ fn a_rejected_peer_entry_is_released_when_a_later_membership_authorizes_it() {
     // a_rejected_peer_entry_never_folds_now_or_after_a_reload, where the membership stays rejecting.)
     let (remote, mut b, _b_store) = peer_entry_and_core_b(Route::Reject);
     pull(&mut b, &remote);
-    assert!(!live_ids(&b).contains("pA"), "the rejected entry does not fold under the old membership");
-    assert!(b.anomalies() >= 1, "the rejection under the old membership is surfaced");
+    assert!(
+        !live_ids(&b).contains("pA"),
+        "the rejected entry does not fold under the old membership"
+    );
+    assert!(
+        b.anomalies() >= 1,
+        "the rejection under the old membership is surfaced"
+    );
 
     let released = b.set_membership(Box::new(Fake(Route::Accept))).unwrap();
-    assert_eq!(released, 1, "set_membership re-attempts the stalled reject and releases the now-authorized entry");
-    assert!(live_ids(&b).contains("pA"), "the retroactively-authorized entry is now in the tree");
+    assert_eq!(
+        released, 1,
+        "set_membership re-attempts the stalled reject and releases the now-authorized entry"
+    );
+    assert!(
+        live_ids(&b).contains("pA"),
+        "the retroactively-authorized entry is now in the tree"
+    );
 }
 
 #[test]
@@ -565,7 +715,9 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     use openom_crypto::Passphrase;
     use openom_keyring_api::{derive_member_id, EngineKind};
     use openom_protocol::ids::MemberId;
-    use openom_vault::{sharing, vault, AccountKeystore, ChainMembershipResolver, MembershipResolver};
+    use openom_vault::{
+        sharing, vault, AccountKeystore, ChainMembershipResolver, MembershipResolver,
+    };
 
     const TREE: &[u8] = b"tree-uuid-16byte";
     let tree = TreeId::new(TREE.to_vec());
@@ -577,7 +729,13 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     // OPE-543: the owner's on-tree id is SELF-CERTIFYING — the account keystore's derived `member_id`, so the
     // owner-path chain DEK lookups (unlock below) are keyed by it, not the "acct-owner" label.
     let owner_id = MemberId::new(owner_ks.member_id.clone());
-    let prov = vault::provision(&owner_ks.unlock(owner_pass.expose()).unwrap(), &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    let prov = vault::provision(
+        &owner_ks.unlock(owner_pass.expose()).unwrap(),
+        &tree,
+        &owner_id,
+        &ReplicaId::new(b"ro".to_vec()),
+    )
+    .unwrap();
     let owner_author = prov.did_key.to_public_key();
     let rev1 = prov.keyring.clone();
 
@@ -609,7 +767,10 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     // signed writes) and rev 1 (the pre-share genesis). The unsigned forgery below carries an EMPTY
     // governing_ref (rev 0), so it is Unattributed→Reject regardless of retention.
     let resolver = || -> Box<dyn MembershipResolver> {
-        Box::new(ChainMembershipResolver::new(&rev2, &[(1u32, rev1.clone()), (2u32, rev2.clone())]).unwrap())
+        Box::new(
+            ChainMembershipResolver::new(&rev2, &[(1u32, rev1.clone()), (2u32, rev2.clone())])
+                .unwrap(),
+        )
     };
 
     let remote = Arc::new(MemoryBlob::new());
@@ -617,9 +778,18 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     // 4. Owner re-unlocks the SHARED keyring → a signing sealer, and writes a signed delta.
     let ou_account = owner_ks.unlock(owner_pass.expose()).unwrap();
     let ou = vault::unlock(&rev2, &ou_account, &tree, &ReplicaId::new(b"ro".to_vec())).unwrap();
-    let mut owner = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
+    let mut owner = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"ro",
+    );
     owner.set_membership(resolver()).unwrap();
-    owner.tree_mut().assert_anchor("pSigned", PERSON, 1).unwrap();
+    owner
+        .tree_mut()
+        .assert_anchor("pSigned", PERSON, 1)
+        .unwrap();
     owner.commit().unwrap();
     push(&owner, &remote);
 
@@ -628,8 +798,17 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     //    forgery that, on a shared tree, must be rejected.
     let fu_account = owner_ks.unlock(owner_pass.expose()).unwrap();
     let fu = vault::unlock(&rev1, &fu_account, &tree, &ReplicaId::new(b"rf".to_vec())).unwrap();
-    let mut forger = AppCore::new(fu.did_key.into_string(), fu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rf");
-    forger.tree_mut().assert_anchor("pForged", PERSON, 2).unwrap();
+    let mut forger = AppCore::new(
+        fu.did_key.into_string(),
+        fu.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"rf",
+    );
+    forger
+        .tree_mut()
+        .assert_anchor("pForged", PERSON, 2)
+        .unwrap();
     forger.commit().unwrap();
     push(&forger, &remote);
 
@@ -646,13 +825,28 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
         2,
     )
     .unwrap();
-    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
+    let mut bob_core = AppCore::new(
+        bu.did_key,
+        bu.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"rb",
+    );
     bob_core.set_membership(resolver()).unwrap();
     pull(&mut bob_core, &remote);
 
-    assert!(live_ids(&bob_core).contains("pSigned"), "a signed member write on the shared tree is accepted");
-    assert!(!live_ids(&bob_core).contains("pForged"), "an unsigned write on the shared tree is rejected");
-    assert!(bob_core.anomalies() >= 1, "the rejected forgery is surfaced as an anomaly");
+    assert!(
+        live_ids(&bob_core).contains("pSigned"),
+        "a signed member write on the shared tree is accepted"
+    );
+    assert!(
+        !live_ids(&bob_core).contains("pForged"),
+        "an unsigned write on the shared tree is rejected"
+    );
+    assert!(
+        bob_core.anomalies() >= 1,
+        "the rejected forgery is surfaced as an anomaly"
+    );
 }
 
 #[test]
@@ -675,7 +869,11 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
     // 1. Owner provisions a solo dag tree from their durable account identity.
     let prov = DagVault
         .provision(
-            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro },
+            &VaultContext {
+                tree_id: &tree,
+                member_id: &owner_id,
+                replica_id: &ro,
+            },
             &acct(&owner_ks, &owner_pass),
         )
         .unwrap();
@@ -705,21 +903,35 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
     let shared = added.keyring.clone();
 
     // The dag resolver comes from the single shared anchor (no per-revision retention).
-    let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &shared, &[]).unwrap() };
+    let resolver =
+        || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &shared, &[]).unwrap() };
 
     let remote = Arc::new(MemoryBlob::new());
 
     // 4. Owner re-unlocks the shared anchor → a signing sealer, and writes a signed delta.
     let ou = DagVault
         .unlock(
-            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro },
+            &VaultContext {
+                tree_id: &tree,
+                member_id: &owner_id,
+                replica_id: &ro,
+            },
             &shared,
             &acct(&owner_ks, &owner_pass),
         )
         .unwrap();
-    let mut owner = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
+    let mut owner = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"ro",
+    );
     owner.set_membership(resolver()).unwrap();
-    owner.tree_mut().assert_anchor("pSigned", PERSON, 1).unwrap();
+    owner
+        .tree_mut()
+        .assert_anchor("pSigned", PERSON, 1)
+        .unwrap();
     owner.commit().unwrap();
     push(&owner, &remote);
 
@@ -728,13 +940,26 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
     let rf = ReplicaId::new(b"rf".to_vec());
     let fu = DagVault
         .unlock(
-            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &rf },
+            &VaultContext {
+                tree_id: &tree,
+                member_id: &owner_id,
+                replica_id: &rf,
+            },
             &solo,
             &acct(&owner_ks, &owner_pass),
         )
         .unwrap();
-    let mut forger = AppCore::new(fu.did_key.into_string(), fu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rf");
-    forger.tree_mut().assert_anchor("pForged", PERSON, 2).unwrap();
+    let mut forger = AppCore::new(
+        fu.did_key.into_string(),
+        fu.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"rf",
+    );
+    forger
+        .tree_mut()
+        .assert_anchor("pForged", PERSON, 2)
+        .unwrap();
     forger.commit().unwrap();
     push(&forger, &remote);
 
@@ -751,13 +976,28 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
         0,
     )
     .unwrap();
-    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
+    let mut bob_core = AppCore::new(
+        bu.did_key,
+        bu.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"rb",
+    );
     bob_core.set_membership(resolver()).unwrap();
     pull(&mut bob_core, &remote);
 
-    assert!(live_ids(&bob_core).contains("pSigned"), "a signed member write on the shared dag tree is accepted");
-    assert!(!live_ids(&bob_core).contains("pForged"), "an unsigned write on the shared dag tree is rejected");
-    assert!(bob_core.anomalies() >= 1, "the rejected forgery is surfaced as an anomaly");
+    assert!(
+        live_ids(&bob_core).contains("pSigned"),
+        "a signed member write on the shared dag tree is accepted"
+    );
+    assert!(
+        !live_ids(&bob_core).contains("pForged"),
+        "an unsigned write on the shared dag tree is rejected"
+    );
+    assert!(
+        bob_core.anomalies() >= 1,
+        "the rejected forgery is surfaced as an anomaly"
+    );
 }
 
 #[test]
@@ -777,71 +1017,142 @@ fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
     let owner_id = MemberId::new("acct-owner");
     let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
     let ro = ReplicaId::new(b"ro".to_vec());
-    let ctx_ro = VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro };
+    let ctx_ro = VaultContext {
+        tree_id: &tree,
+        member_id: &owner_id,
+        replica_id: &ro,
+    };
 
     // Provision, share (add bob as Maintainer — the role that commits deltas directly), bob writes a signed
     // entry.
     let owner_ks = owner_account(&owner_pass);
-    let solo = DagVault.provision(&ctx_ro, &acct(&owner_ks, &owner_pass)).unwrap().anchor;
+    let solo = DagVault
+        .provision(&ctx_ro, &acct(&owner_ks, &owner_pass))
+        .unwrap()
+        .anchor;
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
     let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
     let shared = sharing::add_member(
-        EngineKind::Dag, &solo, &owner_pass, &owner_ks.to_bytes().unwrap(), TREE, "acct-owner", b"ro", 0, &bob_id, "maintainer",
-        &bob.author_public_key, &bob.hpke_public_key,
+        EngineKind::Dag,
+        &solo,
+        &owner_pass,
+        &owner_ks.to_bytes().unwrap(),
+        TREE,
+        "acct-owner",
+        b"ro",
+        0,
+        &bob_id,
+        "maintainer",
+        &bob.author_public_key,
+        &bob.hpke_public_key,
     )
     .unwrap()
     .keyring;
 
     let remote = Arc::new(MemoryBlob::new());
     let bu = sharing::unlock_as_member(
-        EngineKind::Dag, &shared, &bob_pass, &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-        TREE, &bob_id, &[], b"rb", 0,
+        EngineKind::Dag,
+        &shared,
+        &bob_pass,
+        &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        TREE,
+        &bob_id,
+        &[],
+        b"rb",
+        0,
     )
     .unwrap();
-    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
-    bob_core.tree_mut().assert_anchor("pBob", PERSON, 1).unwrap();
+    let mut bob_core = AppCore::new(
+        bu.did_key,
+        bu.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"rb",
+    );
+    bob_core
+        .tree_mut()
+        .assert_anchor("pBob", PERSON, 1)
+        .unwrap();
     bob_core.commit().unwrap();
     push(&bob_core, &remote);
 
     // The owner opens the shared tree, pulls + accepts bob's entry (bob is a current member), then removes bob.
-    let ou = DagVault.unlock(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass)).unwrap();
-    let mut owner = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
-    owner.set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap()).unwrap();
+    let ou = DagVault
+        .unlock(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass))
+        .unwrap();
+    let mut owner = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"ro",
+    );
+    owner
+        .set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap())
+        .unwrap();
     pull(&mut owner, &remote);
-    assert!(live_ids(&owner).contains("pBob"), "owner accepted bob's entry while bob was a member");
+    assert!(
+        live_ids(&owner).contains("pBob"),
+        "owner accepted bob's entry while bob was a member"
+    );
 
-    let rotated = DagVault.remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id).unwrap();
-    owner.set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()).unwrap();
+    let rotated = DagVault
+        .remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id)
+        .unwrap();
+    owner
+        .set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap())
+        .unwrap();
 
     // A resolver over the ROTATED anchor (bob is no longer a member).
-    let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
+    let resolver = || -> Box<dyn MembershipResolver> {
+        resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()
+    };
 
     // Control: a fresh replica pulls the remote BEFORE the cover exists → bob's now-unattributed entry drops.
     let mut control = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r1");
     control.set_membership(resolver()).unwrap();
     pull(&mut control, &remote);
-    assert!(!live_ids(&control).contains("pBob"), "without a cover, a removed member's entry is dropped");
+    assert!(
+        !live_ids(&control).contains("pBob"),
+        "without a cover, a removed member's entry is dropped"
+    );
     assert!(control.anomalies() >= 1);
 
     // The owner (a Maintainer) authors a Cover over bob's entry and publishes it to the remote.
-    assert!(owner.author_cover().unwrap(), "a cover is authored for the removed member");
+    assert!(
+        owner.author_cover().unwrap(),
+        "a cover is authored for the removed member"
+    );
     push(&owner, &remote);
 
     // Healed: a fresh replica pulls the remote WITH the cover → the cover folds first and blesses bob's entry.
     let mut healed = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r2");
     healed.set_membership(resolver()).unwrap();
     pull(&mut healed, &remote);
-    assert!(live_ids(&healed).contains("pBob"), "the cover lets the removed member's history verify");
-    assert_eq!(healed.anomalies(), 0, "nothing is rejected — the cover is honored, and it is not a forgery");
+    assert!(
+        live_ids(&healed).contains("pBob"),
+        "the cover lets the removed member's history verify"
+    );
+    assert_eq!(
+        healed.anomalies(),
+        0,
+        "nothing is rejected — the cover is honored, and it is not a forgery"
+    );
     // The cover itself is projection-inert: it is not a claim.
     assert!(!live_ids(&healed).contains(bob_id.as_str()));
 
     // Pin P6 — the covered-accept gate distinguishes a legitimately-removed member (whose Add is effective, so
     // their history MAY be covered) from someone who was NEVER a legitimate member (never coverable).
     let r = resolver();
-    assert!(r.ever_member_info(&bob_id).is_some(), "a legitimately added-then-removed member is an ever-member");
-    assert!(r.ever_member_info("acct-never").is_none(), "someone never admitted is not an ever-member → not coverable");
+    assert!(
+        r.ever_member_info(&bob_id).is_some(),
+        "a legitimately added-then-removed member is an ever-member"
+    );
+    assert!(
+        r.ever_member_info("acct-never").is_none(),
+        "someone never admitted is not an ever-member → not coverable"
+    );
 }
 
 #[test]
@@ -859,55 +1170,120 @@ fn the_writer_authors_a_cover_that_heals_a_removed_members_history() {
     let owner = MemberId::new("acct-owner");
     let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
     let ro = ReplicaId::new(b"ro".to_vec());
-    let ctx_ro = VaultContext { tree_id: &tree, member_id: &owner, replica_id: &ro };
+    let ctx_ro = VaultContext {
+        tree_id: &tree,
+        member_id: &owner,
+        replica_id: &ro,
+    };
 
     // Provision, share (add bob as Maintainer — the role that commits deltas directly); bob writes an entry.
     let owner_ks = owner_account(&owner_pass);
-    let solo = DagVault.provision(&ctx_ro, &acct(&owner_ks, &owner_pass)).unwrap().anchor;
+    let solo = DagVault
+        .provision(&ctx_ro, &acct(&owner_ks, &owner_pass))
+        .unwrap()
+        .anchor;
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
     let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
     let shared = sharing::add_member(
-        EngineKind::Dag, &solo, &owner_pass, &owner_ks.to_bytes().unwrap(), TREE, "acct-owner", b"ro", 0, &bob_id, "maintainer",
-        &bob.author_public_key, &bob.hpke_public_key,
+        EngineKind::Dag,
+        &solo,
+        &owner_pass,
+        &owner_ks.to_bytes().unwrap(),
+        TREE,
+        "acct-owner",
+        b"ro",
+        0,
+        &bob_id,
+        "maintainer",
+        &bob.author_public_key,
+        &bob.hpke_public_key,
     )
     .unwrap()
     .keyring;
 
     let remote = Arc::new(MemoryBlob::new());
     let bu = sharing::unlock_as_member(
-        EngineKind::Dag, &shared, &bob_pass, &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-        TREE, &bob_id, &[], b"rb", 0,
+        EngineKind::Dag,
+        &shared,
+        &bob_pass,
+        &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        TREE,
+        &bob_id,
+        &[],
+        b"rb",
+        0,
     )
     .unwrap();
-    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
-    bob_core.tree_mut().assert_anchor("pBob", PERSON, 1).unwrap();
+    let mut bob_core = AppCore::new(
+        bu.did_key,
+        bu.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"rb",
+    );
+    bob_core
+        .tree_mut()
+        .assert_anchor("pBob", PERSON, 1)
+        .unwrap();
     bob_core.commit().unwrap();
     push(&bob_core, &remote);
 
     // The OWNER opens the shared tree, pulls + accepts + stores bob's entry (bob is a current member).
-    let ou = DagVault.unlock(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass)).unwrap();
-    let mut owner_core = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
-    owner_core.set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap()).unwrap();
+    let ou = DagVault
+        .unlock(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass))
+        .unwrap();
+    let mut owner_core = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"ro",
+    );
+    owner_core
+        .set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap())
+        .unwrap();
     pull(&mut owner_core, &remote);
-    assert!(live_ids(&owner_core).contains("pBob"), "owner accepted bob's entry while bob was a member");
+    assert!(
+        live_ids(&owner_core).contains("pBob"),
+        "owner accepted bob's entry while bob was a member"
+    );
 
     // Owner removes bob, refreshes its resolver → bob is no longer current (but is an ever-member).
-    let rotated = DagVault.remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id).unwrap();
-    owner_core.set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()).unwrap();
+    let rotated = DagVault
+        .remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id)
+        .unwrap();
+    owner_core
+        .set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap())
+        .unwrap();
 
     // THE WRITER: author a cover over bob's (now-removed) entry, then confirm a second sweep is idempotent.
-    assert!(owner_core.author_cover().unwrap(), "a cover is authored for the removed member");
-    assert!(!owner_core.author_cover().unwrap(), "a second sweep is idempotent — nothing left to cover");
+    assert!(
+        owner_core.author_cover().unwrap(),
+        "a cover is authored for the removed member"
+    );
+    assert!(
+        !owner_core.author_cover().unwrap(),
+        "a second sweep is idempotent — nothing left to cover"
+    );
     push(&owner_core, &remote);
 
     // A fresh replica on the rotated anchor honors the authored cover — bob's history verifies.
-    let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
+    let resolver = || -> Box<dyn MembershipResolver> {
+        resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()
+    };
     let mut healed = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r9");
     healed.set_membership(resolver()).unwrap();
     pull(&mut healed, &remote);
-    assert!(live_ids(&healed).contains("pBob"), "the authored cover heals the removed member's history");
-    assert_eq!(healed.anomalies(), 0, "the authored cover is honored, nothing rejected");
+    assert!(
+        live_ids(&healed).contains("pBob"),
+        "the authored cover heals the removed member's history"
+    );
+    assert_eq!(
+        healed.anomalies(),
+        0,
+        "the authored cover is honored, nothing rejected"
+    );
 }
 
 /// The `H(ciphertext)` of the (first) `Delta` in `store` authored by `author` — for a test to bind a cover to
@@ -919,7 +1295,11 @@ fn delta_hash_by_author(store: &Arc<MemoryBlob>, author: &str) -> Vec<u8> {
     for (k, _e) in store.list("tree/log/").unwrap() {
         let (bytes, _e) = store.get(&k).unwrap().unwrap();
         let env = Envelope::decode(bytes.as_slice()).unwrap();
-        if env.header.as_ref().is_some_and(|h| h.author_member_id == author) {
+        if env
+            .header
+            .as_ref()
+            .is_some_and(|h| h.author_member_id == author)
+        {
             return sha2::Sha256::digest(&env.ciphertext).to_vec();
         }
     }
@@ -931,7 +1311,15 @@ fn delta_hash_by_author(store: &Arc<MemoryBlob>, author: &str) -> Vec<u8> {
 /// tree_id)` — the common prelude for the two below-role self-heal regressions.
 fn shared_then_bob_removed(
     role: &str,
-) -> (Arc<MemoryBlob>, AppCore<MemoryBlob>, Vec<u8>, openom_crypto::Passphrase, TreeId, openom_vault::AccountKeystore, String) {
+) -> (
+    Arc<MemoryBlob>,
+    AppCore<MemoryBlob>,
+    Vec<u8>,
+    openom_crypto::Passphrase,
+    TreeId,
+    openom_vault::AccountKeystore,
+    String,
+) {
     use openom_crypto::Passphrase;
     use openom_keyring_api::EngineKind;
     use openom_protocol::ids::MemberId;
@@ -943,39 +1331,88 @@ fn shared_then_bob_removed(
     let owner = MemberId::new("acct-owner");
     let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
     let ro = ReplicaId::new(b"ro".to_vec());
-    let ctx_ro = VaultContext { tree_id: &tree, member_id: &owner, replica_id: &ro };
+    let ctx_ro = VaultContext {
+        tree_id: &tree,
+        member_id: &owner,
+        replica_id: &ro,
+    };
 
     let owner_ks = owner_account(&owner_pass);
-    let solo = DagVault.provision(&ctx_ro, &acct(&owner_ks, &owner_pass)).unwrap().anchor;
+    let solo = DagVault
+        .provision(&ctx_ro, &acct(&owner_ks, &owner_pass))
+        .unwrap()
+        .anchor;
     let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
     let bob = vault::provision_member(&bob_pass).unwrap();
     let bob_id = openom_keyring_api::derive_member_id(&bob.author_public_key);
     let shared = sharing::add_member(
-        EngineKind::Dag, &solo, &owner_pass, &owner_ks.to_bytes().unwrap(), TREE, "acct-owner", b"ro", 0, &bob_id, role,
-        &bob.author_public_key, &bob.hpke_public_key,
+        EngineKind::Dag,
+        &solo,
+        &owner_pass,
+        &owner_ks.to_bytes().unwrap(),
+        TREE,
+        "acct-owner",
+        b"ro",
+        0,
+        &bob_id,
+        role,
+        &bob.author_public_key,
+        &bob.hpke_public_key,
     )
     .unwrap()
     .keyring;
 
     let remote = Arc::new(MemoryBlob::new());
     let bu = sharing::unlock_as_member(
-        EngineKind::Dag, &shared, &bob_pass, &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-        TREE, &bob_id, &[], b"rb", 0,
+        EngineKind::Dag,
+        &shared,
+        &bob_pass,
+        &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        TREE,
+        &bob_id,
+        &[],
+        b"rb",
+        0,
     )
     .unwrap();
-    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryBlob::new()), DOC, b"rb");
-    bob_core.tree_mut().assert_anchor("pBob", PERSON, 1).unwrap();
+    let mut bob_core = AppCore::new(
+        bu.did_key,
+        bu.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"rb",
+    );
+    bob_core
+        .tree_mut()
+        .assert_anchor("pBob", PERSON, 1)
+        .unwrap();
     bob_core.commit().unwrap();
     push(&bob_core, &remote);
 
-    let ou = DagVault.unlock(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass)).unwrap();
-    let mut owner_core = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
-    owner_core.set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap()).unwrap();
+    let ou = DagVault
+        .unlock(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass))
+        .unwrap();
+    let mut owner_core = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"ro",
+    );
+    owner_core
+        .set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap())
+        .unwrap();
     pull(&mut owner_core, &remote);
 
-    let rotated = DagVault.remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id).unwrap();
-    owner_core.set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()).unwrap();
-    (remote, owner_core, rotated, owner_pass, tree, owner_ks, bob_id)
+    let rotated = DagVault
+        .remove_member(&ctx_ro, &shared, &acct(&owner_ks, &owner_pass), &bob_id)
+        .unwrap();
+    owner_core
+        .set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap())
+        .unwrap();
+    (
+        remote, owner_core, rotated, owner_pass, tree, owner_ks, bob_id,
+    )
 }
 
 #[test]
@@ -983,8 +1420,12 @@ fn a_removed_editors_planted_delta_is_refused_by_the_cover_writer() {
     // H1, writer side: an Editor is below the Maintainer a Delta requires, so their direct delta is §B3-rejected
     // (never folded) — yet it sits in the dumb-mirror store. author_cover must REFUSE to bless it (it covers only
     // what the reader would accept), so a routine removal can't activate a below-role member's planted write.
-    let (_remote, mut owner_core, _rotated, _pass, _tree, _owner_ks, _bob_id) = shared_then_bob_removed("editor");
-    assert!(!live_ids(&owner_core).contains("pBob"), "an editor's direct delta is role-rejected, never folded");
+    let (_remote, mut owner_core, _rotated, _pass, _tree, _owner_ks, _bob_id) =
+        shared_then_bob_removed("editor");
+    assert!(
+        !live_ids(&owner_core).contains("pBob"),
+        "an editor's direct delta is role-rejected, never folded"
+    );
     assert!(
         !owner_core.author_cover().unwrap(),
         "author_cover refuses to bless a below-Maintainer's planted delta — the writer/reader coupling holds"
@@ -1000,7 +1441,8 @@ fn a_compromised_maintainers_cover_cannot_heal_a_removed_editors_delta() {
     use openom_protocol::v1::{CoverBody, CoveredEntry};
     use openom_vault::{resolver_from, MembershipResolver};
 
-    let (remote, mut owner_core, rotated, owner_pass, tree, owner_ks, bob_id) = shared_then_bob_removed("editor");
+    let (remote, mut owner_core, rotated, owner_pass, tree, owner_ks, bob_id) =
+        shared_then_bob_removed("editor");
 
     // A compromised Maintainer force-covers the editor's plant (author_cover itself would refuse — proven above).
     let hash = delta_hash_by_author(&remote, &bob_id);
@@ -1014,22 +1456,32 @@ fn a_compromised_maintainers_cover_cannot_heal_a_removed_editors_delta() {
         .unwrap();
     push(&owner_core, &remote);
 
-    let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
+    let resolver = || -> Box<dyn MembershipResolver> {
+        resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()
+    };
     // Sanity: bob is a genuine ever-member (so the rejection is the ROLE gate, not the P6 ever-member gate).
     assert!(resolver().ever_member_info(&bob_id).is_some());
 
     let mut fresh = fresh_owner_replica(&rotated, &owner_ks, &owner_pass, &tree, b"r7");
     fresh.set_membership(resolver()).unwrap();
     pull(&mut fresh, &remote);
-    assert!(!live_ids(&fresh).contains("pBob"), "the reader rejects a below-role author's entry despite a cover");
-    assert!(fresh.anomalies() >= 1, "the forced cover doesn't launder the role check — the plant is still rejected");
+    assert!(
+        !live_ids(&fresh).contains("pBob"),
+        "the reader rejects a below-role author's entry despite a cover"
+    );
+    assert!(
+        fresh.anomalies() >= 1,
+        "the forced cover doesn't launder the role check — the plant is still rejected"
+    );
 }
 
 /// A test owner's durable ACCOUNT keystore (OPE-542/543 dag owner-as-member), minted from a passphrase. The
 /// derived identity is random-but-stable across `unlock`, so one keystore is the tree's single owner across
 /// provision + every later owner op. `acct` re-derives a fresh `UnlockedAccount` for each op.
 fn owner_account(pass: &openom_crypto::Passphrase) -> openom_vault::AccountKeystore {
-    openom_vault::AccountKeystore::create(pass.expose()).unwrap().0
+    openom_vault::AccountKeystore::create(pass.expose())
+        .unwrap()
+        .0
 }
 fn acct(
     ks: &openom_vault::AccountKeystore,
@@ -1060,7 +1512,13 @@ fn fresh_owner_replica(
             &acct(ks, pass),
         )
         .unwrap();
-    AppCore::new(u.did_key.into_string(), u.sealer, Arc::new(MemoryBlob::new()), DOC, replica)
+    AppCore::new(
+        u.did_key.into_string(),
+        u.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        replica,
+    )
 }
 
 fn json_name(given: &str) -> serde_json::Value {
@@ -1103,7 +1561,13 @@ fn shared_owner_and_editor() -> SharedTree {
     // OPE-543: the owner's on-tree id is SELF-CERTIFYING — the account keystore's derived `member_id`; the
     // chain owner unlock (`owner_core`) is keyed by it, not the "acct-owner" label.
     let owner_id = MemberId::new(owner_ks.member_id.clone());
-    let prov = vault::provision(&owner_ks.unlock(owner_pass.expose()).unwrap(), &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    let prov = vault::provision(
+        &owner_ks.unlock(owner_pass.expose()).unwrap(),
+        &tree,
+        &owner_id,
+        &ReplicaId::new(b"ro".to_vec()),
+    )
+    .unwrap();
     let owner_author = prov.did_key.to_public_key();
     let rev1 = prov.keyring.clone();
 
@@ -1112,8 +1576,18 @@ fn shared_owner_and_editor() -> SharedTree {
     let bob_id = derive_member_id(&bob.author_public_key);
     let added = sharing::add_member(
         // OPE-543: owner id is SELF-CERTIFYING — the account keystore's derived `member_id`, not "acct-owner".
-        EngineKind::Chain, &rev1, &owner_pass, &owner_ks_bytes, TREE_BYTES, &owner_ks.member_id, b"ro", 1, &bob_id, "editor",
-        &bob.author_public_key, &bob.hpke_public_key,
+        EngineKind::Chain,
+        &rev1,
+        &owner_pass,
+        &owner_ks_bytes,
+        TREE_BYTES,
+        &owner_ks.member_id,
+        b"ro",
+        1,
+        &bob_id,
+        "editor",
+        &bob.author_public_key,
+        &bob.hpke_public_key,
     )
     .unwrap();
     SharedTree {
@@ -1132,7 +1606,10 @@ fn shared_owner_and_editor() -> SharedTree {
 /// A chain resolver retaining both governing revisions (rev 2 head + rev 1 genesis).
 fn chain_res(s: &SharedTree) -> Box<dyn MembershipResolver> {
     use openom_vault::ChainMembershipResolver;
-    Box::new(ChainMembershipResolver::new(&s.rev2, &[(1u32, s.rev1.clone()), (2u32, s.rev2.clone())]).unwrap())
+    Box::new(
+        ChainMembershipResolver::new(&s.rev2, &[(1u32, s.rev1.clone()), (2u32, s.rev2.clone())])
+            .unwrap(),
+    )
 }
 
 /// The owner's core, re-unlocked on the shared keyring (a signing Maintainer sealer) with membership set.
@@ -1141,9 +1618,16 @@ fn owner_core(s: &SharedTree) -> AppCore<MemoryBlob> {
         .unwrap()
         .unlock(s.owner_pass.expose())
         .unwrap();
-    let ou = openom_vault::vault::unlock(&s.rev2, &account, &s.tree, &ReplicaId::new(b"ro".to_vec()))
-    .unwrap();
-    let mut c = AppCore::new(ou.did_key.into_string(), ou.sealer, Arc::new(MemoryBlob::new()), DOC, b"ro");
+    let ou =
+        openom_vault::vault::unlock(&s.rev2, &account, &s.tree, &ReplicaId::new(b"ro".to_vec()))
+            .unwrap();
+    let mut c = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryBlob::new()),
+        DOC,
+        b"ro",
+    );
     c.set_membership(chain_res(s)).unwrap();
     c
 }
@@ -1152,7 +1636,15 @@ fn owner_core(s: &SharedTree) -> AppCore<MemoryBlob> {
 fn editor_sealer(s: &SharedTree, replica: &[u8]) -> (String, SealerSet) {
     use openom_keyring_api::EngineKind;
     let bu = openom_vault::sharing::unlock_as_member(
-        EngineKind::Chain, &s.rev2, &s.bob_pass, &s.bob_kdf, TREE_BYTES, &s.bob_id, &s.owner_author, replica, 2,
+        EngineKind::Chain,
+        &s.rev2,
+        &s.bob_pass,
+        &s.bob_kdf,
+        TREE_BYTES,
+        &s.bob_id,
+        &s.owner_author,
+        replica,
+        2,
     )
     .unwrap();
     (bu.did_key, bu.sealer)
@@ -1175,13 +1667,19 @@ fn an_editor_proposal_is_approved_as_an_attributed_delta() {
     let mut bob = editor_core(&s, b"rb");
     let bob_did = bob.tree().author().to_owned();
     bob.tree_mut().assert_anchor("pBob", PERSON, 1).unwrap();
-    let proposal = bob.propose().unwrap().expect("a non-empty intention seals a proposal");
+    let proposal = bob
+        .propose()
+        .unwrap()
+        .expect("a non-empty intention seals a proposal");
 
     // The owner (Maintainer) verifies + approves → it commits as an attributed delta.
     let mut owner = owner_core(&s);
     let committed = owner.approve_proposal(&proposal).unwrap();
     assert!(committed >= 1, "the approved ops are committed");
-    assert!(live_ids(&owner).contains("pBob"), "the approved claim is live on the owner");
+    assert!(
+        live_ids(&owner).contains("pBob"),
+        "the approved claim is live on the owner"
+    );
 
     // Attribution preserved: createdBy stays the proposer (bob), not the approving maintainer.
     let anchor = owner
@@ -1190,20 +1688,33 @@ fn an_editor_proposal_is_approved_as_an_attributed_delta() {
         .into_iter()
         .find(|r| r["id"] == "pBob")
         .expect("the anchor is live on the owner");
-    assert_eq!(anchor["createdBy"], serde_json::json!(bob_did), "createdBy is preserved as the proposer");
+    assert_eq!(
+        anchor["createdBy"],
+        serde_json::json!(bob_did),
+        "createdBy is preserved as the proposer"
+    );
 
     // And it syncs: the owner pushes, bob pulls, and now sees his own claim as authoritative.
     push(&owner, &remote);
     pull(&mut bob, &remote);
-    assert!(live_ids(&bob).contains("pBob"), "the proposer sees the approved claim after sync");
+    assert!(
+        live_ids(&bob).contains("pBob"),
+        "the proposer sees the approved claim after sync"
+    );
 }
 
 #[test]
 fn can_commit_directly_gates_on_the_authors_role() {
     let s = shared_owner_and_editor();
     // The owner (Owner role → a moderator) may commit directly; the editor (below Maintainer) must propose.
-    assert!(owner_core(&s).can_commit_directly(), "an owner commits directly");
-    assert!(!editor_core(&s, b"rb").can_commit_directly(), "an editor must route to a proposal");
+    assert!(
+        owner_core(&s).can_commit_directly(),
+        "an owner commits directly"
+    );
+    assert!(
+        !editor_core(&s, b"rb").can_commit_directly(),
+        "an editor must route to a proposal"
+    );
     // A solo/unshared core (no membership installed) commits directly — the owner is their own moderator.
     let solo = core(b"rs", generate_dek().unwrap(), Arc::new(MemoryBlob::new()));
     assert!(solo.can_commit_directly(), "a solo tree commits directly");
@@ -1227,10 +1738,16 @@ fn approve_refuses_a_forged_proposal() {
 
     let mut owner = owner_core(&s);
     assert!(
-        matches!(owner.approve_proposal(&forged), Err(super::CoreError::Proposal(_))),
+        matches!(
+            owner.approve_proposal(&forged),
+            Err(super::CoreError::Proposal(_))
+        ),
         "a spoofed-author proposal is refused"
     );
-    assert!(!live_ids(&owner).contains("pForged"), "nothing was committed from the forged proposal");
+    assert!(
+        !live_ids(&owner).contains("pForged"),
+        "nothing was committed from the forged proposal"
+    );
 }
 
 #[test]
@@ -1247,7 +1764,10 @@ fn approve_refuses_a_proposal_misattributed_to_a_victim() {
     // claim would be manufactured out of thin air on approval.
     let (bob_did, bob_sealer) = editor_sealer(&s, b"rb");
     let victim = "did:key:z6MkVictimNotBob";
-    assert_ne!(victim, bob_did, "the fixture's victim must differ from the proposer");
+    assert_ne!(
+        victim, bob_did,
+        "the fixture's victim must differ from the proposer"
+    );
     let mut claim = Claim::new("pVictim", NAME, json_name("Eve"), victim, Hlc::new(5, 0));
     claim.compute_id().unwrap();
     let batch = codec::encode(&[ChannelItem::Assert(Record::Claim(claim))]).unwrap();
@@ -1264,8 +1784,14 @@ fn approve_refuses_a_proposal_misattributed_to_a_victim() {
 
     let mut owner = owner_core(&s);
     assert!(
-        matches!(owner.approve_proposal(&spoofed), Err(super::CoreError::Proposal(_))),
+        matches!(
+            owner.approve_proposal(&spoofed),
+            Err(super::CoreError::Proposal(_))
+        ),
         "a proposal whose op is attributed to someone other than the proposer is refused"
     );
-    assert!(!live_ids(&owner).contains("pVictim"), "the victim's claim was never committed");
+    assert!(
+        !live_ids(&owner).contains("pVictim"),
+        "the victim's claim was never committed"
+    );
 }

@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use openom_data_crdt::{codec, materialize, ChannelItem, Op, OpKind};
 use openom_data_model::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
 use openom_data_model::Hlc;
-use openom_data_crdt::{codec, materialize, ChannelItem, Op, OpKind};
 use openom_data_projection::{project, Policy, Projection};
 use serde::Serialize;
 use serde_json::Value;
@@ -83,12 +83,21 @@ mod clock_verification {
         // branch ignores it, so no arithmetic on now_millis can overflow.)
         let now_millis: i64 = kani::any();
 
-        let mut clock = HlcClock { last_millis, logical };
+        let mut clock = HlcClock {
+            last_millis,
+            logical,
+        };
         let before = (last_millis, logical);
         let out = clock.next(now_millis);
 
-        assert_eq!((out.millis(), out.logical()), (clock.last_millis, clock.logical));
-        assert!((clock.last_millis, clock.logical) > before, "strictly increasing");
+        assert_eq!(
+            (out.millis(), out.logical()),
+            (clock.last_millis, clock.logical)
+        );
+        assert!(
+            (clock.last_millis, clock.logical) > before,
+            "strictly increasing"
+        );
         assert!(clock.logical < LOGICAL_PER_MILLI, "invariant preserved");
         if now_millis > last_millis {
             // Fidelity on the advance branch: a forward wall reading is taken verbatim (a `next` that
@@ -110,7 +119,10 @@ mod clock_verification {
         kani::assume(at_logical < LOGICAL_PER_MILLI);
         kani::assume((0..MAX_MILLIS).contains(&at_millis));
 
-        let mut clock = HlcClock { last_millis, logical };
+        let mut clock = HlcClock {
+            last_millis,
+            logical,
+        };
         let before = (last_millis, logical);
         let at = Hlc::new(at_millis, at_logical);
         clock.observe(at);
@@ -184,7 +196,10 @@ impl Tree {
     /// Record that `committer` authenticated an entry carrying op `id` (the AUTHORITY basis). Local mints pass
     /// this replica's own author; ingests pass the verified envelope author.
     fn record_committer(&mut self, id: &str, committer: &str) {
-        self.committers.entry(id.to_owned()).or_default().insert(committer.to_owned());
+        self.committers
+            .entry(id.to_owned())
+            .or_default()
+            .insert(committer.to_owned());
     }
 
     /// The author this replica stamps on its ops.
@@ -497,8 +512,10 @@ impl Tree {
                 let (kind, effective) = match item {
                     ChannelItem::Assert(_) => ("assert", true),
                     ChannelItem::Op(op) => {
-                        let authorized =
-                            self.committers.get(&op.id).is_some_and(|c| !c.is_disjoint(&self.moderators));
+                        let authorized = self
+                            .committers
+                            .get(&op.id)
+                            .is_some_and(|c| !c.is_disjoint(&self.moderators));
                         (op_kind_label(&op.kind), authorized)
                     }
                 };
@@ -511,7 +528,11 @@ impl Tree {
                 }
             })
             .collect();
-        views.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        views.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         views
     }
 

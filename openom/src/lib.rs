@@ -6,8 +6,8 @@
 //! binary ([`main`](../main.rs)) is a thin shell: tracing + serve/Lambda selection.
 
 pub mod access;
-pub mod api_error;
 pub mod account;
+pub mod api_error;
 pub mod auth;
 pub mod authz;
 pub mod blobs;
@@ -260,7 +260,9 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
     // advisory lock isn't reliably held, and every cold Lambda would race to migrate. There,
     // migrations run out-of-band against the DIRECT endpoint via the `migrate` bin (OPE-20).
     if config.is_remote() {
-        tracing::info!("remote runtime: skipping in-process migrations (run out-of-band via the migrate bin)");
+        tracing::info!(
+            "remote runtime: skipping in-process migrations (run out-of-band via the migrate bin)"
+        );
     } else {
         run_migrations(&db).await?;
         tracing::info!("migrations applied");
@@ -276,12 +278,18 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
         let iss = config.jwt_issuer.as_deref();
         Arc::new(match config.jwt_alg {
             config::JwtAlg::Hs256 => jwks::JwtVerifier::hs256(
-                config.jwt_secret.as_deref().expect("validate(): HS256 requires a secret"),
+                config
+                    .jwt_secret
+                    .as_deref()
+                    .expect("validate(): HS256 requires a secret"),
                 aud,
                 iss,
             ),
             config::JwtAlg::Rs256 => jwks::JwtVerifier::jwks(
-                config.jwks_url.clone().expect("validate(): RS256 requires a JWKS URL"),
+                config
+                    .jwks_url
+                    .clone()
+                    .expect("validate(): RS256 requires a JWKS URL"),
                 aud,
                 iss,
             ),

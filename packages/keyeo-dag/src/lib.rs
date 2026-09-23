@@ -11,9 +11,9 @@ pub mod op;
 pub mod quorum;
 
 pub use access::{AccessControl, DefaultAccessControl, DynAccessControl};
+pub use blocklace::Graph;
 pub use canonical::canonical_encode;
 pub use content::{content_id, verify_content_id, ContentId};
-pub use blocklace::Graph;
 pub use dag::lamport::LamportTiebreak;
 pub use dag::resolver::{
     ApplyOutcome, Error, GroupId, GroupState, MemberId, MemberInit, MemberState, MembershipAction,
@@ -23,12 +23,15 @@ pub use dag::strong_remove::StrongRemove;
 pub use engine::{keyeo, Keyeo, Retained, StandardKeyeo};
 pub use gc::{Compacted, Frontier};
 // The retention POLICY vocabulary is engine-neutral — re-export keyeo-core's so dag callers have it here.
-pub use keyeo_core::{Compaction, CompactionError, Retention, RetentionMetrics, RetentionPlan, RetentionPolicy};
+pub use keyeo_core::{
+    Compaction, CompactionError, Retention, RetentionMetrics, RetentionPlan, RetentionPolicy,
+};
 pub use op::Op;
 pub use quorum::{Individual, QuorumPolicy};
 
 // The generic engine-family SEAM types now live in keyeo-core (OPE-306). Re-exported here so `keyeo_dag::X`
 // keeps resolving for openom-keyring-dag and the engine's other consumers (Role / SignatureScheme / SigError /
 // Ed25519 / CanonicalBytes / Requirement).
-pub use keyeo_core::{CanonicalBytes, Ed25519, Requirement, Role, SigError, SignatureScheme, Signed};
-
+pub use keyeo_core::{
+    CanonicalBytes, Ed25519, Requirement, Role, SigError, SignatureScheme, Signed,
+};

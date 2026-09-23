@@ -137,7 +137,10 @@ fn genesis(
         prev_hash: DocHash([0u8; 32]),
         layout_version: 1,
         members,
-        governance: Governance { kind: 0, threshold: 0 },
+        governance: Governance {
+            kind: 0,
+            threshold: 0,
+        },
         recovery_authority: None,
         signatures: vec![],
         wrapped,
@@ -168,7 +171,12 @@ fn anchor(d: &TestDoc) -> Anchor<String, TestRole, [u8; 32]> {
         group_id: d.group_id.clone(),
         revision: d.revision,
         doc_hash: doc_hash(d),
-        signers: d.members.iter().filter(|m| m.role.is_signer()).cloned().collect(),
+        signers: d
+            .members
+            .iter()
+            .filter(|m| m.role.is_signer())
+            .cloned()
+            .collect(),
         governance: d.governance,
         recovery_authority: d.recovery_authority,
     }
@@ -197,16 +205,27 @@ fn signing_bytes_bind_every_generic_field() {
     assert_ne!(base, signing_bytes(&d), "revision is bound (anti-rollback)");
 
     let mut d = g.clone();
-    d.governance = Governance { kind: 2, threshold: 2 };
+    d.governance = Governance {
+        kind: 2,
+        threshold: 2,
+    };
     assert_ne!(base, signing_bytes(&d), "governance is bound");
 
     let mut d = g.clone();
     d.recovery_authority = Some([9u8; 32]);
-    assert_ne!(base, signing_bytes(&d), "recovery authority presence is bound");
+    assert_ne!(
+        base,
+        signing_bytes(&d),
+        "recovery authority presence is bound"
+    );
 
     let mut d = g.clone();
     d.members[0].role = CO_OWNER;
-    assert_ne!(base, signing_bytes(&d), "a member role change is bound (via members)");
+    assert_ne!(
+        base,
+        signing_bytes(&d),
+        "a member role change is bound (via members)"
+    );
 
     let mut d = g.clone();
     d.payload = vec![1];
@@ -215,7 +234,11 @@ fn signing_bytes_bind_every_generic_field() {
     // Signatures are NOT part of the signed bytes.
     let mut d = g.clone();
     d.signatures.push([7u8; 64]);
-    assert_eq!(base, signing_bytes(&d), "signatures are excluded from the signed bytes");
+    assert_eq!(
+        base,
+        signing_bytes(&d),
+        "signatures are excluded from the signed bytes"
+    );
 }
 
 // ---- happy path + walk ----
@@ -233,7 +256,10 @@ fn happy_path_transition_and_walk() {
     let out = verify_transition(&a, &c1).unwrap();
     assert_eq!(out.revision, Revision(2));
 
-    assert_eq!(verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision, Revision(3));
+    assert_eq!(
+        verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision,
+        Revision(3)
+    );
     // A gap (skipping the first hop) is rejected.
     assert_eq!(verify_walk(&a, &[c2]), Err(Error::NonSequential));
 }
@@ -313,7 +339,13 @@ fn governance_kind1_founder_only() {
     // Founder sets founder-only (a privileged change, authorized under prior kind 0 by the founder).
     let ruled = next(&g, set_rule(1, 0), &[&f]);
     let a = verify_transition(&anchor(&g), &ruled).unwrap();
-    assert_eq!(a.governance, Governance { kind: 1, threshold: 0 });
+    assert_eq!(
+        a.governance,
+        Governance {
+            kind: 1,
+            threshold: 0
+        }
+    );
 
     verify_transition(&a, &next(&ruled, promote_to_coowner("pend"), &[&f])).unwrap();
     // Even both co-owners together cannot (no unanimity path under founder-only).
@@ -326,10 +358,20 @@ fn governance_kind1_founder_only() {
 #[test]
 fn governance_kind2_founder_or_threshold_gates_a_signer_change() {
     let (f, aa, bb, cc) = (sk(1), sk(2), sk(3), sk(4));
-    let g = genesis(&f, &[(&aa, "a"), (&bb, "b"), (&cc, "c")], &[(&sk(5), "pend")]);
+    let g = genesis(
+        &f,
+        &[(&aa, "a"), (&bb, "b"), (&cc, "c")],
+        &[(&sk(5), "pend")],
+    );
     let ruled = next(&g, set_rule(2, 2), &[&f]);
     let a = verify_transition(&anchor(&g), &ruled).unwrap();
-    assert_eq!(a.governance, Governance { kind: 2, threshold: 2 });
+    assert_eq!(
+        a.governance,
+        Governance {
+            kind: 2,
+            threshold: 2
+        }
+    );
 
     // Promoting "pend" now needs 2 co-owners OR the founder.
     verify_transition(&a, &next(&ruled, promote_to_coowner("pend"), &[&aa, &bb])).unwrap();
@@ -392,7 +434,15 @@ fn self_removal_accepted_but_bundled_removal_rejected() {
     let a = anchor(&g);
 
     // Carol removes only herself (demote to editor), self-signed → accepted.
-    verify_transition(&a, &next(&g, |d| d.members.iter_mut().find(|m| m.id == "carol").unwrap().role = EDITOR, &[&carol])).unwrap();
+    verify_transition(
+        &a,
+        &next(
+            &g,
+            |d| d.members.iter_mut().find(|m| m.id == "carol").unwrap().role = EDITOR,
+            &[&carol],
+        ),
+    )
+    .unwrap();
 
     // Carol tries to demote herself AND dave → not a lone self-removal → rejected.
     let bundled = next(
@@ -406,7 +456,10 @@ fn self_removal_accepted_but_bundled_removal_rejected() {
         },
         &[&carol],
     );
-    assert_eq!(verify_transition(&a, &bundled), Err(Error::UnendorsedSetChange));
+    assert_eq!(
+        verify_transition(&a, &bundled),
+        Err(Error::UnendorsedSetChange)
+    );
 }
 
 // ---- the HOLE case: a non-signer role cannot authorize ----
@@ -440,11 +493,21 @@ fn structural_gates_reject_bad_docs() {
 
     // Two founders.
     let two = next(&g, |d| d.members.push(member(&sk(2), "co", FOUNDER)), &[&f]);
-    assert!(matches!(verify_transition(&a, &two), Err(Error::BadStructure(_))));
+    assert!(matches!(
+        verify_transition(&a, &two),
+        Err(Error::BadStructure(_))
+    ));
 
     // Duplicate member id.
-    let dup = next(&g, |d| d.members.push(member(&sk(2), "owner", EDITOR)), &[&f]);
-    assert!(matches!(verify_transition(&a, &dup), Err(Error::BadStructure(_))));
+    let dup = next(
+        &g,
+        |d| d.members.push(member(&sk(2), "owner", EDITOR)),
+        &[&f],
+    );
+    assert!(matches!(
+        verify_transition(&a, &dup),
+        Err(Error::BadStructure(_))
+    ));
 
     // A signer with a non-curve-point key (malformed) — caught by the scheme's accepts_key gate.
     let mut bad_pt = [0u8; 32];
@@ -452,7 +515,11 @@ fn structural_gates_reject_bad_docs() {
     let malformed = next(
         &g,
         |d| {
-            d.members.push(Signer { id: "rogue".into(), role: CO_OWNER, public_key: bad_pt });
+            d.members.push(Signer {
+                id: "rogue".into(),
+                role: CO_OWNER,
+                public_key: bad_pt,
+            });
         },
         &[&f],
     );
@@ -487,7 +554,8 @@ fn establishing_a_recovery_authority_is_a_privileged_change() {
         verify_transition(&a, &next(&g, |d| d.recovery_authority = Some(rvk), &[&aa])),
         Err(Error::UnendorsedSetChange)
     );
-    let out = verify_transition(&a, &next(&g, |d| d.recovery_authority = Some(rvk), &[&f])).unwrap();
+    let out =
+        verify_transition(&a, &next(&g, |d| d.recovery_authority = Some(rvk), &[&f])).unwrap();
     assert_eq!(out.recovery_authority, Some(rvk));
 }
 
@@ -507,7 +575,11 @@ fn rotating_a_recovery_authority_needs_the_old_authority_signature() {
     assert_eq!(a.recovery_authority, Some(vk(&rvk1)));
 
     // Rotate rvk1 -> rvk2: founder-signed AND old-RVK-signed → accepted.
-    let out = verify_transition(&a, &next(&g, |d| d.recovery_authority = Some(rvk2), &[&f, &rvk1])).unwrap();
+    let out = verify_transition(
+        &a,
+        &next(&g, |d| d.recovery_authority = Some(rvk2), &[&f, &rvk1]),
+    )
+    .unwrap();
     assert_eq!(out.recovery_authority, Some(rvk2));
     // Founder-signed but NOT old-RVK-signed → rejected.
     assert_eq!(
@@ -524,7 +596,10 @@ fn bootstrap_genesis_and_pinned() {
     let g = genesis(&f, &[], &[]);
 
     // Founder bootstraps with their own key; a stranger's key fails.
-    assert_eq!(bootstrap_genesis(&g, &vk(&f)).unwrap().revision, Revision(1));
+    assert_eq!(
+        bootstrap_genesis(&g, &vk(&f)).unwrap().revision,
+        Revision(1)
+    );
     assert_eq!(bootstrap_genesis(&g, &vk(&sk(2))), Err(Error::BadBootstrap));
 
     // A non-genesis revision is refused.
@@ -537,7 +612,12 @@ fn bootstrap_genesis_and_pinned() {
     let h = doc_hash(&g);
     bootstrap_pinned(&g, &GroupId(b"group-1".to_vec()), Revision(1), &h).unwrap();
     assert_eq!(
-        bootstrap_pinned(&g, &GroupId(b"group-1".to_vec()), Revision(1), &DocHash([0u8; 32])),
+        bootstrap_pinned(
+            &g,
+            &GroupId(b"group-1".to_vec()),
+            Revision(1),
+            &DocHash([0u8; 32])
+        ),
         Err(Error::BadBootstrap)
     );
 }
@@ -603,7 +683,11 @@ fn key_rotation_is_a_privileged_signer_set_change() {
     let a = anchor(&g);
     // Same id + role, a NEW public key.
     let rotate = |d: &mut TestDoc| {
-        d.members.iter_mut().find(|m| m.id == "carol").unwrap().public_key = vk(&carol_new);
+        d.members
+            .iter_mut()
+            .find(|m| m.id == "carol")
+            .unwrap()
+            .public_key = vk(&carol_new);
     };
 
     // Carol signing with her OLD key cannot silently rotate to a NEW key: a key change makes the signer
@@ -631,7 +715,8 @@ fn governance_kind2_denominator_excludes_founder_and_departing_signers() {
     let g3 = genesis(&f, &[(&aa, "a"), (&bb, "b"), (&cc, "c")], &[]);
     let ruled2 = next(&g3, set_rule(2, 2), &[&f]);
     let a2 = verify_transition(&anchor(&g3), &ruled2).unwrap();
-    let demote_c = |d: &mut TestDoc| d.members.iter_mut().find(|m| m.id == "c").unwrap().role = EDITOR;
+    let demote_c =
+        |d: &mut TestDoc| d.members.iter_mut().find(|m| m.id == "c").unwrap().role = EDITOR;
     verify_transition(&a2, &next(&ruled2, demote_c, &[&aa, &bb])).unwrap();
 
     // Founder + departing both excluded: under threshold(3), remove "c" AND add a fresh co-owner "d" (so
@@ -674,7 +759,10 @@ fn verify_all_is_unanimity_and_fails_closed_on_empty() {
     let msg: &[u8] = b"unanimity";
     let (k1, k2, k3) = (sk(1), sk(2), sk(3));
     let keys = [vk(&k1), vk(&k2), vk(&k3)];
-    let all_sigs: Vec<[u8; 64]> = [&k1, &k2, &k3].iter().map(|k| k.sign(msg).to_bytes()).collect();
+    let all_sigs: Vec<[u8; 64]> = [&k1, &k2, &k3]
+        .iter()
+        .map(|k| k.sign(msg).to_bytes())
+        .collect();
     // Every required key signs → unanimity holds.
     assert!(verify_all::<Ed25519>(msg, &all_sigs, &keys));
     // One required key did not sign → NOT unanimity.

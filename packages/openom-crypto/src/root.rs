@@ -67,7 +67,12 @@ mod tests {
     use keyeo_crypto::generate_salt;
 
     fn cheap(salt: Vec<u8>) -> KdfParams {
-        KdfParams { salt, memory_kib: 8, iterations: 1, parallelism: 1 }
+        KdfParams {
+            salt,
+            memory_kib: 8,
+            iterations: 1,
+            parallelism: 1,
+        }
     }
     fn params() -> KdfParams {
         cheap(vec![7u8; 16])
@@ -92,7 +97,9 @@ mod tests {
         );
         // KEK / identity / HPKE are siblings (distinct labels), so none coincides with another.
         assert_ne!(
-            SigningKey::from_seed(a.kek.expose()).verifying_key().to_bytes(),
+            SigningKey::from_seed(a.kek.expose())
+                .verifying_key()
+                .to_bytes(),
             a.identity.verifying_key().to_bytes()
         );
         assert_ne!(a.kek.expose(), a.hpke_secret.expose());
@@ -104,7 +111,13 @@ mod tests {
         let salt = generate_salt().unwrap().to_vec();
         let r = derive_root(b"member pass", &cheap(salt)).unwrap();
         let w = hpke_wrap_dek(&r.hpke_public, &Dek::new([9u8; KEY_LEN]), b"info").unwrap();
-        let out = hpke_unwrap_dek(r.hpke_secret.expose(), w.encapped_key.as_ref(), w.ciphertext.as_ref(), b"info").unwrap();
+        let out = hpke_unwrap_dek(
+            r.hpke_secret.expose(),
+            w.encapped_key.as_ref(),
+            w.ciphertext.as_ref(),
+            b"info",
+        )
+        .unwrap();
         assert_eq!(out.expose(), &[9u8; KEY_LEN]);
     }
 }

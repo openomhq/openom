@@ -149,7 +149,12 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
                                 return None;
                             }
                             let mut st = resolved_state_before(
-                                *o_id, genesis_state, graph, ops, &authorized, &depth,
+                                *o_id,
+                                genesis_state,
+                                graph,
+                                ops,
+                                &authorized,
+                                &depth,
                             );
                             if let Some(ms) = st.members.get_mut(member) {
                                 ms.role = new_role.clone();
@@ -176,7 +181,8 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
 
         // Rule 5 — reset-merge carve-out (OPE-269), seeded BEFORE the fixpoint so a voided signer-add
         // cascades through rule 3 (presence). Compute against the current `invalid` seed, then fold in.
-        let carved = reset_merge_carveout(ops, graph, genesis_state, ac, &authorized, &depth, &invalid);
+        let carved =
+            reset_merge_carveout(ops, graph, genesis_state, ac, &authorized, &depth, &invalid);
         invalid.extend(carved);
 
         // Key-provenance taint (OPE-381) + strong-remove, iterated to a mutual fixpoint. The taint voids the
@@ -238,8 +244,12 @@ where
     S: SignatureScheme,
     Op: SignedOp<OpId = OId, R = R, S = S>,
 {
-    let is_rotation =
-        |op: &Op| matches!(op.action(), MembershipAction::RotateRecoveryAuthority { .. });
+    let is_rotation = |op: &Op| {
+        matches!(
+            op.action(),
+            MembershipAction::RotateRecoveryAuthority { .. }
+        )
+    };
     let is_refound = |op: &Op| matches!(op.action(), MembershipAction::ReFound { .. });
     let auth = |id: &OId| authorized.get(id).copied().unwrap_or(false);
 
@@ -252,8 +262,8 @@ where
         .filter(|(id, op)| is_rotation(op) && auth(id))
         .map(|(id, _)| *id)
     {
-        let Some(a_old) =
-            resolved_state_before(r_id, genesis_state, graph, ops, authorized, depth).reset_authority
+        let Some(a_old) = resolved_state_before(r_id, genesis_state, graph, ops, authorized, depth)
+            .reset_authority
         else {
             continue;
         };

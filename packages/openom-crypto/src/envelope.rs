@@ -9,8 +9,8 @@
 //! `params.compression`, so zstd (and its WASM cost) stays out of this layer.
 
 use crate::aad::author_signing_bytes;
-use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use edsign::SigningKey;
+use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use sha2::{Digest, Sha256};
 
 use crate::{open, seal, CryptoError, KEY_LEN};
@@ -237,12 +237,20 @@ mod tests {
         // logic verifiable without entropy.
         let dek = generate_dek().unwrap();
         let nonce = vec![7u8; 24];
-        let a =
-            seal_envelope_with_nonce(nonce.clone(), dek.expose(), &params(Aead::Xchacha20Poly1305), b"x")
+        let a = seal_envelope_with_nonce(
+            nonce.clone(),
+            dek.expose(),
+            &params(Aead::Xchacha20Poly1305),
+            b"x",
+        )
+        .unwrap();
+        let b =
+            seal_envelope_with_nonce(nonce, dek.expose(), &params(Aead::Xchacha20Poly1305), b"x")
                 .unwrap();
-        let b = seal_envelope_with_nonce(nonce, dek.expose(), &params(Aead::Xchacha20Poly1305), b"x")
-            .unwrap();
-        assert_eq!(a, b, "the nonce is the only entropy; fixing it makes seal deterministic");
+        assert_eq!(
+            a, b,
+            "the nonce is the only entropy; fixing it makes seal deterministic"
+        );
         assert_eq!(open_envelope(dek.expose(), &a).unwrap(), b"x");
     }
 

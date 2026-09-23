@@ -117,11 +117,11 @@ impl AppCoreHandle {
         serde_json::to_string(&self.inner.pull_frontier()).map_err(to_js)
     }
 
-
     /// Set the moderator `did:key`s (Maintainer+) whose Remove/Supersede/Revoke ops the fold honors.
     #[wasm_bindgen(js_name = setModerators)]
     pub fn set_moderators(&mut self, dids: Vec<String>) {
-        self.inner.set_moderators(dids.into_iter().collect::<BTreeSet<_>>());
+        self.inner
+            .set_moderators(dids.into_iter().collect::<BTreeSet<_>>());
     }
 
     // --- mint (buffer into the current intention; `commit` seals + persists the batch) --------------
@@ -397,9 +397,9 @@ impl AppCoreHandle {
     ) -> Result<usize, JsError> {
         let mut pairs: Vec<(u32, Vec<u8>)> = Vec::with_capacity(retained.length() as usize);
         for item in retained.iter() {
-            let pair: Array = item
-                .dyn_into()
-                .map_err(|_| JsError::new("each retained keyring must be [revision, Uint8Array]"))?;
+            let pair: Array = item.dyn_into().map_err(|_| {
+                JsError::new("each retained keyring must be [revision, Uint8Array]")
+            })?;
             let rev = pair
                 .get(0)
                 .as_f64()
@@ -613,7 +613,9 @@ pub fn account_create(passphrase: String) -> Result<AccountOpenResult, JsValue> 
         .map_err(|error| vault_err_to_js(&error))?;
     let snapshot = snapshot_result(&created.handle)?;
     Ok(AccountOpenResult {
-        handle: Some(AccountHandle { inner: created.handle }),
+        handle: Some(AccountHandle {
+            inner: created.handle,
+        }),
         keystore: snapshot.keystore,
         blob_hash: snapshot.blob_hash,
         recovery_code: created.recovery_code,
@@ -698,7 +700,9 @@ pub fn account_recover(
     .map_err(|error| vault_err_to_js(&error))?;
     let snapshot = snapshot_result(&recovered.handle)?;
     Ok(AccountOpenResult {
-        handle: Some(AccountHandle { inner: recovered.handle }),
+        handle: Some(AccountHandle {
+            inner: recovered.handle,
+        }),
         keystore: snapshot.keystore,
         blob_hash: snapshot.blob_hash,
         recovery_code: recovered.recovery_code,
@@ -723,7 +727,9 @@ pub fn account_recover_candidate(
     .map_err(|error| vault_err_to_js(&error))?;
     let snapshot = snapshot_result(&recovered.handle)?;
     Ok(AccountOpenResult {
-        handle: Some(AccountHandle { inner: recovered.handle }),
+        handle: Some(AccountHandle {
+            inner: recovered.handle,
+        }),
         keystore: snapshot.keystore,
         blob_hash: snapshot.blob_hash,
         recovery_code: recovered.recovery_code,
@@ -792,7 +798,8 @@ pub fn account_tree_role(
     engine: &str,
     keyring: &[u8],
 ) -> Result<String, JsError> {
-    let role = crate::account_tree_role(parse_engine(engine)?, keyring, &account.inner).map_err(to_js)?;
+    let role =
+        crate::account_tree_role(parse_engine(engine)?, keyring, &account.inner).map_err(to_js)?;
     Ok(match role {
         Some(openom_vault::sharing::AccountTreeRole::Founder) => "founder",
         Some(openom_vault::sharing::AccountTreeRole::Member) => "member",
@@ -873,7 +880,9 @@ pub fn provision_tree(
     )
     .map_err(to_js)?;
     Ok(OpenResult {
-        handle: Some(AppCoreHandle { inner: provisioned.core }),
+        handle: Some(AppCoreHandle {
+            inner: provisioned.core,
+        }),
         keyring: provisioned.keyring,
         keystore: Vec::new(),
         recovery_code: String::new(),
@@ -907,7 +916,9 @@ pub fn unlock_tree(
     )
     .map_err(|error| vault_err_to_js(&error))?;
     Ok(OpenResult {
-        handle: Some(AppCoreHandle { inner: unlocked.core }),
+        handle: Some(AppCoreHandle {
+            inner: unlocked.core,
+        }),
         keyring: Vec::new(),
         keystore: Vec::new(),
         recovery_code: String::new(),
@@ -947,7 +958,9 @@ pub fn unlock_tree_as_member(
     )
     .map_err(to_js)?;
     Ok(OpenResult {
-        handle: Some(AppCoreHandle { inner: unlocked.core }),
+        handle: Some(AppCoreHandle {
+            inner: unlocked.core,
+        }),
         keyring: Vec::new(),
         keystore: Vec::new(),
         recovery_code: String::new(),
@@ -1185,7 +1198,8 @@ pub fn rotation_confirmed(
     let expected: [u8; 32] = expected_reset_authority
         .try_into()
         .map_err(|_| JsError::new("reset authority must be 32 bytes"))?;
-    dag.rotation_confirmed(synced_anchor, &expected).map_err(to_js)
+    dag.rotation_confirmed(synced_anchor, &expected)
+        .map_err(to_js)
 }
 
 /// Member-side DAG wrap repair using the worker-resident durable account.
@@ -1232,7 +1246,10 @@ pub fn resolved_owner_key(engine: &str, anchor: &[u8]) -> Result<Vec<u8>, JsErro
     let dag = AppVault::from_kind(parse_engine(engine)?)
         .as_dag()
         .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
-    Ok(dag.resolved_owner_key(anchor).map_err(to_js)?.unwrap_or_default())
+    Ok(dag
+        .resolved_owner_key(anchor)
+        .map_err(to_js)?
+        .unwrap_or_default())
 }
 
 /// Confirm a recovery survived the merge (OPE-381 / §11.2, the superseded-recovery signal):
@@ -1561,7 +1578,8 @@ pub fn keyring_covers(
     keyring: &[u8],
     stored_basis: Vec<String>,
 ) -> Result<bool, JsError> {
-    openom_vault::sharing::keyring_covers(parse_engine(engine)?, keyring, &stored_basis).map_err(to_js)
+    openom_vault::sharing::keyring_covers(parse_engine(engine)?, keyring, &stored_basis)
+        .map_err(to_js)
 }
 
 /// A joining member's verified whole-history walk (`verifyKeyringWalk`): the head revision + RAW head body,
@@ -1665,7 +1683,11 @@ pub fn dag_anchor_pin(anchor: &[u8]) -> Result<Vec<u8>, JsError> {
 /// # Errors
 /// Returns a [`JsError`] on a malformed anchor/pin or a failed trust check.
 #[wasm_bindgen(js_name = verifyDagAnchor)]
-pub fn verify_dag_anchor(anchor: &[u8], tree_id: &[u8], pin: &[u8]) -> Result<MembershipChange, JsError> {
+pub fn verify_dag_anchor(
+    anchor: &[u8],
+    tree_id: &[u8],
+    pin: &[u8],
+) -> Result<MembershipChange, JsError> {
     let a = openom_vault::sharing::verify_dag_anchor(anchor, tree_id, pin).map_err(to_js)?;
     Ok(MembershipChange {
         keyring: a.keyring,
@@ -1701,7 +1723,11 @@ pub fn accept_remote_dag_anchor(
 /// # Errors
 /// Returns a [`JsError`] if framing fails.
 #[wasm_bindgen(js_name = wrapDagKeyringUpdate)]
-pub fn wrap_dag_keyring_update(anchor: &[u8], tree_id: &[u8], revision: u32) -> Result<Vec<u8>, JsError> {
+pub fn wrap_dag_keyring_update(
+    anchor: &[u8],
+    tree_id: &[u8],
+    revision: u32,
+) -> Result<Vec<u8>, JsError> {
     openom_vault::sharing::wrap_dag_keyring_update(anchor, tree_id, revision).map_err(to_js)
 }
 
@@ -1736,7 +1762,8 @@ pub fn adopt_reset(
     tree_id: &[u8],
     candidate: &[u8],
 ) -> Result<MembershipChange, JsError> {
-    let a = openom_vault::sharing::accept_reset_keyring(anchor, tree_id, candidate).map_err(to_js)?;
+    let a =
+        openom_vault::sharing::accept_reset_keyring(anchor, tree_id, candidate).map_err(to_js)?;
     Ok(MembershipChange {
         keyring: a.keyring,
         watermark: a.watermark,
@@ -1790,7 +1817,11 @@ fn objects_to_js(objects: impl IntoIterator<Item = (String, Vec<u8>)>) -> Result
         let obj = Object::new();
         set(&obj, "key", &JsValue::from_str(&key))?;
         set(&obj, "bytes", &Uint8Array::from(bytes.as_slice()))?;
-        set(&obj, "pointer", &JsValue::from_bool(crate::is_pointer_key(&key)))?;
+        set(
+            &obj,
+            "pointer",
+            &JsValue::from_bool(crate::is_pointer_key(&key)),
+        )?;
         arr.push(&obj);
     }
     Ok(arr)
@@ -1812,8 +1843,16 @@ fn vault_code(e: &VaultError) -> &'static str {
 /// code) to build its `AppError`, never matching the message. `message` is a dev-log diagnostic only.
 fn vault_err_to_js(e: &VaultError) -> JsValue {
     let obj = Object::new();
-    let _ = Reflect::set(&obj, &JsValue::from_str("code"), &JsValue::from_str(vault_code(e)));
-    let _ = Reflect::set(&obj, &JsValue::from_str("message"), &JsValue::from_str(&e.to_string()));
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(vault_code(e)),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("message"),
+        &JsValue::from_str(&e.to_string()),
+    );
     obj.into()
 }
 
@@ -1833,7 +1872,9 @@ fn as_u64(n: f64, field: &str) -> Result<u64, JsError> {
 
 fn generation_to_js(generation: u64) -> Result<f64, JsError> {
     if generation > MAX_SAFE_U64 {
-        return Err(JsError::new("account generation exceeds JavaScript's exact-integer range"));
+        return Err(JsError::new(
+            "account generation exceeds JavaScript's exact-integer range",
+        ));
     }
     #[allow(clippy::cast_precision_loss)]
     let value = generation as f64;

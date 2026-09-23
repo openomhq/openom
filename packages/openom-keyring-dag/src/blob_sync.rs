@@ -14,9 +14,9 @@
 
 use std::collections::HashSet;
 
-use store_blob::{BlobError, BlobStore, Precondition};
 use keyeo_dag::MembershipAction;
 use serde::{Deserialize, Serialize};
+use store_blob::{BlobError, BlobStore, Precondition};
 
 use crate::{KeyringAction, KeyringEngine, KeyringMemberInit, KeyringOp, KeyringRole};
 
@@ -121,7 +121,9 @@ impl<S: BlobStore> KeyringBlobSync<S> {
                 .ok_or(BlobSyncError::Malformed("listed key vanished"))?;
             let op = decode_op(&bytes)?;
             if op_key(&op.id) != key {
-                return Err(BlobSyncError::Malformed("op id does not match its blob key"));
+                return Err(BlobSyncError::Malformed(
+                    "op id does not match its blob key",
+                ));
             }
             present.insert(op.id);
             if self.applied.contains(&op.id) {
@@ -144,7 +146,10 @@ impl<S: BlobStore> KeyringBlobSync<S> {
             .filter(|id| !present.contains(*id))
             .copied()
             .collect();
-        Ok(PullReport { submitted, withheld })
+        Ok(PullReport {
+            submitted,
+            withheld,
+        })
     }
 }
 
@@ -254,7 +259,9 @@ pub(crate) fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
     let env = openom_keyring_api::MembershipEnvelope::decode(bytes)
         .map_err(|e| BlobSyncError::Decode(e.to_string()))?;
     if env.engine_kind() != Ok(openom_keyring_api::EngineKind::Dag) {
-        return Err(BlobSyncError::Malformed("membership envelope is not a dag op"));
+        return Err(BlobSyncError::Malformed(
+            "membership envelope is not a dag op",
+        ));
     }
     let dto: OpDto =
         postcard::from_bytes(&env.body).map_err(|e| BlobSyncError::Decode(e.to_string()))?;
@@ -294,7 +301,8 @@ pub(crate) fn content_id_matches(op: &KeyringOp) -> bool {
 }
 
 fn sig64(v: &[u8]) -> Result<[u8; 64]> {
-    v.try_into().map_err(|_| BlobSyncError::Malformed("signature is not 64 bytes"))
+    v.try_into()
+        .map_err(|_| BlobSyncError::Malformed("signature is not 64 bytes"))
 }
 
 fn action_to_dto(a: &KeyringAction) -> ActionDto {
@@ -315,17 +323,26 @@ fn action_to_dto(a: &KeyringAction) -> ActionDto {
             hpke_public_key: *hpke_public_key,
             member_proof: member_proof.as_ref().map(|s| s.to_vec()),
         },
-        MembershipAction::Remove { member } => ActionDto::Remove { member: member.clone() },
+        MembershipAction::Remove { member } => ActionDto::Remove {
+            member: member.clone(),
+        },
         MembershipAction::ChangeRole { member, new_role } => ActionDto::ChangeRole {
             member: member.clone(),
             new_role: *new_role,
         },
-        MembershipAction::Propose { proposal_id, target } => ActionDto::Propose {
+        MembershipAction::Propose {
+            proposal_id,
+            target,
+        } => ActionDto::Propose {
             proposal_id: *proposal_id,
             target: Box::new(action_to_dto(target)),
         },
-        MembershipAction::Approve { proposal_id } => ActionDto::Approve { proposal_id: *proposal_id },
-        MembershipAction::Commit { proposal_id } => ActionDto::Commit { proposal_id: *proposal_id },
+        MembershipAction::Approve { proposal_id } => ActionDto::Approve {
+            proposal_id: *proposal_id,
+        },
+        MembershipAction::Commit { proposal_id } => ActionDto::Commit {
+            proposal_id: *proposal_id,
+        },
         MembershipAction::ReFound {
             member,
             new_author_public_key,
@@ -358,10 +375,7 @@ fn action_to_dto(a: &KeyringAction) -> ActionDto {
 fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
     Ok(match d {
         ActionDto::Create { initial_members } => MembershipAction::Create {
-            initial_members: initial_members
-                .iter()
-                .map(dto_to_minit)
-                .collect(),
+            initial_members: initial_members.iter().map(dto_to_minit).collect(),
         },
         ActionDto::Add {
             member,
@@ -376,17 +390,26 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
             hpke_public_key: *hpke_public_key,
             member_proof: member_proof.as_ref().map(|v| sig64(v)).transpose()?,
         },
-        ActionDto::Remove { member } => MembershipAction::Remove { member: member.clone() },
+        ActionDto::Remove { member } => MembershipAction::Remove {
+            member: member.clone(),
+        },
         ActionDto::ChangeRole { member, new_role } => MembershipAction::ChangeRole {
             member: member.clone(),
             new_role: *new_role,
         },
-        ActionDto::Propose { proposal_id, target } => MembershipAction::Propose {
+        ActionDto::Propose {
+            proposal_id,
+            target,
+        } => MembershipAction::Propose {
             proposal_id: *proposal_id,
             target: Box::new(dto_to_action(target)?),
         },
-        ActionDto::Approve { proposal_id } => MembershipAction::Approve { proposal_id: *proposal_id },
-        ActionDto::Commit { proposal_id } => MembershipAction::Commit { proposal_id: *proposal_id },
+        ActionDto::Approve { proposal_id } => MembershipAction::Approve {
+            proposal_id: *proposal_id,
+        },
+        ActionDto::Commit { proposal_id } => MembershipAction::Commit {
+            proposal_id: *proposal_id,
+        },
         ActionDto::ReFound {
             member,
             new_author_public_key,
@@ -439,9 +462,9 @@ pub(crate) fn dto_to_minit(d: &MemberInitDto) -> KeyringMemberInit {
 mod tests {
     use super::*;
     use crate::{sign_op, KeyringAccess, KeyringState};
-    use store_blob::{BlobStore, MemoryBlob, Precondition};
     use keyeo_dag::{Keyeo, StrongRemove};
     use std::sync::Arc;
+    use store_blob::{BlobStore, MemoryBlob, Precondition};
 
     fn sk(seed: u8) -> edsign::SigningKey {
         edsign::SigningKey::from_seed(&[seed; 32])
@@ -462,7 +485,11 @@ mod tests {
         }
     }
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
-        Keyeo::new(KeyringState::create(keyeo_dag::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
+        Keyeo::new(
+            KeyringState::create(keyeo_dag::GroupId::unscoped(), members),
+            KeyringAccess,
+            StrongRemove,
+        )
     }
     fn add(role: KeyringRole, seed: u8) -> KeyringAction {
         MembershipAction::Add {
@@ -474,7 +501,12 @@ mod tests {
         }
     }
     fn members(k: &KeyringEngine) -> Vec<String> {
-        let mut m: Vec<String> = k.state().active_members().into_iter().map(|(id, _)| id).collect();
+        let mut m: Vec<String> = k
+            .state()
+            .active_members()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         m.sort();
         m
     }
@@ -486,7 +518,13 @@ mod tests {
 
     #[test]
     fn op_codec_roundtrips() {
-        let op = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
+        let op = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        );
         let back = decode_op(&encode_op(&op)).unwrap();
         assert_eq!(op.id, back.id);
         assert_eq!(op.parents, back.parents);
@@ -523,7 +561,10 @@ mod tests {
         );
         let rf_back = decode_op(&encode_op(&rf)).unwrap();
         assert_eq!(rf_back.id, rf.id);
-        assert_eq!(rf_back.action, rf.action, "ReFound survives the wire codec field-for-field");
+        assert_eq!(
+            rf_back.action, rf.action,
+            "ReFound survives the wire codec field-for-field"
+        );
         // and a recovery-authority rotation
         let rot = sign_op(
             [5; 32],
@@ -552,12 +593,22 @@ mod tests {
         let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
-        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
+        let ab = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        );
         ea.apply(ab.clone()).unwrap();
         sa.push(&ab).unwrap();
 
         sb.pull(&mut eb).unwrap();
-        assert_eq!(members(&ea), members(&eb), "B converges to A over the blob store");
+        assert_eq!(
+            members(&ea),
+            members(&eb),
+            "B converges to A over the blob store"
+        );
         assert!(members(&eb).contains(&mid(2)));
     }
 
@@ -581,16 +632,32 @@ mod tests {
             s.push(&g).unwrap();
         }
 
-        let dave = sign_op([2; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 4), &sk(2));
+        let dave = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(2),
+            add(KeyringRole::EDITOR, 4),
+            &sk(2),
+        );
         ea.apply(dave.clone()).unwrap();
         sa.push(&dave).unwrap();
-        let erin = sign_op([3; 32], vec![[1; 32]], mid(3), add(KeyringRole::EDITOR, 5), &sk(3));
+        let erin = sign_op(
+            [3; 32],
+            vec![[1; 32]],
+            mid(3),
+            add(KeyringRole::EDITOR, 5),
+            &sk(3),
+        );
         eb.apply(erin.clone()).unwrap();
         sb.push(&erin).unwrap();
 
         sa.pull(&mut ea).unwrap(); // A learns erin
         sb.pull(&mut eb).unwrap(); // B learns dave
-        assert_eq!(members(&ea), members(&eb), "both replicas converge after the fork");
+        assert_eq!(
+            members(&ea),
+            members(&eb),
+            "both replicas converge after the fork"
+        );
         let m = members(&ea);
         assert!(m.contains(&mid(4)) && m.contains(&mid(5)));
     }
@@ -607,7 +674,13 @@ mod tests {
         let mut sb = KeyringBlobSync::new(store.clone());
 
         let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
-        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
+        let ab = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        );
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
         ea.apply(ab.clone()).unwrap();
@@ -615,13 +688,20 @@ mod tests {
 
         // B pulls both — a complete listing withholds nothing.
         let clean = sb.pull(&mut eb).unwrap();
-        assert!(clean.withheld.is_empty(), "a complete listing withholds nothing");
+        assert!(
+            clean.withheld.is_empty(),
+            "a complete listing withholds nothing"
+        );
         assert!(members(&eb).contains(&mid(2)));
 
         // The store drops the genesis op — a rollback attempt.
         store.delete(&op_key(&g.id), Precondition::Any).unwrap();
         let rolled = sb.pull(&mut eb).unwrap();
-        assert_eq!(rolled.withheld, vec![g.id], "the dropped op is flagged as withheld");
+        assert_eq!(
+            rolled.withheld,
+            vec![g.id],
+            "the dropped op is flagged as withheld"
+        );
         assert!(
             members(&eb).contains(&mid(2)),
             "the local resolved state is unaffected — monotonicity holds, this is detection not loss"
@@ -640,7 +720,13 @@ mod tests {
         let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
-        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
+        let ab = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        );
         ea.apply(ab.clone()).unwrap();
         sa.push(&ab).unwrap();
 
@@ -660,7 +746,13 @@ mod tests {
         let g = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
         ea.apply(g.clone()).unwrap();
         sa.push(&g).unwrap();
-        let ab = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
+        let ab = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        );
         ea.apply(ab.clone()).unwrap();
         sa.push(&ab).unwrap();
 

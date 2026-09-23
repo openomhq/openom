@@ -135,7 +135,15 @@ pub fn verify_ingest<E>(
         (true, Governing::Unattributed) => Disposition::Reject, // rev-0 backdate forge — never a hold (would stall forever)
         (true, Governing::Illegitimate) => Disposition::Reject,
         (true, Governing::NotYetRetained) => Disposition::Hold,
-        (true, Governing::Resolved { view, expected_key_id, head_view, .. }) => {
+        (
+            true,
+            Governing::Resolved {
+                view,
+                expected_key_id,
+                head_view,
+                ..
+            },
+        ) => {
             // Governing-revision verification first (Reject-precedence for real forgeries), THEN the OPE-421
             // head look-behind: an otherwise-valid entry whose author no longer holds the role at head is a
             // backdated forge by a since-demoted/removed member → `Drop` (terminal, non-resurrecting).
@@ -148,10 +156,21 @@ pub fn verify_ingest<E>(
         (false, Governing::Unattributed) => Disposition::Accept,
         (false, Governing::Illegitimate) => Disposition::Reject,
         (false, Governing::NotYetRetained) => Disposition::Hold,
-        (false, Governing::Resolved { epoch_attributed: false, .. }) => Disposition::Accept,
-        (false, Governing::Resolved { view, expected_key_id, .. }) => {
-            verify_or_reject(version, header, &view, &expected_key_id, open)
-        }
+        (
+            false,
+            Governing::Resolved {
+                epoch_attributed: false,
+                ..
+            },
+        ) => Disposition::Accept,
+        (
+            false,
+            Governing::Resolved {
+                view,
+                expected_key_id,
+                ..
+            },
+        ) => verify_or_reject(version, header, &view, &expected_key_id, open),
     }
 }
 
@@ -294,13 +313,18 @@ pub mod chain {
             let head_revision = head.revision;
             let mut map = BTreeMap::new();
             for (rev, bytes) in retained {
-                let kr =
-                    Keyring::decode(bytes.as_slice()).map_err(|e| format!("bad keyring rev {rev}: {e}"))?;
+                let kr = Keyring::decode(bytes.as_slice())
+                    .map_err(|e| format!("bad keyring rev {rev}: {e}"))?;
                 if kr.revision != *rev {
-                    return Err(format!("retained keyring at key {rev} declares revision {}", kr.revision));
+                    return Err(format!(
+                        "retained keyring at key {rev} declares revision {}",
+                        kr.revision
+                    ));
                 }
                 if kr.tree_id != head.tree_id {
-                    return Err(format!("retained keyring rev {rev} is for a different tree than the head"));
+                    return Err(format!(
+                        "retained keyring rev {rev} is for a different tree than the head"
+                    ));
                 }
                 map.insert(*rev, kr);
             }
@@ -325,7 +349,10 @@ pub mod chain {
         }
 
         fn is_moderator(&self, author_did: &str) -> bool {
-            crate::membership::is_moderator(&openom_keyring_chain::membership_view(&self.head), author_did)
+            crate::membership::is_moderator(
+                &openom_keyring_chain::membership_view(&self.head),
+                author_did,
+            )
         }
 
         fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing {
@@ -346,7 +373,9 @@ pub mod chain {
                 // channel" race (owner shared + immediately wrote): HOLD and re-verify after the next keyring
                 // sync — like the dag's unknown-epoch case — rather than terminally dropping a legit racing
                 // entry (the two engines otherwise disagree on the identical race).
-                None if rev > self.head_revision.saturating_add(HEAD_LOOKAHEAD) => Governing::Illegitimate,
+                None if rev > self.head_revision.saturating_add(HEAD_LOOKAHEAD) => {
+                    Governing::Illegitimate
+                }
                 None => Governing::NotYetRetained,
             }
         }
@@ -598,7 +627,12 @@ mod tests {
     fn resolver_from_builds_a_working_chain_resolver() {
         let k = generate_identity().unwrap();
         let kr = keyring(3, true, vec![member("m1", MemberRole::Admin, &k)]);
-        let m = resolver_from(EngineKind::Chain, &kr.encode_to_vec(), &[(3, kr.encode_to_vec())]).unwrap();
+        let m = resolver_from(
+            EngineKind::Chain,
+            &kr.encode_to_vec(),
+            &[(3, kr.encode_to_vec())],
+        )
+        .unwrap();
         let h = signed(Kind::Delta, "m1", &k, 3, b"payload");
         assert_eq!(ingest(m.as_ref(), &h, b"payload"), Disposition::Accept);
     }
@@ -612,17 +646,29 @@ mod tests {
         // stamping the pre-demote ref passes the governing-revision check but MUST fail the head look-behind.
         let owner = generate_identity().unwrap();
         let carol = generate_identity().unwrap();
-        let gov3 = keyring(3, true, vec![
-            member("owner", MemberRole::Owner, &owner),
-            member("carol", MemberRole::Admin, &carol),
-        ]);
-        let head4 = keyring(4, true, vec![
-            member("owner", MemberRole::Owner, &owner),
-            member("carol", MemberRole::Editor, &carol), // demoted
-        ]);
+        let gov3 = keyring(
+            3,
+            true,
+            vec![
+                member("owner", MemberRole::Owner, &owner),
+                member("carol", MemberRole::Admin, &carol),
+            ],
+        );
+        let head4 = keyring(
+            4,
+            true,
+            vec![
+                member("owner", MemberRole::Owner, &owner),
+                member("carol", MemberRole::Editor, &carol), // demoted
+            ],
+        );
         let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
         let snap = signed(Kind::Snapshot, "carol", &carol, 3, b"snap");
-        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Drop, "backdated snapshot by a demoted member");
+        assert_eq!(
+            ingest(&m, &snap, b"snap"),
+            Disposition::Drop,
+            "backdated snapshot by a demoted member"
+        );
     }
 
     #[test]
@@ -642,17 +688,29 @@ mod tests {
         let owner = generate_identity().unwrap();
         let carol_old = generate_identity().unwrap();
         let carol_new = generate_identity().unwrap();
-        let gov3 = keyring(3, true, vec![
-            member("owner", MemberRole::Owner, &owner),
-            member("carol", MemberRole::Admin, &carol_old),
-        ]);
-        let head4 = keyring(4, true, vec![
-            member("owner", MemberRole::Owner, &owner),
-            member("carol", MemberRole::Admin, &carol_new), // re-admitted, fresh key
-        ]);
+        let gov3 = keyring(
+            3,
+            true,
+            vec![
+                member("owner", MemberRole::Owner, &owner),
+                member("carol", MemberRole::Admin, &carol_old),
+            ],
+        );
+        let head4 = keyring(
+            4,
+            true,
+            vec![
+                member("owner", MemberRole::Owner, &owner),
+                member("carol", MemberRole::Admin, &carol_new), // re-admitted, fresh key
+            ],
+        );
         let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
         let snap = signed(Kind::Snapshot, "carol", &carol_old, 3, b"snap");
-        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Drop, "revoked key laundered via a re-admit");
+        assert_eq!(
+            ingest(&m, &snap, b"snap"),
+            Disposition::Drop,
+            "revoked key laundered via a re-admit"
+        );
     }
 
     #[test]
@@ -662,17 +720,29 @@ mod tests {
         // check but fails the head look-behind → Drop (terminal, non-resurrecting), NOT Reject.
         let owner = generate_identity().unwrap();
         let carol = generate_identity().unwrap();
-        let gov3 = keyring(3, true, vec![
-            member("owner", MemberRole::Owner, &owner),
-            member("carol", MemberRole::Admin, &carol),
-        ]);
-        let head4 = keyring(4, true, vec![
-            member("owner", MemberRole::Owner, &owner),
-            member("carol", MemberRole::Editor, &carol),
-        ]);
+        let gov3 = keyring(
+            3,
+            true,
+            vec![
+                member("owner", MemberRole::Owner, &owner),
+                member("carol", MemberRole::Admin, &carol),
+            ],
+        );
+        let head4 = keyring(
+            4,
+            true,
+            vec![
+                member("owner", MemberRole::Owner, &owner),
+                member("carol", MemberRole::Editor, &carol),
+            ],
+        );
         let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
         let delta = signed(Kind::Delta, "carol", &carol, 3, b"d");
-        assert_eq!(ingest(&m, &delta, b"d"), Disposition::Drop, "demoted member's backdated delta");
+        assert_eq!(
+            ingest(&m, &delta, b"d"),
+            Disposition::Drop,
+            "demoted member's backdated delta"
+        );
     }
 
     #[test]
@@ -683,14 +753,22 @@ mod tests {
         // not-yet-folded delta, bounded by Slice 3's compact-before-remove.
         let owner = generate_identity().unwrap();
         let bob = generate_identity().unwrap();
-        let gov3 = keyring(3, true, vec![
-            member("owner", MemberRole::Owner, &owner),
-            member("bob", MemberRole::Admin, &bob),
-        ]);
+        let gov3 = keyring(
+            3,
+            true,
+            vec![
+                member("owner", MemberRole::Owner, &owner),
+                member("bob", MemberRole::Admin, &bob),
+            ],
+        );
         let head4 = keyring(4, true, vec![member("owner", MemberRole::Owner, &owner)]); // bob removed
         let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
         let delta = signed(Kind::Delta, "bob", &bob, 3, b"d");
-        assert_eq!(ingest(&m, &delta, b"d"), Disposition::Drop, "removed member's backdated delta");
+        assert_eq!(
+            ingest(&m, &delta, b"d"),
+            Disposition::Drop,
+            "removed member's backdated delta"
+        );
     }
 
     #[test]
@@ -736,9 +814,15 @@ mod tests {
         let m = cm(&head, &[(3, &head)]);
         // rev 4 is one past the verified head (3) — the benign "keyring channel hasn't caught up" race → Hold
         // and re-verify after the next keyring sync, not a terminal drop.
-        assert_eq!(ingest(&m, &signed(Kind::Delta, "m1", &k, 4, b"x"), b"x"), Disposition::Hold);
+        assert_eq!(
+            ingest(&m, &signed(Kind::Delta, "m1", &k, 4, b"x"), b"x"),
+            Disposition::Hold
+        );
         // A ref far past the head is fabricated → hard Reject (can't stall the tail forever).
-        assert_eq!(ingest(&m, &signed(Kind::Delta, "m1", &k, 100, b"x"), b"x"), Disposition::Reject);
+        assert_eq!(
+            ingest(&m, &signed(Kind::Delta, "m1", &k, 100, b"x"), b"x"),
+            Disposition::Reject
+        );
     }
 
     #[test]
@@ -748,7 +832,10 @@ mod tests {
         let head = keyring(5, true, vec![member("m1", MemberRole::Admin, &k)]);
         let gov4 = keyring(4, true, vec![member("m1", MemberRole::Admin, &k)]);
         let h = signed(Kind::Delta, "m1", &k, 4, b"x");
-        assert_eq!(ingest(&cm(&head, &[(5, &head)]), &h, b"x"), Disposition::Hold);
+        assert_eq!(
+            ingest(&cm(&head, &[(5, &head)]), &h, b"x"),
+            Disposition::Hold
+        );
         assert_eq!(
             ingest(&cm(&head, &[(5, &head), (4, &gov4)]), &h, b"x"),
             Disposition::Accept

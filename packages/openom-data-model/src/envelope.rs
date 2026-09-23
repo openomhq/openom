@@ -426,7 +426,10 @@ mod tests {
     #[test]
     fn attest_target_as_str_returns_the_inner_hash() {
         // kills AttestTarget::as_str -> ""/"xyzzy"
-        assert_eq!(AttestTarget::Claim("sha256:aa".into()).as_str(), "sha256:aa");
+        assert_eq!(
+            AttestTarget::Claim("sha256:aa".into()).as_str(),
+            "sha256:aa"
+        );
         assert_eq!(
             AttestTarget::Fingerprint("sha256:bb".into()).as_str(),
             "sha256:bb"
@@ -561,7 +564,11 @@ mod tests {
         assert_eq!(rec.id(), "vessel-uuid");
         assert_eq!(rec.type_uri(), "openom.org/core/vessel/v1");
         assert_eq!(rec.created_by(), did);
-        assert_eq!(rec.created_at(), hlc(7), "createdAt parsed from the preserved JSON string");
+        assert_eq!(
+            rec.created_at(),
+            hlc(7),
+            "createdAt parsed from the preserved JSON string"
+        );
         assert_eq!(rec.to_value(), vessel);
 
         // Deserialize (the embedded-in-an-operation path) routes through the same boundary.

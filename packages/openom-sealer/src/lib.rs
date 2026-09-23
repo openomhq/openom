@@ -1,9 +1,9 @@
 #![doc = include_str!("../README.md")]
 
-use openom_crypto::{open_envelope, seal_envelope, CryptoError};
 /// The raw 32-byte DEK the sealer holds per epoch — re-exported so downstream crates (e.g. `openom-docsync`)
 /// can name the [`SealerSet::adopt_epochs`] argument type without a direct `openom-crypto` dependency.
 pub use openom_crypto::Key32;
+use openom_crypto::{open_envelope, seal_envelope, CryptoError};
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use openom_protocol::Message;
@@ -462,7 +462,10 @@ impl SealerSet {
         // current write epoch is always present (a member always holds its own write epoch), so a `None` here
         // would be a lost author — guard the invariant in debug builds rather than silently drop it.
         let non_empty = !self.sealers.is_empty();
-        let write = self.sealers.iter_mut().find(|s| s.key_id == self.write_key_id);
+        let write = self
+            .sealers
+            .iter_mut()
+            .find(|s| s.key_id == self.write_key_id);
         debug_assert!(
             write.is_some() || !non_empty,
             "adopt_epochs: the current write epoch is absent from the sealer set"
@@ -474,7 +477,10 @@ impl SealerSet {
                 // Idempotent: an epoch already held is skipped. `key_id`s are CSPRNG-minted, so the same id with
                 // a DIFFERENT DEK is impossible without a collision or a bug — assert it rather than silently
                 // keep the stale key.
-                debug_assert!(existing.dek == dek, "adopt_epochs: same key_id with a different DEK");
+                debug_assert!(
+                    existing.dek == dek,
+                    "adopt_epochs: same key_id with a different DEK"
+                );
                 continue;
             }
             self.sealers.push(Sealer::from_unwrapped(
@@ -488,7 +494,11 @@ impl SealerSet {
         }
         self.write_key_id = write_key_id;
         if let Some(a) = author {
-            if let Some(w) = self.sealers.iter_mut().find(|s| s.key_id == self.write_key_id) {
+            if let Some(w) = self
+                .sealers
+                .iter_mut()
+                .find(|s| s.key_id == self.write_key_id)
+            {
                 w.set_author(a.signing_key, a.member_id, governing_ref);
             }
         }
@@ -578,23 +588,49 @@ mod tests {
             vec![(b"epoch-0".to_vec(), dek0)],
             KeyId::new(b"epoch-0".to_vec()),
         )
-        .with_author(edsign::SigningKey::from_seed(&[7u8; 32]), "acct-bob".into(), b"gov-0".to_vec());
+        .with_author(
+            edsign::SigningKey::from_seed(&[7u8; 32]),
+            "acct-bob".into(),
+            b"gov-0".to_vec(),
+        );
 
         // Splice a NEW epoch and make it the write epoch (a member's post-removal adopt).
         let dek1 = openom_crypto::generate_dek().unwrap().into_inner();
-        let added = set.adopt_epochs(vec![(b"epoch-1".to_vec(), dek1.clone())], b"epoch-1".to_vec(), b"gov-1".to_vec());
+        let added = set.adopt_epochs(
+            vec![(b"epoch-1".to_vec(), dek1.clone())],
+            b"epoch-1".to_vec(),
+            b"gov-1".to_vec(),
+        );
         assert_eq!(added, 1, "one new epoch spliced in");
 
         // New entries now seal under the adopted write epoch, still attributed (the author moved).
-        let out = set.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"post-rotation").unwrap();
-        let header = Envelope::decode(out.envelope.as_slice()).unwrap().header.unwrap();
-        assert_eq!(header.key_id, b"epoch-1", "seals under the adopted write epoch");
-        assert!(!header.author_signature.is_empty(), "the author moved to the new write epoch");
-        assert_eq!(set.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(), b"post-rotation");
+        let out = set
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"post-rotation")
+            .unwrap();
+        let header = Envelope::decode(out.envelope.as_slice())
+            .unwrap()
+            .header
+            .unwrap();
+        assert_eq!(
+            header.key_id, b"epoch-1",
+            "seals under the adopted write epoch"
+        );
+        assert!(
+            !header.author_signature.is_empty(),
+            "the author moved to the new write epoch"
+        );
+        assert_eq!(
+            set.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(),
+            b"post-rotation"
+        );
 
         // Idempotent: re-adopting a held epoch adds nothing.
         assert_eq!(
-            set.adopt_epochs(vec![(b"epoch-1".to_vec(), dek1)], b"epoch-1".to_vec(), b"gov-1".to_vec()),
+            set.adopt_epochs(
+                vec![(b"epoch-1".to_vec(), dek1)],
+                b"epoch-1".to_vec(),
+                b"gov-1".to_vec()
+            ),
             0,
             "re-adopting a held epoch is a no-op"
         );
@@ -652,7 +688,9 @@ mod tests {
         // OPE-453: an at-rest app secret round-trips under the DEK, and its distinct kind AAD-binding means it
         // can neither open as an on-wire entry nor be opened by one — a snapshot/media can't masquerade as it.
         let s = sealer();
-        let out = s.seal_entry(&SealContext::app_secret(), b"s_mac_claim-bytes").unwrap();
+        let out = s
+            .seal_entry(&SealContext::app_secret(), b"s_mac_claim-bytes")
+            .unwrap();
         assert_eq!(
             s.open_entry(EntryKind::AppSecret, &out.envelope).unwrap(),
             b"s_mac_claim-bytes"
@@ -667,7 +705,9 @@ mod tests {
             Err(SealerError::WrongKind)
         ));
         // ...and a snapshot must not open as an app secret.
-        let snap = s.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"tree").unwrap();
+        let snap = s
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"tree")
+            .unwrap();
         assert!(matches!(
             s.open_entry(EntryKind::AppSecret, &snap.envelope),
             Err(SealerError::WrongKind)
@@ -677,7 +717,11 @@ mod tests {
     #[test]
     fn with_author_signs_and_attributes_the_entry() {
         let author = openom_keyring_chain::generate_identity().unwrap();
-        let s = sealer().with_author(author, "m1".into(), openom_keyring_chain::encode_governing_ref(3));
+        let s = sealer().with_author(
+            author,
+            "m1".into(),
+            openom_keyring_chain::encode_governing_ref(3),
+        );
         let delta = SealContext {
             kind: EntryKind::Delta,
             format: Format::OpenomOps,
@@ -693,7 +737,10 @@ mod tests {
             "an author-bearing sealer signs the entry"
         );
         assert_eq!(h.author_member_id, "m1");
-        assert_eq!(h.governing_ref, openom_keyring_chain::encode_governing_ref(3));
+        assert_eq!(
+            h.governing_ref,
+            openom_keyring_chain::encode_governing_ref(3)
+        );
         // Default (no author) → unattributed, V1 communal-DEK behaviour.
         let plain = sealer().seal_entry(&delta, b"a change").unwrap().envelope;
         let h2 = Envelope::decode(plain.as_slice()).unwrap().header.unwrap();
@@ -821,6 +868,10 @@ mod tests {
             KeyId::new(b"MISSING".to_vec()), // the write epoch is not among the held epochs
         );
         let dek1 = openom_crypto::generate_dek().unwrap().into_inner();
-        let _ = set.adopt_epochs(vec![(b"epoch-1".to_vec(), dek1)], b"epoch-1".to_vec(), b"gov".to_vec());
+        let _ = set.adopt_epochs(
+            vec![(b"epoch-1".to_vec(), dek1)],
+            b"epoch-1".to_vec(),
+            b"gov".to_vec(),
+        );
     }
 }

@@ -186,9 +186,18 @@ mod tests {
         assert!(params(16, 3, 2, 32).validate(&bounds));
         // Each field, alone, just outside the window → rejected.
         assert!(!params(7, 1, 1, 16).validate(&bounds), "memory below floor");
-        assert!(!params(17, 1, 1, 16).validate(&bounds), "memory above ceiling");
-        assert!(!params(8, 4, 1, 16).validate(&bounds), "iterations above ceiling");
-        assert!(!params(8, 1, 3, 16).validate(&bounds), "parallelism above ceiling");
+        assert!(
+            !params(17, 1, 1, 16).validate(&bounds),
+            "memory above ceiling"
+        );
+        assert!(
+            !params(8, 4, 1, 16).validate(&bounds),
+            "iterations above ceiling"
+        );
+        assert!(
+            !params(8, 1, 3, 16).validate(&bounds),
+            "parallelism above ceiling"
+        );
         assert!(!params(8, 1, 1, 15).validate(&bounds), "salt too short");
         assert!(!params(8, 1, 1, 33).validate(&bounds), "salt too long");
     }

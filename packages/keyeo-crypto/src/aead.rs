@@ -124,7 +124,10 @@ mod tests {
     fn xchacha_core_round_trips_and_binds_aad() {
         let ct = xchacha_seal(&KEY, &[1u8; 24], b"aad", b"payload").unwrap();
         assert_ne!(ct.as_slice(), b"payload".as_slice());
-        assert_eq!(xchacha_open(&KEY, &[1u8; 24], b"aad", &ct).unwrap(), b"payload");
+        assert_eq!(
+            xchacha_open(&KEY, &[1u8; 24], b"aad", &ct).unwrap(),
+            b"payload"
+        );
         // A different AAD must not open.
         assert!(matches!(
             xchacha_open(&KEY, &[1u8; 24], b"other", &ct),
@@ -135,6 +138,9 @@ mod tests {
     #[test]
     fn aesgcm_core_round_trips() {
         let ct = aesgcm_seal(&KEY, &[2u8; 12], b"aad", b"snapshot").unwrap();
-        assert_eq!(aesgcm_open(&KEY, &[2u8; 12], b"aad", &ct).unwrap(), b"snapshot");
+        assert_eq!(
+            aesgcm_open(&KEY, &[2u8; 12], b"aad", &ct).unwrap(),
+            b"snapshot"
+        );
     }
 }

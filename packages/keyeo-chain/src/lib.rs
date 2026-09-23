@@ -204,7 +204,11 @@ fn check_structure_generic<D: Doc>(doc: &D) -> Result<(), Error> {
 fn derived_signers<Id: Clone, R: SignerRole, PK: Clone>(
     members: &[Signer<Id, R, PK>],
 ) -> Vec<Signer<Id, R, PK>> {
-    members.iter().filter(|m| m.role.is_signer()).cloned().collect()
+    members
+        .iter()
+        .filter(|m| m.role.is_signer())
+        .cloned()
+        .collect()
 }
 
 fn same_signer<Id: Eq, R: PartialEq, PK: AsRef<[u8]>>(
@@ -221,8 +225,12 @@ fn signer_set_differs<Id: Eq, R: PartialEq, PK: AsRef<[u8]>>(
     candidate: &[Signer<Id, R, PK>],
 ) -> bool {
     prior.len() != candidate.len()
-        || prior.iter().any(|p| !candidate.iter().any(|c| same_signer(p, c)))
-        || candidate.iter().any(|c| !prior.iter().any(|p| same_signer(p, c)))
+        || prior
+            .iter()
+            .any(|p| !candidate.iter().any(|c| same_signer(p, c)))
+        || candidate
+            .iter()
+            .any(|c| !prior.iter().any(|p| same_signer(p, c)))
 }
 
 /// The signer-set delta is EXACTLY one non-founder (co-owner) signer removed — nothing else added or
@@ -243,7 +251,9 @@ where
         .iter()
         .filter(|p| !candidate.iter().any(|c| same_signer(p, c)))
         .collect();
-    let added = candidate.iter().any(|c| !prior.iter().any(|p| same_signer(p, c)));
+    let added = candidate
+        .iter()
+        .any(|c| !prior.iter().any(|p| same_signer(p, c)));
     // Removing exactly one co-owner (never the founder), adding nothing.
     if added || removed.len() != 1 || removed[0].role.is_founder() {
         return false;
@@ -268,8 +278,8 @@ where
     S: SignatureScheme,
 {
     let founder = prior.signers.iter().find(|s| s.role.is_founder());
-    let founder_signed = founder
-        .is_some_and(|f| verify_any::<S>(msg, sigs, std::slice::from_ref(&f.public_key)));
+    let founder_signed =
+        founder.is_some_and(|f| verify_any::<S>(msg, sigs, std::slice::from_ref(&f.public_key)));
 
     // Target-exclusion: the co-owner denominator is the prior signers, minus the founder, minus any signer
     // this doc removes. Computed against the DERIVED candidate signer set.
@@ -279,9 +289,8 @@ where
         .filter(|p| !candidate_signers.iter().any(|c| same_signer(p, c)))
         .map(|p| &p.public_key)
         .collect();
-    let is_founder_key = |k: &S::PublicKey| {
-        founder.is_some_and(|f| f.public_key.as_ref() == k.as_ref())
-    };
+    let is_founder_key =
+        |k: &S::PublicKey| founder.is_some_and(|f| f.public_key.as_ref() == k.as_ref());
     let co_owner_keys: Vec<S::PublicKey> = prior
         .signers
         .iter()
@@ -289,14 +298,15 @@ where
         .filter(|k| !is_founder_key(k) && !departing.iter().any(|d| d.as_ref() == k.as_ref()))
         .cloned()
         .collect();
-    let prior_keys: Vec<S::PublicKey> = prior.signers.iter().map(|s| s.public_key.clone()).collect();
+    let prior_keys: Vec<S::PublicKey> =
+        prior.signers.iter().map(|s| s.public_key.clone()).collect();
 
     let m = prior.governance.threshold as usize;
     match prior.governance.kind {
-        1 => founder_signed,                                                            // founder-only
+        1 => founder_signed, // founder-only
         2 => founder_signed || verify_threshold::<S>(msg, sigs, &co_owner_keys, m), // founder-or-threshold(m)
-        3 => verify_threshold::<S>(msg, sigs, &prior_keys, m),                       // threshold(m), no founder
-        _ => founder_signed || verify_all::<S>(msg, sigs, &prior_keys),             // 0/unknown: founder-or-unanimity
+        3 => verify_threshold::<S>(msg, sigs, &prior_keys, m), // threshold(m), no founder
+        _ => founder_signed || verify_all::<S>(msg, sigs, &prior_keys), // 0/unknown: founder-or-unanimity
     }
 }
 
@@ -344,10 +354,7 @@ type Verified<D> = Result<Anchor<<D as Doc>::Id, <D as Doc>::R, Pk<D>>, Error>;
 /// # Errors
 /// Returns the [`Error`] identifying why `cand` is not a valid successor of `prior` — a group mismatch,
 /// a structural failure, a non-sequential revision or fork, or an unendorsed/unauthorized change.
-pub fn verify_transition<D: Doc>(
-    prior: &Anchor<D::Id, D::R, Pk<D>>,
-    cand: &D,
-) -> Verified<D> {
+pub fn verify_transition<D: Doc>(prior: &Anchor<D::Id, D::R, Pk<D>>, cand: &D) -> Verified<D> {
     if cand.group_id() != &prior.group_id {
         return Err(Error::GroupMismatch);
     }
@@ -384,7 +391,12 @@ pub fn verify_transition<D: Doc>(
 
     if signer_change || governance_change || rvk_establishment {
         let self_removal = signer_change
-            && is_self_removal::<D::Id, D::R, D::S>(&prior.signers, &candidate_signers, &msg, &sigs);
+            && is_self_removal::<D::Id, D::R, D::S>(
+                &prior.signers,
+                &candidate_signers,
+                &msg,
+                &sigs,
+            );
         if !(self_removal
             || prior_governance_met::<D::Id, D::R, D::S>(prior, &candidate_signers, &msg, &sigs))
         {
@@ -428,10 +440,7 @@ pub fn verify_transition<D: Doc>(
 ///
 /// # Errors
 /// Returns the first [`Error`] any hop's [`verify_transition`] rejects with.
-pub fn verify_walk<D: Doc>(
-    prior: &Anchor<D::Id, D::R, Pk<D>>,
-    hops: &[D],
-) -> Verified<D> {
+pub fn verify_walk<D: Doc>(prior: &Anchor<D::Id, D::R, Pk<D>>, hops: &[D]) -> Verified<D> {
     let mut anchor = prior.clone();
     for hop in hops {
         anchor = verify_transition(&anchor, hop)?;
@@ -451,10 +460,7 @@ pub fn verify_walk<D: Doc>(
 /// # Errors
 /// Returns an [`Error`] if the doc is structurally invalid, not self-signed by one of its own signers, or
 /// (when `prior_rvk` is set) does not carry and is not signed by that same recovery authority.
-pub fn verify_reset<D: Doc>(
-    prior_rvk: Option<&Pk<D>>,
-    doc: &D,
-) -> Verified<D> {
+pub fn verify_reset<D: Doc>(prior_rvk: Option<&Pk<D>>, doc: &D) -> Verified<D> {
     doc.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(doc)?;
 
@@ -491,10 +497,7 @@ pub fn verify_reset<D: Doc>(
 /// # Errors
 /// Returns an [`Error`] if the doc is structurally invalid, is not revision 1 with an all-zero
 /// `prev_hash`, has no founder matching `own_founder_key`, or is not signed by that founder.
-pub fn bootstrap_genesis<D: Doc>(
-    genesis: &D,
-    own_founder_key: &Pk<D>,
-) -> Verified<D> {
+pub fn bootstrap_genesis<D: Doc>(genesis: &D, own_founder_key: &Pk<D>) -> Verified<D> {
     genesis.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(genesis)?;
     if genesis.revision().0 != 1 || genesis.prev_hash() != &DocHash([0u8; 32]) {
@@ -624,7 +627,12 @@ impl keyeo_core::Compaction for Retained {
         let Some(&checkpoint) = state.revisions.iter().filter(|r| **r <= horizon).max() else {
             return Ok(None);
         };
-        let prune: Vec<Revision> = state.revisions.iter().copied().filter(|r| *r < checkpoint).collect();
+        let prune: Vec<Revision> = state
+            .revisions
+            .iter()
+            .copied()
+            .filter(|r| *r < checkpoint)
+            .collect();
         if prune.is_empty() {
             return Ok(None); // horizon is at/below the oldest retained revision — nothing to drop
         }
@@ -643,24 +651,34 @@ mod compaction_tests {
 
     fn compact(revisions: &[u32], stable: u32, keep_last: usize) -> Option<Compacted> {
         let state = Retained::new(revs(revisions));
-        <Retained as Compaction>::compact(&state, &Revision(stable), RetentionPlan::Snapshot { keep_last })
-            .unwrap()
+        <Retained as Compaction>::compact(
+            &state,
+            &Revision(stable),
+            RetentionPlan::Snapshot { keep_last },
+        )
+        .unwrap()
     }
 
     #[test]
     fn keep_all_is_a_noop() {
         let state = Retained::new(revs(&[1, 2, 3]));
-        assert!(<Retained as Compaction>::compact(&state, &Revision(3), RetentionPlan::KeepAll)
-            .unwrap()
-            .is_none());
+        assert!(
+            <Retained as Compaction>::compact(&state, &Revision(3), RetentionPlan::KeepAll)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn new_dedups_and_sorts_so_compact_is_order_independent() {
         let state = Retained::new(revs(&[5, 1, 3, 2, 5, 4, 1]));
-        let out = <Retained as Compaction>::compact(&state, &Revision(5), RetentionPlan::Snapshot { keep_last: 2 })
-            .unwrap()
-            .unwrap();
+        let out = <Retained as Compaction>::compact(
+            &state,
+            &Revision(5),
+            RetentionPlan::Snapshot { keep_last: 2 },
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(out.checkpoint, Revision(3));
         assert_eq!(out.prune, revs(&[1, 2]));
     }
@@ -733,7 +751,10 @@ mod verification {
         kani::assume(kind <= 2);
         let threshold: u32 = kani::any();
         let signer_count: usize = kani::any();
-        assert!(rule_is_satisfiable(Governance { kind, threshold }, signer_count));
+        assert!(rule_is_satisfiable(
+            Governance { kind, threshold },
+            signer_count
+        ));
     }
 
     /// Fail-closed: any governance `kind` this build does not recognise (anything outside `0..=3`) is NEVER
@@ -745,7 +766,10 @@ mod verification {
         kani::assume(kind >= 4); // 0..=2 founder kinds, 3 the threshold kind; everything else is unknown
         let threshold: u32 = kani::any();
         let signer_count: usize = kani::any();
-        assert!(!rule_is_satisfiable(Governance { kind, threshold }, signer_count));
+        assert!(!rule_is_satisfiable(
+            Governance { kind, threshold },
+            signer_count
+        ));
     }
 
     /// The revision-successor rule: exactly one prior (`u32::MAX`) has no in-range successor and is the only
@@ -795,8 +819,16 @@ mod verification {
         let role: i16 = kani::any();
         let (k_old, k_new): (u8, u8) = (kani::any(), kani::any());
         kani::assume(k_old != k_new);
-        let before: [TinySigner; 1] = [Signer { id, role, public_key: [k_old] }];
-        let after: [TinySigner; 1] = [Signer { id, role, public_key: [k_new] }];
+        let before: [TinySigner; 1] = [Signer {
+            id,
+            role,
+            public_key: [k_old],
+        }];
+        let after: [TinySigner; 1] = [Signer {
+            id,
+            role,
+            public_key: [k_new],
+        }];
         assert!(signer_set_differs(&before, &after));
     }
 }

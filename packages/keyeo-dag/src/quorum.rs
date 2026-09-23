@@ -23,7 +23,11 @@ use crate::dag::resolver::{GroupState, MemberId, MembershipAction};
 /// coupling lives here, not in the engine (the property the unified `Engine<Op, State, Resolver>` needs).
 pub trait QuorumPolicy<Id: MemberId, R: Role, S: SignatureScheme>: Send + Sync {
     /// The members permitted to approve a proposal of `target`, at the proposal's causal position.
-    fn eligible(&self, state: &GroupState<Id, R, S>, target: &MembershipAction<Id, R, S>) -> HashSet<Id>;
+    fn eligible(
+        &self,
+        state: &GroupState<Id, R, S>,
+        target: &MembershipAction<Id, R, S>,
+    ) -> HashSet<Id>;
     /// The quorum a proposal of `target` requires (e.g. `Either(Sole(founder), All(co-owners))`).
     fn requirement(
         &self,
@@ -46,7 +50,11 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> QuorumPolicy<Id, R, S> for Indiv
     fn eligible(&self, _: &GroupState<Id, R, S>, _: &MembershipAction<Id, R, S>) -> HashSet<Id> {
         HashSet::new()
     }
-    fn requirement(&self, _: &GroupState<Id, R, S>, _: &MembershipAction<Id, R, S>) -> Requirement<Id> {
+    fn requirement(
+        &self,
+        _: &GroupState<Id, R, S>,
+        _: &MembershipAction<Id, R, S>,
+    ) -> Requirement<Id> {
         // Fail-closed: `All` of the empty set is never satisfied, so no Commit ever takes effect.
         Requirement::All(HashSet::new())
     }

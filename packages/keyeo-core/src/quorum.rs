@@ -32,9 +32,7 @@ impl<Id: Eq + Hash> Requirement<Id> {
             Self::Sole(id) => approvers.contains(id),
             Self::Any(set) => set.iter().any(|m| approvers.contains(m)),
             Self::All(set) => !set.is_empty() && set.iter().all(|m| approvers.contains(m)),
-            Self::Threshold(m, set) => {
-                set.iter().filter(|x| approvers.contains(x)).count() >= *m
-            }
+            Self::Threshold(m, set) => set.iter().filter(|x| approvers.contains(x)).count() >= *m,
             Self::Either(a, b) => a.satisfied_by(approvers) || b.satisfied_by(approvers),
         }
     }
@@ -54,15 +52,24 @@ mod tests {
         assert!(req.satisfied_by(&set(&["founder"])));
         assert!(req.satisfied_by(&set(&["founder", "bob"])));
         assert!(!req.satisfied_by(&set(&["bob"])));
-        assert!(!req.satisfied_by(&set(&[])), "fail-closed: nobody approving is never enough");
+        assert!(
+            !req.satisfied_by(&set(&[])),
+            "fail-closed: nobody approving is never enough"
+        );
     }
 
     #[test]
     fn all_is_unanimity_and_the_empty_set_is_not() {
         let req = Requirement::All(set(&["a", "b", "c"]));
         assert!(req.satisfied_by(&set(&["a", "b", "c"])));
-        assert!(req.satisfied_by(&set(&["a", "b", "c", "d"])), "extra approvers are harmless");
-        assert!(!req.satisfied_by(&set(&["a", "b"])), "one short is not unanimity");
+        assert!(
+            req.satisfied_by(&set(&["a", "b", "c", "d"])),
+            "extra approvers are harmless"
+        );
+        assert!(
+            !req.satisfied_by(&set(&["a", "b"])),
+            "one short is not unanimity"
+        );
         // Fail-closed: "unanimity of nobody" must be FALSE, else an empty denominator auto-approves.
         assert!(!Requirement::<String>::All(set(&[])).satisfied_by(&set(&[])));
     }
@@ -80,7 +87,10 @@ mod tests {
         let req = Requirement::Threshold(2, set(&["a", "b", "c"]));
         assert!(req.satisfied_by(&set(&["a", "b"])));
         assert!(req.satisfied_by(&set(&["a", "b", "c"])));
-        assert!(!req.satisfied_by(&set(&["a"])), "one short of the threshold");
+        assert!(
+            !req.satisfied_by(&set(&["a"])),
+            "one short of the threshold"
+        );
         assert!(
             !req.satisfied_by(&set(&["a", "x", "y", "z"])),
             "approvers outside the set don't count toward the threshold"
@@ -96,7 +106,10 @@ mod tests {
         );
         assert!(req.satisfied_by(&set(&["founder"])), "founder path");
         assert!(req.satisfied_by(&set(&["co1", "co2"])), "unanimity path");
-        assert!(!req.satisfied_by(&set(&["co1"])), "neither: partial co-owners, no founder");
+        assert!(
+            !req.satisfied_by(&set(&["co1"])),
+            "neither: partial co-owners, no founder"
+        );
         assert!(!req.satisfied_by(&set(&[])), "neither");
     }
 }

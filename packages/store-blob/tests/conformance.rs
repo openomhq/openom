@@ -1,7 +1,7 @@
 //! Run the backend-agnostic conformance suite against both reference impls.
 
-use store_blob::{conformance, FsBlob, MemoryBlob};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use store_blob::{conformance, FsBlob, MemoryBlob};
 
 #[test]
 fn memory_blob_conforms() {
@@ -14,5 +14,7 @@ fn fs_blob_conforms() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().to_path_buf();
     let n = AtomicUsize::new(0);
-    conformance::run(|| FsBlob::new(base.join(format!("store-{}", n.fetch_add(1, Ordering::SeqCst)))));
+    conformance::run(|| {
+        FsBlob::new(base.join(format!("store-{}", n.fetch_add(1, Ordering::SeqCst))))
+    });
 }

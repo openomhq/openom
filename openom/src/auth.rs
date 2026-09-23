@@ -84,7 +84,11 @@ pub(crate) async fn resolve_member(
             .fetch_optional(&state.db)
             .await?;
     if let Some(mid) = found {
-        state.identity_cache.write().await.insert(sub.to_string(), mid);
+        state
+            .identity_cache
+            .write()
+            .await
+            .insert(sub.to_string(), mid);
     }
     Ok(found)
 }
@@ -110,7 +114,10 @@ impl FromRequestParts<AppState> for Identity {
             crate::provision_dev_account(&state.db, id)
                 .await
                 .map_err(|_| internal("dev account provisioning failed"))?;
-            return Ok(Self { member_id: id, verified_email: dev_verified_email(parts) });
+            return Ok(Self {
+                member_id: id,
+                verified_email: dev_verified_email(parts),
+            });
         }
 
         let token = bearer.ok_or_else(|| auth_required("missing bearer token"))?;
@@ -131,7 +138,10 @@ impl FromRequestParts<AppState> for Identity {
             .ok_or_else(|| {
                 ApiError::forbidden(ec::UNREGISTERED, "account identity is not registered")
             })?;
-        Ok(Self { member_id, verified_email: claims.verified_email })
+        Ok(Self {
+            member_id,
+            verified_email: claims.verified_email,
+        })
     }
 }
 
@@ -169,7 +179,11 @@ impl FromRequestParts<AppState> for RawJwt {
                 || state.config.local_member_id.to_string(),
                 |t| t.trim().to_string(),
             );
-            return Ok(Self { sub, iss: None, verified_email: dev_verified_email(parts) });
+            return Ok(Self {
+                sub,
+                iss: None,
+                verified_email: dev_verified_email(parts),
+            });
         }
 
         let token = bearer.ok_or_else(|| auth_required("missing bearer token"))?;
@@ -181,6 +195,10 @@ impl FromRequestParts<AppState> for RawJwt {
             tracing::warn!(error = %message, "JWT verification failed");
             auth_required("bearer token is invalid")
         })?;
-        Ok(Self { sub: claims.sub, iss: claims.iss, verified_email: claims.verified_email })
+        Ok(Self {
+            sub: claims.sub,
+            iss: claims.iss,
+            verified_email: claims.verified_email,
+        })
     }
 }

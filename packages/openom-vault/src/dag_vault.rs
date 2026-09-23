@@ -150,7 +150,9 @@ fn fold_into(
         }
         for e in payload.new_epochs {
             if mints {
-                state.tagged.push((e, entry.origin, entry.op_id, entry.author.clone()));
+                state
+                    .tagged
+                    .push((e, entry.origin, entry.op_id, entry.author.clone()));
             }
         }
         // added_wraps attach a member's wrap to an EXISTING epoch (an add-member's joiner wraps ride an
@@ -169,7 +171,11 @@ fn fold_into(
                         | keyeo_crypto::WrapMethod::MemberHpke { .. }
                 ) {
                     let n = added_by
-                        .entry((aw.key_id.clone(), entry.author.clone(), aw.wrap.recipient.clone()))
+                        .entry((
+                            aw.key_id.clone(),
+                            entry.author.clone(),
+                            aw.wrap.recipient.clone(),
+                        ))
                         .or_insert(0);
                     if *n >= MAX_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH_PER_RECIPIENT {
                         continue; // this author's flood bound for this (epoch, recipient) is reached
@@ -253,9 +259,11 @@ fn finalize_sealing(
     // owner's missing wrap (the A3 member-authored heal). Keeps the field name the shared `Unlocked` struct
     // exposes; under owner-as-member its meaning is "the owner's read gap a member heals" (was: RRK orphan).
     let needs_rrk_backfill = owner_id.as_ref().is_some_and(|oid| {
-        epochs
-            .iter()
-            .any(|ep| owner_inclusive_missing(ep, &required).iter().any(|id| id == oid))
+        epochs.iter().any(|ep| {
+            owner_inclusive_missing(ep, &required)
+                .iter()
+                .any(|id| id == oid)
+        })
     });
     Ok(FoldedSealing {
         epochs,
@@ -458,10 +466,7 @@ fn member_descriptors(members: &MembershipView) -> Vec<RecipientDescriptor<Strin
 fn member_covers_local(w: &keyeo_crypto::Wrap<String>, d: &RecipientDescriptor<String>) -> bool {
     match &w.method {
         KeyeoWrapMethod::MemberHpke { recipient_key, .. } => {
-            w.recipient == d.id
-                && d.expected_key
-                    .as_ref()
-                    .is_none_or(|k| recipient_key == k)
+            w.recipient == d.id && d.expected_key.as_ref().is_none_or(|k| recipient_key == k)
         }
         _ => false,
     }
@@ -580,7 +585,8 @@ fn unlock_with_account(
     let tree_id = ctx.tree_id.as_bytes();
     let replica_id = ctx.replica_id.as_bytes();
 
-    let resolved = dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+    let resolved =
+        dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
     let founder = resolved
         .members
         .owner()
@@ -1088,7 +1094,10 @@ impl DagVault {
         } else {
             Vec::new()
         };
-        let epochs_out = deks.into_iter().map(|(k, _e, d)| (k, d.into_inner())).collect();
+        let epochs_out = deks
+            .into_iter()
+            .map(|(k, _e, d)| (k, d.into_inner()))
+            .collect();
         Ok(crate::sharing::AdoptedEpochs {
             epochs: epochs_out,
             write_key_id,
@@ -1219,8 +1228,14 @@ impl DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        dag_client::append_change_role(anchor, &owner_id, target_member_id, new_role, &root.identity)
-            .map_err(|e| VaultError::BadKeyring(e.to_string()))
+        dag_client::append_change_role(
+            anchor,
+            &owner_id,
+            target_member_id,
+            new_role,
+            &root.identity,
+        )
+        .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
     /// Repair a stale write epoch (OPE-282): if the resolved keyring `needs_reseal` — a concurrent
@@ -1938,9 +1953,11 @@ mod tests {
         let removed = sealing_entry(2, b"k1", 1, Remove, vec![], None);
 
         // Cut after genesis: author from [genesis], retained tail = [removed].
-        let (segment, baseline) = author_checkpoint_sealing(std::slice::from_ref(&genesis)).unwrap();
+        let (segment, baseline) =
+            author_checkpoint_sealing(std::slice::from_ref(&genesis)).unwrap();
         let from_cp =
-            fold_from_checkpoint(&segment, baseline, std::slice::from_ref(&removed), &members).unwrap();
+            fold_from_checkpoint(&segment, baseline, std::slice::from_ref(&removed), &members)
+                .unwrap();
         let full = fold_sealing(&[genesis, removed], &members).unwrap();
         assert_folded_eq(&from_cp, &full);
     }
@@ -1963,8 +1980,13 @@ mod tests {
             author_checkpoint_sealing(&[genesis.clone(), removed_hi.clone()]).unwrap();
         assert_eq!(baseline, 2, "two minting entries below the cut");
 
-        let from_cp =
-            fold_from_checkpoint(&segment, baseline, std::slice::from_ref(&retained), &members).unwrap();
+        let from_cp = fold_from_checkpoint(
+            &segment,
+            baseline,
+            std::slice::from_ref(&retained),
+            &members,
+        )
+        .unwrap();
         let full = fold_sealing(&[genesis, removed_hi, retained], &members).unwrap();
 
         assert!(
@@ -2139,7 +2161,10 @@ mod tests {
             key_id: KeyeoKeyId::new(b"k0".to_vec()),
             ordinal: 0,
             dek_commitment: [0u8; 32],
-            wraps: vec![member_wrap_keyed("owner", b"old-owner-key"), member_wrap("bob")],
+            wraps: vec![
+                member_wrap_keyed("owner", b"old-owner-key"),
+                member_wrap("bob"),
+            ],
         };
         let required = member_descriptors(&members);
         assert!(
@@ -2610,8 +2635,14 @@ mod tests {
             r.did_key, p.did_key,
             "recovery restores the SAME durable identity (no fresh owner, no ReFound)"
         );
-        assert_eq!(r.anchor, p.anchor, "the tree anchor is unchanged by recovery");
-        assert!(!r.keystore.is_empty(), "recovery returns the re-wrapped account keystore blob");
+        assert_eq!(
+            r.anchor, p.anchor,
+            "the tree anchor is unchanged by recovery"
+        );
+        assert!(
+            !r.keystore.is_empty(),
+            "recovery returns the re-wrapped account keystore blob"
+        );
         assert_eq!(
             r.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"heirloom",
@@ -2695,7 +2726,8 @@ mod tests {
         }
         .to_bytes();
         let hostile =
-            dag_client::append_remove(&a2, &bob_id, &carol_id, sealing, &bob.root.identity).unwrap();
+            dag_client::append_remove(&a2, &bob_id, &carol_id, sealing, &bob.root.identity)
+                .unwrap();
 
         // The owner is missing from the write epoch → `needs_rrk_backfill` (the member-heal signal).
         assert!(
@@ -2714,20 +2746,30 @@ mod tests {
             .unwrap();
         let data1 = bob_u
             .sealer
-            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"post-removal, owner locked out")
+            .seal_entry(
+                &SealContext::snapshot(1, Vec::new(), 0),
+                b"post-removal, owner locked out",
+            )
             .unwrap()
             .envelope;
 
         // The owner unlocks but CANNOT reach the write epoch — locked out, cannot self-heal.
         let u_before = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &hostile, &acct(&ks, &owner_pass))
+            .unlock(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
+                &hostile,
+                &acct(&ks, &owner_pass),
+            )
             .unwrap();
         assert!(
             u_before.write_epoch_unreachable,
             "the owner cannot reach the epoch that omitted their wrap"
         );
         assert!(
-            u_before.sealer.open_entry(EntryKind::Snapshot, &data1).is_err(),
+            u_before
+                .sealer
+                .open_entry(EntryKind::Snapshot, &data1)
+                .is_err(),
             "before the heal, the owner can't read the locked-out epoch"
         );
 
@@ -2736,7 +2778,10 @@ mod tests {
         let healed = DagVault
             .backfill_rrk(&bob_ctx, &hostile, &bob_pass, &bob.pass_kdf, &floor)
             .unwrap();
-        assert!(healed.backfilled, "the member backfilled the owner's missing wrap");
+        assert!(
+            healed.backfilled,
+            "the member backfilled the owner's missing wrap"
+        );
         assert!(
             !fold_resolved(&dag_client::resolve(&healed.anchor).unwrap())
                 .unwrap()
@@ -2746,11 +2791,21 @@ mod tests {
 
         // Now the owner reaches the once-locked-out epoch.
         let u_after = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r3")), &healed.anchor, &acct(&ks, &owner_pass))
+            .unlock(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r3")),
+                &healed.anchor,
+                &acct(&ks, &owner_pass),
+            )
             .unwrap();
-        assert!(!u_after.write_epoch_unreachable, "the owner now reaches the write epoch");
+        assert!(
+            !u_after.write_epoch_unreachable,
+            "the owner now reaches the write epoch"
+        );
         assert_eq!(
-            u_after.sealer.open_entry(EntryKind::Snapshot, &data1).unwrap(),
+            u_after
+                .sealer
+                .open_entry(EntryKind::Snapshot, &data1)
+                .unwrap(),
             b"post-removal, owner locked out",
             "after the member heal, the owner reads the once-locked-out epoch"
         );
@@ -2846,9 +2901,15 @@ mod tests {
                 &p.watermark,
             )
             .unwrap();
-        assert_eq!(re.anchor, p.anchor, "a passphrase change does not touch the tree anchor");
+        assert_eq!(
+            re.anchor, p.anchor,
+            "a passphrase change does not touch the tree anchor"
+        );
         assert_eq!(re.watermark, p.watermark, "nor the anti-rollback watermark");
-        assert!(!re.keystore.is_empty(), "it returns the re-wrapped account keystore blob");
+        assert!(
+            !re.keystore.is_empty(),
+            "it returns the re-wrapped account keystore blob"
+        );
 
         // The NEW passphrase opens the tree via the re-wrapped account (DEK unchanged); the OLD one does not.
         let new_ks = AccountKeystore::from_bytes(&re.keystore).unwrap();
@@ -3119,7 +3180,11 @@ mod tests {
 
         // The owner seals an entry under the CURRENT (first) epoch.
         let u = DagVault
-            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &shared, &acct(&ks, &owner_pass))
+            .unlock(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
+                &shared,
+                &acct(&ks, &owner_pass),
+            )
             .unwrap();
         let sealed = u
             .sealer
@@ -3128,7 +3193,10 @@ mod tests {
             .envelope;
         let env = Envelope::decode(sealed.as_slice()).unwrap();
         let header = env.header.clone().unwrap();
-        assert!(!header.author_signature.is_empty(), "the shared-tree owner signs");
+        assert!(
+            !header.author_signature.is_empty(),
+            "the shared-tree owner signs"
+        );
 
         let verify = |m: &DagMembershipResolver, h: &openom_protocol::v1::Header| {
             verify_ingest(env.version, m, h, &h.governing_ref, &h.key_id, || {
@@ -3467,7 +3535,11 @@ mod tests {
                 "{stage}: the owner is not locked out of any retained epoch"
             );
             let u = DagVault
-                .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"ra")), anchor, &acct(&ks, &pass))
+                .unlock(
+                    &ctx(&tree, &owner, &ReplicaId::new(b"ra")),
+                    anchor,
+                    &acct(&ks, &pass),
+                )
                 .unwrap();
             assert!(
                 !u.write_epoch_unreachable,
@@ -3482,7 +3554,10 @@ mod tests {
 
         // provision
         let p = DagVault
-            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &acct(&ks, &pass))
+            .provision(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &acct(&ks, &pass),
+            )
             .unwrap();
         assert_eq!(
             DagVault.resolved_reset_authority(&p.anchor).unwrap(),

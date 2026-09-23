@@ -61,17 +61,28 @@ static HARNESS: LazyLock<Harness> = LazyLock::new(|| {
         .nest("/v1", v1);
     let router = openom::with_trace_layers(router);
 
-    Harness { router, exporter, _provider: provider }
+    Harness {
+        router,
+        exporter,
+        _provider: provider,
+    }
 });
 
 /// One in-process request. Returns status + response headers, and — crucially — fully consumes and
 /// DROPS the response body so the `TraceLayer` span (which lives in the body wrapper) closes and the
 /// `SimpleSpanProcessor` exports it before the caller reads the exporter.
 async fn send(req: Request<Body>) -> (StatusCode, HeaderMap) {
-    let resp = HARNESS.router.clone().oneshot(req).await.expect("router is infallible");
+    let resp = HARNESS
+        .router
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("router is infallible");
     let status = resp.status();
     let headers = resp.headers().clone();
-    let _ = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     (status, headers)
 }
 
@@ -102,7 +113,11 @@ fn span_for(request_id: &str) -> SpanData {
         .into_iter()
         .filter(|s| attr(s, "request_id").as_deref() == Some(request_id))
         .collect();
-    assert_eq!(found.len(), 1, "exactly one exported span for request_id={request_id}");
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly one exported span for request_id={request_id}"
+    );
     found.pop().unwrap()
 }
 
@@ -111,15 +126,25 @@ async fn health_span_has_route_status_and_echoes_request_id() {
     let id = "t-health";
     let (status, headers) = send(get_with_id("/health", id)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("x-request-id").unwrap(), id, "the id is echoed on the response");
+    assert_eq!(
+        headers.get("x-request-id").unwrap(),
+        id,
+        "the id is echoed on the response"
+    );
 
     let s = span_for(id);
     assert_eq!(s.name, "GET /health", "span name is method + matched route");
     assert_eq!(s.span_kind, SpanKind::Server);
     assert_eq!(attr(&s, "http.route").as_deref(), Some("/health"));
     assert_eq!(attr(&s, "http.request.method").as_deref(), Some("GET"));
-    assert_eq!(attr(&s, "http.response.status_code").as_deref(), Some("200"));
-    assert!(!matches!(s.status, Status::Error { .. }), "a 2xx is not an error span");
+    assert_eq!(
+        attr(&s, "http.response.status_code").as_deref(),
+        Some("200")
+    );
+    assert!(
+        !matches!(s.status, Status::Error { .. }),
+        "a 2xx is not an error span"
+    );
 }
 
 #[tokio::test]
@@ -141,8 +166,14 @@ async fn server_error_marks_the_span_as_error() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
     let s = span_for(id);
-    assert_eq!(attr(&s, "http.response.status_code").as_deref(), Some("500"));
-    assert!(matches!(s.status, Status::Error { .. }), "a 5xx is an error span");
+    assert_eq!(
+        attr(&s, "http.response.status_code").as_deref(),
+        Some("500")
+    );
+    assert!(
+        matches!(s.status, Status::Error { .. }),
+        "a 5xx is an error span"
+    );
 }
 
 #[tokio::test]
@@ -152,7 +183,10 @@ async fn incoming_traceparent_continues_the_same_trace() {
         .method("GET")
         .uri("/health")
         .header("x-request-id", id)
-        .header("traceparent", format!("00-{CALLER_TRACE_ID}-{CALLER_SPAN_ID}-01"))
+        .header(
+            "traceparent",
+            format!("00-{CALLER_TRACE_ID}-{CALLER_SPAN_ID}-01"),
+        )
         .body(Body::empty())
         .unwrap();
     send(req).await;
@@ -174,7 +208,10 @@ async fn caller_sampled_zero_does_not_suppress_our_span() {
         .method("GET")
         .uri("/health")
         .header("x-request-id", id)
-        .header("traceparent", format!("00-{CALLER_TRACE_ID}-{CALLER_SPAN_ID}-00"))
+        .header(
+            "traceparent",
+            format!("00-{CALLER_TRACE_ID}-{CALLER_SPAN_ID}-00"),
+        )
         .body(Body::empty())
         .unwrap();
     send(req).await;
@@ -191,6 +228,13 @@ async fn unmatched_path_collapses_to_a_constant_name() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let s = span_for(id);
-    assert_eq!(s.name, "GET <unmatched>", "unmatched requests collapse to one constant name");
-    assert_eq!(attr(&s, "http.route").as_deref(), Some(""), "no route template for an unmatched path");
+    assert_eq!(
+        s.name, "GET <unmatched>",
+        "unmatched requests collapse to one constant name"
+    );
+    assert_eq!(
+        attr(&s, "http.route").as_deref(),
+        Some(""),
+        "no route template for an unmatched path"
+    );
 }

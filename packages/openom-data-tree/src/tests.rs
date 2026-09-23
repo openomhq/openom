@@ -72,18 +72,27 @@ fn oplog_marks_below_moderator_ops_ineffective() {
 
     // ...and the op-log shows exactly that: the asserts are effective, the peer's remove is not.
     let log = a.oplog();
-    let remove = log.iter().find(|v| v.kind == "remove").expect("remove present");
+    let remove = log
+        .iter()
+        .find(|v| v.kind == "remove")
+        .expect("remove present");
     assert!(!remove.effective, "a below-moderator remove is inert");
     assert_eq!(remove.author, peer_did);
     assert!(
-        log.iter().filter(|v| v.kind == "assert").all(|v| v.effective),
+        log.iter()
+            .filter(|v| v.kind == "assert")
+            .all(|v| v.effective),
         "asserts are always effective (adds are add-only)"
     );
 
     // Accept it by promoting the peer to Maintainer+ — the same op re-activates on the next read.
     a.set_moderators(BTreeSet::from([DID.to_owned(), peer_did.to_owned()]));
     assert!(
-        a.oplog().iter().find(|v| v.kind == "remove").unwrap().effective,
+        a.oplog()
+            .iter()
+            .find(|v| v.kind == "remove")
+            .unwrap()
+            .effective,
         "promotion makes the carried op effective"
     );
     assert!(

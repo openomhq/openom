@@ -148,7 +148,11 @@ pub trait KeyringLifecycle {
     ///
     /// # Errors
     /// Returns [`VaultError`] if provisioning fails.
-    fn provision(&self, ctx: &VaultContext, account: &UnlockedAccount) -> Result<Provisioned, VaultError>;
+    fn provision(
+        &self,
+        ctx: &VaultContext,
+        account: &UnlockedAccount,
+    ) -> Result<Provisioned, VaultError>;
 
     /// Re-open an existing tree from its trusted `anchor` using the already-unlocked durable account.
     ///
@@ -399,16 +403,30 @@ mod tests {
         let (ks, _code, _u) = AccountKeystore::create(pass.expose()).unwrap();
         let real = MemberId::new(ks.unlock(pass.expose()).unwrap().member_id);
         let bogus = MemberId::new("acct-owner-not-self-certifying".to_string());
-        assert_ne!(real.as_str(), bogus.as_str(), "the two ids must differ for the test to mean anything");
+        assert_ne!(
+            real.as_str(),
+            bogus.as_str(),
+            "the two ids must differ for the test to mean anything"
+        );
 
         let p = ChainVault
-            .provision(&ctx(&tree, &real, &ReplicaId::new(b"rA")), &ks.unlock(pass.expose()).unwrap())
+            .provision(
+                &ctx(&tree, &real, &ReplicaId::new(b"rA")),
+                &ks.unlock(pass.expose()).unwrap(),
+            )
             .unwrap();
         // Unlock passing the BOGUS label — the owner is resolved from the account, so it opens regardless.
         let u = ChainVault
-            .unlock(&ctx(&tree, &bogus, &ReplicaId::new(b"rB")), &p.anchor, &ks.unlock(pass.expose()).unwrap())
+            .unlock(
+                &ctx(&tree, &bogus, &ReplicaId::new(b"rB")),
+                &p.anchor,
+                &ks.unlock(pass.expose()).unwrap(),
+            )
             .unwrap();
-        assert_eq!(u.did_key, p.did_key, "resolved from the account identity, not the caller's label");
+        assert_eq!(
+            u.did_key, p.did_key,
+            "resolved from the account identity, not the caller's label"
+        );
     }
 
     /// The whole `KeyringLifecycle` contract, engine-agnostic (OPE-543 durable identity — BOTH engines are
@@ -521,10 +539,7 @@ mod tests {
                 &u.watermark,
             )
             .unwrap();
-        assert!(
-            !r.watermark.is_empty(),
-            "recovery reports a watermark"
-        );
+        assert!(!r.watermark.is_empty(), "recovery reports a watermark");
         assert_eq!(
             r.did_key, p.did_key,
             "recovery restores the SAME durable identity"
@@ -576,7 +591,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(first.did_key, second.did_key, "one profile account owns both trees");
+        assert_eq!(
+            first.did_key, second.did_key,
+            "one profile account owns both trees"
+        );
         let first_open = engine
             .unlock(
                 &ctx(&first_tree, &member, &ReplicaId::new(b"first-open")),

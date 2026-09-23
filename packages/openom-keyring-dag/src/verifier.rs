@@ -11,7 +11,9 @@
 //! State + update are the engine's own opaque encoding (the seam never inspects them). The op bytes are
 //! the SAME `blob_sync` codec the transport publishes, so an op verifies identically however it arrived.
 
-use keyeo_dag::{ApplyOutcome, Error as KeyeoError, Keyeo, MembershipAction, SignedOp, StrongRemove};
+use keyeo_dag::{
+    ApplyOutcome, Error as KeyeoError, Keyeo, MembershipAction, SignedOp, StrongRemove,
+};
 use openom_keyring_api::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
 use serde::{Deserialize, Serialize};
 
@@ -43,8 +45,13 @@ struct DagTrustState {
 /// subsequent op. The variant must match the presence of prior state.
 #[derive(Serialize, Deserialize)]
 enum UpdateDto {
-    Bootstrap { pinned: PinnedConfig, genesis_op: Vec<u8> },
-    Op { op: Vec<u8> },
+    Bootstrap {
+        pinned: PinnedConfig,
+        genesis_op: Vec<u8>,
+    },
+    Op {
+        op: Vec<u8>,
+    },
 }
 
 /// The DAG keyring's keyless verifier. Holds no secrets and no state — everything comes in via
@@ -90,7 +97,9 @@ pub(crate) fn view_of(state: &KeyringState, reset_boundary: bool) -> MembershipV
 /// Map a keyeo apply error/outcome to a neutral [`VerifyError`] for the NEW op (stored ops use `replay`).
 // A value->value conversion of the owned apply result; taking `&` would force a borrow dance for no gain.
 #[allow(clippy::needless_pass_by_value)]
-fn classify(outcome: Result<ApplyOutcome<String, [u8; 32]>, KeyeoError<String>>) -> Result<(), VerifyError> {
+fn classify(
+    outcome: Result<ApplyOutcome<String, [u8; 32]>, KeyeoError<String>>,
+) -> Result<(), VerifyError> {
     match outcome {
         Ok(ApplyOutcome::Applied { .. }) => Ok(()),
         // Missing a parent op — the update references history the verifier hasn't been given (re-fetch).
@@ -130,8 +139,17 @@ impl KeyringVerifier for DagVerifier {
                 // The tree id from the VERIFIED resolved state (bound into every op's signature; survives the
                 // genesis Create fold), never from an unsigned side channel.
                 let tree_id = engine.state().group_id.0.clone();
-                let state = encode_state(&DagTrustState { pinned, ops: vec![genesis_op] });
-                Ok(Admitted { state, view, changed: true, tree_id, update_ref })
+                let state = encode_state(&DagTrustState {
+                    pinned,
+                    ops: vec![genesis_op],
+                });
+                Ok(Admitted {
+                    state,
+                    view,
+                    changed: true,
+                    tree_id,
+                    update_ref,
+                })
             }
             // Every subsequent op: replay the closure, resolve before + after, diff the membership.
             (Some(prior), UpdateDto::Op { op: op_bytes }) => {
@@ -145,7 +163,8 @@ impl KeyringVerifier for DagVerifier {
                 let op_id = op.id();
                 let is_reset = matches!(
                     op.action(),
-                    MembershipAction::ReFound { .. } | MembershipAction::RotateRecoveryAuthority { .. }
+                    MembershipAction::ReFound { .. }
+                        | MembershipAction::RotateRecoveryAuthority { .. }
                 );
                 classify(engine.apply(op))?;
                 // (a) vs (b): an op unauthorized AT ITS CAUSAL POSITION is permanently ineffective on
@@ -164,8 +183,17 @@ impl KeyringVerifier for DagVerifier {
                 let update_ref = op_id.to_vec();
                 let mut ops = st.ops;
                 ops.push(op_bytes);
-                let state = encode_state(&DagTrustState { pinned: st.pinned, ops });
-                Ok(Admitted { state, view, changed, tree_id, update_ref })
+                let state = encode_state(&DagTrustState {
+                    pinned: st.pinned,
+                    ops,
+                });
+                Ok(Admitted {
+                    state,
+                    view,
+                    changed,
+                    tree_id,
+                    update_ref,
+                })
             }
             // A bootstrap against existing state, or an op with no prior state — malformed sequencing.
             _ => Err(VerifyError::Malformed),
@@ -245,7 +273,9 @@ mod tests {
         }
     }
     fn create(members: &[KeyringMemberInit]) -> crate::KeyringAction {
-        MembershipAction::Create { initial_members: members.to_vec() }
+        MembershipAction::Create {
+            initial_members: members.to_vec(),
+        }
     }
 
     #[test]
@@ -262,10 +292,21 @@ mod tests {
         assert_eq!(boot.view.owner().unwrap().member_id, mid(1));
 
         // founder adds bob as a co-owner
-        let add_bob = sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1));
+        let add_bob = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        );
         let step = v.admit(Some(&boot.state), &op_update(&add_bob)).unwrap();
         assert!(step.changed, "adding a member changes the view");
-        let mut ids: Vec<String> = step.view.members.iter().map(|m| m.member_id.clone()).collect();
+        let mut ids: Vec<String> = step
+            .view
+            .members
+            .iter()
+            .map(|m| m.member_id.clone())
+            .collect();
         ids.sort();
         let mut expected = vec![mid(1), mid(2)];
         expected.sort();
@@ -284,10 +325,19 @@ mod tests {
             minit(KeyringRole::MAINTAINER, 4),
         ];
         let genesis_op = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
-        let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
-        let daves_add = sign_op([2; 32], vec![[1; 32]], mid(4), add(KeyringRole::EDITOR, 9), &sk(4));
+        let boot = v
+            .admit(None, &bootstrap_update(&gm, None, &genesis_op))
+            .unwrap();
+        let daves_add = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(4),
+            add(KeyringRole::EDITOR, 9),
+            &sk(4),
+        );
         assert_eq!(
-            v.admit(Some(&boot.state), &op_update(&daves_add)).unwrap_err(),
+            v.admit(Some(&boot.state), &op_update(&daves_add))
+                .unwrap_err(),
             VerifyError::Unauthorized,
             "an op unauthorized at its causal position is refused, not kept as a no-op"
         );
@@ -305,16 +355,38 @@ mod tests {
             minit(KeyringRole::CO_OWNER, 2),
         ];
         let genesis_op = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
-        let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
+        let boot = v
+            .admit(None, &bootstrap_update(&gm, None, &genesis_op))
+            .unwrap();
 
-        let remove_bob = sign_op([2; 32], vec![[1; 32]], mid(1), MembershipAction::Remove { member: mid(2) }, &sk(1));
+        let remove_bob = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            MembershipAction::Remove { member: mid(2) },
+            &sk(1),
+        );
         let s1 = v.admit(Some(&boot.state), &op_update(&remove_bob)).unwrap();
 
         // bob's add is a child of genesis — concurrent with his own removal.
-        let bob_adds_carol = sign_op([3; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2));
-        let out = v.admit(Some(&s1.state), &op_update(&bob_adds_carol)).unwrap();
-        assert!(!out.changed, "bob's concurrently-invalidated add is admitted as a no-op, not refused");
-        assert!(!out.view.members.iter().any(|m| m.member_id == mid(3)), "and carol is not added");
+        let bob_adds_carol = sign_op(
+            [3; 32],
+            vec![[1; 32]],
+            mid(2),
+            add(KeyringRole::EDITOR, 3),
+            &sk(2),
+        );
+        let out = v
+            .admit(Some(&s1.state), &op_update(&bob_adds_carol))
+            .unwrap();
+        assert!(
+            !out.changed,
+            "bob's concurrently-invalidated add is admitted as a no-op, not refused"
+        );
+        assert!(
+            !out.view.members.iter().any(|m| m.member_id == mid(3)),
+            "and carol is not added"
+        );
     }
 
     #[test]
@@ -331,15 +403,30 @@ mod tests {
             minit(KeyringRole::CO_OWNER, 2),
         ];
         let genesis_op = sign_op([1; 32], vec![], mid(1), create(&gm), &sk(1));
-        let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
+        let boot = v
+            .admit(None, &bootstrap_update(&gm, None, &genesis_op))
+            .unwrap();
 
-        let remove_bob = sign_op([2; 32], vec![[1; 32]], mid(1), MembershipAction::Remove { member: mid(2) }, &sk(1));
+        let remove_bob = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            MembershipAction::Remove { member: mid(2) },
+            &sk(1),
+        );
         let s1 = v.admit(Some(&boot.state), &op_update(&remove_bob)).unwrap();
 
         // bob's add is a child of his OWN removal ([2;32]) — causally after it, so bob is inactive here.
-        let bob_adds_carol = sign_op([3; 32], vec![[2; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2));
+        let bob_adds_carol = sign_op(
+            [3; 32],
+            vec![[2; 32]],
+            mid(2),
+            add(KeyringRole::EDITOR, 3),
+            &sk(2),
+        );
         assert_eq!(
-            v.admit(Some(&s1.state), &op_update(&bob_adds_carol)).unwrap_err(),
+            v.admit(Some(&s1.state), &op_update(&bob_adds_carol))
+                .unwrap_err(),
             VerifyError::Unauthorized,
             "a causally-removed author's later op is refused at admission, not kept as a no-op"
         );
@@ -375,7 +462,8 @@ mod tests {
         let gm = vec![forged.clone()];
         let genesis_op = sign_op([1; 32], vec![], forged.id.clone(), create(&gm), &sk(1));
         assert_eq!(
-            v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap_err(),
+            v.admit(None, &bootstrap_update(&gm, None, &genesis_op))
+                .unwrap_err(),
             VerifyError::Malformed,
             "a pinned genesis member whose id does not bind its key is refused"
         );

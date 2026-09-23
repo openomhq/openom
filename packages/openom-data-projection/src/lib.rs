@@ -614,7 +614,10 @@ fn canon_of(
 
 /// The person a claim's subject re-homes to: its winning `reattribute_to`, else the original target.
 fn eff_target(rehome: &BTreeMap<String, String>, claim_id: &str, orig: &str) -> String {
-    rehome.get(claim_id).cloned().unwrap_or_else(|| orig.to_string())
+    rehome
+        .get(claim_id)
+        .cloned()
+        .unwrap_or_else(|| orig.to_string())
 }
 
 /// The identity-resolution outputs (project phase 2): the cluster map (`rep`), each cluster's canonical
@@ -717,7 +720,13 @@ fn resolve(c: &Collected, policy: &Policy) -> Resolved {
         })
         .collect();
 
-    Resolved { rep, canonical, by_key, rehome, skipped }
+    Resolved {
+        rep,
+        canonical,
+        by_key,
+        rehome,
+        skipped,
+    }
 }
 
 /// Project a record set into the read model.
@@ -945,7 +954,8 @@ fn customs_map(c: &Collected, r: &Resolved) -> BTreeMap<String, Vec<CustomField>
 fn sources_map(c: &Collected, r: &Resolved) -> BTreeMap<String, Vec<Citation>> {
     let mut sources_by_person: BTreeMap<String, Vec<Citation>> = BTreeMap::new();
     for (target, cid, pred, cit) in &c.citations {
-        let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) else {
+        let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target))
+        else {
             continue;
         };
         let source_id = cit
@@ -1016,7 +1026,10 @@ fn media_map(c: &Collected, r: &Resolved) -> BTreeMap<String, Vec<MediaLink>> {
 fn other_map(
     c: &Collected,
     r: &Resolved,
-) -> (BTreeMap<String, Vec<GenericClaimView>>, Vec<GenericClaimView>) {
+) -> (
+    BTreeMap<String, Vec<GenericClaimView>>,
+    Vec<GenericClaimView>,
+) {
     let mut other_by_person: BTreeMap<String, Vec<GenericClaimView>> = BTreeMap::new();
     let mut unclassified: Vec<GenericClaimView> = Vec::new();
     for (target, cid, pred, value, author) in &c.other_claims {
@@ -1169,7 +1182,9 @@ fn assemble_events(c: &Collected, r: &Resolved) -> Vec<EventView> {
             let (date_min_year, date_max_year) = date_edtf
                 .as_deref()
                 .and_then(|s| format_edtf::parse(s).ok())
-                .map_or((None, None), |e| (e.min.map(|d| d.year), e.max.map(|d| d.year)));
+                .map_or((None, None), |e| {
+                    (e.min.map(|d| d.year), e.max.map(|d| d.year))
+                });
             let place_id = c.event_place.get(eid).and_then(most_corroborated);
             let mut parts: Vec<Participant> = c
                 .participants
@@ -1437,7 +1452,10 @@ fn score(info: &PairInfo, attests: &BTreeMap<String, Votes>) -> i64 {
     }
     // Counts are memory-bounded, so they always fit i64; saturate on the impossible overflow.
     let indep_support = i64::try_from(
-        support.into_iter().filter(|a| !info.authors.contains(*a)).count(),
+        support
+            .into_iter()
+            .filter(|a| !info.authors.contains(*a))
+            .count(),
     )
     .unwrap_or(i64::MAX);
     let authors = i64::try_from(info.authors.len()).unwrap_or(i64::MAX);

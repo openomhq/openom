@@ -9,7 +9,9 @@
 //! signer-key length, wrap-completeness).
 
 use keyeo_chain::Ed25519;
-use keyeo_chain::{DocHash, GroupId, Governance, Doc, SignerRole, PayloadCommitment, Revision, Signer};
+use keyeo_chain::{
+    Doc, DocHash, Governance, GroupId, PayloadCommitment, Revision, Signer, SignerRole,
+};
 use keyeo_crypto::{missing, Epoch, RecipientDescriptor, Wrap, WrapMethod};
 use sha2::{Digest, Sha256};
 
@@ -117,7 +119,12 @@ impl<'a> KeyringDoc<'a> {
         put_u32(&mut out, u32::try_from(members.len()).unwrap_or(u32::MAX));
         for m in members {
             #[deny(unused_variables)]
-            let Member { member_id, role, author_public_key, hpke_public_key } = m;
+            let Member {
+                member_id,
+                role,
+                author_public_key,
+                hpke_public_key,
+            } = m;
             put_bytes(&mut out, member_id.as_bytes());
             // `role` is a non-negative proto tag: bit-identical to `as u32`, but sign-loss-free.
             put_u32(&mut out, u32::try_from(*role).unwrap_or(0));
@@ -133,10 +140,18 @@ impl<'a> KeyringDoc<'a> {
         // mutation tests — keeps every field bound without a second hand-encoder that could drift.
         put_bytes(&mut out, epochs);
 
-        put_u32(&mut out, u32::try_from(recovery_keys.len()).unwrap_or(u32::MAX));
+        put_u32(
+            &mut out,
+            u32::try_from(recovery_keys.len()).unwrap_or(u32::MAX),
+        );
         for rk in recovery_keys {
             #[deny(unused_variables)]
-            let RecoveryKey { public_key, member_id, wraps, recovery_verifying_key } = rk;
+            let RecoveryKey {
+                public_key,
+                member_id,
+                wraps,
+                recovery_verifying_key,
+            } = rk;
             put_bytes(&mut out, public_key);
             put_bytes(&mut out, member_id.as_bytes());
             put_bytes(&mut out, wraps); // the escrow KEK wraps' canonical codec bytes, hashed directly
@@ -271,11 +286,17 @@ fn wrap_complete(epochs: &[Epoch<String>], members: &[Member]) -> bool {
     let required: Vec<RecipientDescriptor<String>> = members
         .iter()
         .filter(|m| m.member_id != founder.member_id)
-        .map(|m| RecipientDescriptor { id: m.member_id.clone(), expected_key: None })
+        .map(|m| RecipientDescriptor {
+            id: m.member_id.clone(),
+            expected_key: None,
+        })
         .collect();
     // The RRK wrap must be addressed to the founder id — a strictening over the old any-RRK-wrap check
     // (keyeo's `rrk_covers` binds the recipient); producers always address the founder.
-    let rrk = RecipientDescriptor { id: founder.member_id.clone(), expected_key: None };
+    let rrk = RecipientDescriptor {
+        id: founder.member_id.clone(),
+        expected_key: None,
+    };
     missing(newest, &required, &rrk).is_empty()
 }
 
@@ -286,14 +307,32 @@ fn wrap_complete(epochs: &[Epoch<String>], members: &[Member]) -> bool {
 /// pointing whoever added the field at the guard tests (per-field mutation in `keyeo_crypto::codec`, the
 /// golden-bytes + per-field signature-fails tests here) they must extend.
 #[allow(dead_code)]
-const fn _key_material_fields_are_exhaustively_accounted_for(epoch: &Epoch<String>, wrap: &Wrap<String>) {
-    let Epoch { key_id, ordinal, dek_commitment, wraps } = epoch;
+const fn _key_material_fields_are_exhaustively_accounted_for(
+    epoch: &Epoch<String>,
+    wrap: &Wrap<String>,
+) {
+    let Epoch {
+        key_id,
+        ordinal,
+        dek_commitment,
+        wraps,
+    } = epoch;
     let _ = (key_id, ordinal, dek_commitment, wraps);
-    let Wrap { recipient, method, ciphertext } = wrap;
+    let Wrap {
+        recipient,
+        method,
+        ciphertext,
+    } = wrap;
     let _ = (recipient, ciphertext);
     match method {
-        WrapMethod::MemberHpke { encapped, recipient_key }
-        | WrapMethod::RrkHpke { encapped, recipient_key } => {
+        WrapMethod::MemberHpke {
+            encapped,
+            recipient_key,
+        }
+        | WrapMethod::RrkHpke {
+            encapped,
+            recipient_key,
+        } => {
             let _ = (encapped, recipient_key);
         }
         WrapMethod::Kek { kind, kdf, nonce } => {
@@ -343,7 +382,10 @@ mod tests {
 
     #[test]
     fn layout_version_accessor_reports_the_keyrings_value() {
-        let k = Keyring { layout_version: 7, ..Default::default() };
+        let k = Keyring {
+            layout_version: 7,
+            ..Default::default()
+        };
         assert_eq!(KeyringDoc::new(&k).layout_version(), 7);
     }
 
@@ -353,7 +395,10 @@ mod tests {
         // through the payload commitment (a `put_u32`). Two keyrings differing only in it must commit to
         // distinct payload hashes, or a signature could be transplanted across a share-state change.
         let base = Keyring::default();
-        let shared = Keyring { first_shared_revision: 5, ..Default::default() };
+        let shared = Keyring {
+            first_shared_revision: 5,
+            ..Default::default()
+        };
         assert_ne!(
             KeyringDoc::new(&base).payload_commitment(),
             KeyringDoc::new(&shared).payload_commitment(),

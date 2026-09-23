@@ -61,7 +61,8 @@ const THROTTLE_BACKOFF_BASE_MS: u64 = 250;
 
 /// A transient status worth retrying: 429 (per-key rate / Too Many Requests) or 503 (`SlowDown` / unavailable).
 fn is_throttle(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
 }
 
 /// What a HEAD surfaces without a download (§12 graceful-absence: `None` = gone).

@@ -68,7 +68,9 @@ impl RetentionPolicy for Retention {
             Self::Never => RetentionPlan::KeepAll,
             Self::AfterItems(n) => {
                 if m.items > n as usize {
-                    RetentionPlan::Snapshot { keep_last: n as usize }
+                    RetentionPlan::Snapshot {
+                        keep_last: n as usize,
+                    }
                 } else {
                     RetentionPlan::KeepAll
                 }
@@ -81,7 +83,9 @@ impl RetentionPolicy for Retention {
                     let avg = (m.bytes / (m.items.max(1) as u64)).max(1);
                     // Saturate on 32-bit targets (wasm): an overflowing horizon means "keep more", the safe
                     // direction — pruning too little never loses data, pruning too much does.
-                    RetentionPlan::Snapshot { keep_last: usize::try_from(b / avg).unwrap_or(usize::MAX) }
+                    RetentionPlan::Snapshot {
+                        keep_last: usize::try_from(b / avg).unwrap_or(usize::MAX),
+                    }
                 } else {
                     RetentionPlan::KeepAll
                 }
@@ -138,12 +142,18 @@ mod tests {
 
     #[test]
     fn never_always_keeps_all() {
-        assert_eq!(Retention::Never.plan(&m(1_000, 1 << 30)), RetentionPlan::KeepAll);
+        assert_eq!(
+            Retention::Never.plan(&m(1_000, 1 << 30)),
+            RetentionPlan::KeepAll
+        );
     }
 
     #[test]
     fn after_items_snapshots_only_over_the_threshold() {
-        assert_eq!(Retention::AfterItems(10).plan(&m(10, 0)), RetentionPlan::KeepAll);
+        assert_eq!(
+            Retention::AfterItems(10).plan(&m(10, 0)),
+            RetentionPlan::KeepAll
+        );
         assert_eq!(
             Retention::AfterItems(10).plan(&m(11, 0)),
             RetentionPlan::Snapshot { keep_last: 10 }
@@ -157,6 +167,9 @@ mod tests {
             Retention::AfterBytes(200).plan(&m(100, 1000)),
             RetentionPlan::Snapshot { keep_last: 20 }
         );
-        assert_eq!(Retention::AfterBytes(2000).plan(&m(100, 1000)), RetentionPlan::KeepAll);
+        assert_eq!(
+            Retention::AfterBytes(2000).plan(&m(100, 1000)),
+            RetentionPlan::KeepAll
+        );
     }
 }

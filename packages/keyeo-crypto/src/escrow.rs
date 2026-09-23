@@ -9,9 +9,9 @@
 use zeroize::Zeroizing;
 
 use crate::aead::{xchacha_open, xchacha_seal};
-use crate::GroupId;
 use crate::keyring::{KekKind, RecipientId, Wrap, WrapMethod};
 use crate::wrap_aad::rrk_wrap_aad;
+use crate::GroupId;
 use crate::{CryptoError, KdfParams, Kek, Key32, KEY_LEN};
 use crate::{Nonce, WrappedDek};
 

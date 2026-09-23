@@ -4,7 +4,8 @@
 //! account-record boundary now).
 
 use keyeo_crypto::{
-    Kek, KdfParams, DEFAULT_ARGON2_ITERATIONS, DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
+    KdfParams, Kek, DEFAULT_ARGON2_ITERATIONS, DEFAULT_ARGON2_MEMORY_KIB,
+    DEFAULT_ARGON2_PARALLELISM,
 };
 
 use crate::CryptoError;
@@ -39,7 +40,12 @@ mod tests {
 
     // Tiny params so tests stay fast — production uses the DEFAULT_* costs.
     fn fast_params(salt: &[u8]) -> KdfParams {
-        KdfParams { salt: salt.to_vec(), memory_kib: 8, iterations: 1, parallelism: 1 }
+        KdfParams {
+            salt: salt.to_vec(),
+            memory_kib: 8,
+            iterations: 1,
+            parallelism: 1,
+        }
     }
 
     #[test]

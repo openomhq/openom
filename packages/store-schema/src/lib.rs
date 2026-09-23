@@ -33,7 +33,9 @@ impl std::fmt::Display for MismatchKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoMigration => f.write_str("no migration path from the stored version"),
-            Self::Downgrade => f.write_str("the database was written by a newer version of the app"),
+            Self::Downgrade => {
+                f.write_str("the database was written by a newer version of the app")
+            }
         }
     }
 }
@@ -71,7 +73,12 @@ fn sql_err(e: impl std::fmt::Display) -> SchemaError {
 /// # Errors
 /// - [`SchemaError::Sqlite`] on any open/pragma/DDL/filesystem failure.
 /// - [`SchemaError::Mismatch`] on a RELEASE build when the stored schema version doesn't match (data untouched).
-pub fn open_versioned(path: &Path, version: i64, schema_sql: &str, policy: ResetPolicy) -> Result<Connection> {
+pub fn open_versioned(
+    path: &Path,
+    version: i64,
+    schema_sql: &str,
+    policy: ResetPolicy,
+) -> Result<Connection> {
     let conn = open_with_pragmas(path)?;
     let found = user_version(&conn)?;
     let has_tables = has_user_tables(&conn)?;
@@ -89,7 +96,11 @@ pub fn open_versioned(path: &Path, version: i64, schema_sql: &str, policy: Reset
     }
 
     // Tables present but the version differs: legacy/older (incl. an unversioned v0-with-tables) or a downgrade.
-    let kind = if found > version { MismatchKind::Downgrade } else { MismatchKind::NoMigration };
+    let kind = if found > version {
+        MismatchKind::Downgrade
+    } else {
+        MismatchKind::NoMigration
+    };
 
     #[cfg(debug_assertions)]
     {
@@ -112,7 +123,11 @@ pub fn open_versioned(path: &Path, version: i64, schema_sql: &str, policy: Reset
     #[cfg(not(debug_assertions))]
     {
         let _ = policy; // release never resets — data stays exactly as it is on disk
-        Err(SchemaError::Mismatch { found, expected: version, kind })
+        Err(SchemaError::Mismatch {
+            found,
+            expected: version,
+            kind,
+        })
     }
 }
 
@@ -120,7 +135,8 @@ pub fn open_versioned(path: &Path, version: i64, schema_sql: &str, policy: Reset
 /// (they cannot run inside one) — every later create/migration step opens its own transaction.
 fn open_with_pragmas(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).map_err(sql_err)?;
-    conn.execute_batch("PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;").map_err(sql_err)?;
+    conn.execute_batch("PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;")
+        .map_err(sql_err)?;
     Ok(conn)
 }
 
@@ -129,7 +145,8 @@ fn open_with_pragmas(path: &Path) -> Result<Connection> {
 /// # Errors
 /// [`SchemaError::Sqlite`] if the pragma read fails.
 pub fn user_version(conn: &Connection) -> Result<i64> {
-    conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(sql_err)
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(sql_err)
 }
 
 fn has_user_tables(conn: &Connection) -> Result<bool> {
@@ -145,8 +162,10 @@ fn has_user_tables(conn: &Connection) -> Result<bool> {
 /// Create the schema and stamp `user_version` atomically. `version` is an internal `i64` constant (never user
 /// input), so interpolating it into the pragma is safe.
 fn create_fresh(conn: &Connection, version: i64, schema_sql: &str) -> Result<()> {
-    conn.execute_batch(&format!("BEGIN;\n{schema_sql}\nPRAGMA user_version = {version};\nCOMMIT;"))
-        .map_err(sql_err)
+    conn.execute_batch(&format!(
+        "BEGIN;\n{schema_sql}\nPRAGMA user_version = {version};\nCOMMIT;"
+    ))
+    .map_err(sql_err)
 }
 
 /// Append a suffix to a path's filename without a lossy string round-trip (`vault.sqlite` → `vault.sqlite-wal`).
@@ -158,7 +177,11 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 /// The `SQLite` file plus its `WAL` sidecars (`-wal`, `-shm`).
 fn db_and_sidecars(path: &Path) -> [PathBuf; 3] {
-    [path.to_path_buf(), with_suffix(path, "-wal"), with_suffix(path, "-shm")]
+    [
+        path.to_path_buf(),
+        with_suffix(path, "-wal"),
+        with_suffix(path, "-shm"),
+    ]
 }
 
 /// Recreatable reset: delete the DB and its WAL sidecars (a stale `-wal` would otherwise replay old-schema
@@ -177,7 +200,8 @@ fn reset_rename_bak(path: &Path, found: i64) -> Result<()> {
     prune_old_baks(path);
     let bak = with_suffix(path, &format!(".bak-v{found}"));
     remove_if_present(&bak)?; // a prior reset at this same version, if any
-    fs::rename(path, &bak).map_err(|e| SchemaError::Sqlite(format!("rename {} to backup: {e}", path.display())))?;
+    fs::rename(path, &bak)
+        .map_err(|e| SchemaError::Sqlite(format!("rename {} to backup: {e}", path.display())))?;
     for sc in [with_suffix(path, "-wal"), with_suffix(path, "-shm")] {
         remove_if_present(&sc)?;
     }
@@ -187,13 +211,20 @@ fn reset_rename_bak(path: &Path, found: i64) -> Result<()> {
 /// Delete every existing `{name}.bak-v*` beside `path` — we keep only the backup we are about to create, so
 /// backups never accumulate unbounded (this whole path is debug-only regardless).
 fn prune_old_baks(path: &Path) {
-    let (Some(parent), Some(fname)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+    let (Some(parent), Some(fname)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
         return;
     };
     let prefix = format!("{fname}.bak-v");
-    let Ok(entries) = fs::read_dir(parent) else { return };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
     for entry in entries.flatten() {
-        if entry.file_name().to_str().is_some_and(|n| n.starts_with(&prefix)) {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with(&prefix))
+        {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -220,15 +251,20 @@ pub fn schema_shape(conn: &Connection) -> Result<String> {
         let mut stmt = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
             .map_err(sql_err)?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(sql_err)?;
-        rows.collect::<std::result::Result<_, _>>().map_err(sql_err)?
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(sql_err)?
     };
 
     let mut out = String::new();
     for table in tables {
         out.push_str(&table);
         out.push('(');
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info('{table}')")).map_err(sql_err)?;
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info('{table}')"))
+            .map_err(sql_err)?;
         let cols = stmt
             .query_map([], |r| {
                 Ok(format!(
@@ -262,7 +298,11 @@ mod tests {
 
     fn tmp() -> std::path::PathBuf {
         let mut d = std::env::temp_dir();
-        d.push(format!("store-schema-test-{:?}-{}", std::thread::current().id(), N.fetch_add(1, Ordering::Relaxed)));
+        d.push(format!(
+            "store-schema-test-{:?}-{}",
+            std::thread::current().id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -270,8 +310,13 @@ mod tests {
     /// Write a legacy DB on disk: a DIFFERENT schema (the classic column-renamed drift) with no `user_version`.
     fn write_legacy(path: &std::path::Path) {
         let conn = Connection::open(path).unwrap();
-        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, old_col INTEGER NOT NULL);").unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 0, "legacy DBs predate versioning → user_version 0");
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, old_col INTEGER NOT NULL);")
+            .unwrap();
+        assert_eq!(
+            user_version(&conn).unwrap(),
+            0,
+            "legacy DBs predate versioning → user_version 0"
+        );
     }
 
     #[test]
@@ -293,7 +338,9 @@ mod tests {
             c.execute("INSERT INTO t (a) VALUES ('keep')", []).unwrap();
         }
         let c = open_versioned(&path, 1, V1, ResetPolicy::Recreatable).unwrap();
-        let n: i64 = c.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+        let n: i64 = c
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "a matching-version reopen keeps the data");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -309,7 +356,10 @@ mod tests {
         let conn = open_versioned(&path, 1, V1, ResetPolicy::Recreatable).unwrap();
         assert_eq!(user_version(&conn).unwrap(), 1);
         conn.execute("INSERT INTO t (a) VALUES ('x')", []).unwrap(); // the NEW column exists again
-        assert!(!path.with_file_name("cache.sqlite.bak-v0").exists(), "Recreatable deletes, no backup");
+        assert!(
+            !path.with_file_name("cache.sqlite.bak-v0").exists(),
+            "Recreatable deletes, no backup"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -325,12 +375,22 @@ mod tests {
         drop(conn);
         // The old data is preserved (not destroyed) in a recoverable backup, and it is still a valid DB.
         let bak = dir.join("vault.sqlite.bak-v0");
-        assert!(bak.exists(), "Preserve renames the stale DB to .bak-v0 rather than deleting it");
+        assert!(
+            bak.exists(),
+            "Preserve renames the stale DB to .bak-v0 rather than deleting it"
+        );
         let old = Connection::open(&bak).unwrap();
         let cols: i64 = old
-            .query_row("SELECT count(*) FROM pragma_table_info('t') WHERE name = 'old_col'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('t') WHERE name = 'old_col'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(cols, 1, "the backup still carries the original (old) schema");
+        assert_eq!(
+            cols, 1,
+            "the backup still carries the original (old) schema"
+        );
         drop(old); // release the backup handle before the next reset prunes it (Windows won't delete an open file)
 
         // A second reset keeps only the newest backup (no unbounded accumulation). Clear the just-healed DB
@@ -343,7 +403,11 @@ mod tests {
         let baks = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("vault.sqlite.bak-v")))
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("vault.sqlite.bak-v"))
+            })
             .count();
         assert_eq!(baks, 1, "only the newest backup is kept");
         std::fs::remove_dir_all(&dir).ok();
@@ -360,15 +424,26 @@ mod tests {
         let err = open_versioned(&path, 1, V1, ResetPolicy::Preserve).unwrap_err();
         assert!(matches!(
             err,
-            super::SchemaError::Mismatch { found: 0, expected: 1, kind: super::MismatchKind::NoMigration }
+            super::SchemaError::Mismatch {
+                found: 0,
+                expected: 1,
+                kind: super::MismatchKind::NoMigration
+            }
         ));
         // The original file is untouched: still there, still the OLD schema, no backup created.
         let c = Connection::open(&path).unwrap();
         let cols: i64 = c
-            .query_row("SELECT count(*) FROM pragma_table_info('t') WHERE name = 'old_col'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('t') WHERE name = 'old_col'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(cols, 1, "release must not alter or reset the user's data");
-        assert!(!dir.join("vault.sqlite.bak-v0").exists(), "release creates no backup");
+        assert!(
+            !dir.join("vault.sqlite.bak-v0").exists(),
+            "release creates no backup"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -378,9 +453,18 @@ mod tests {
         let a = open_versioned(&dir.join("a.sqlite"), 1, V1, ResetPolicy::Recreatable).unwrap();
         // Same schema, reformatted (extra whitespace / newlines) → identical shape.
         let reformatted = "CREATE TABLE t (\n  id   INTEGER PRIMARY KEY,\n  a    TEXT NOT NULL\n);";
-        let b = open_versioned(&dir.join("b.sqlite"), 1, reformatted, ResetPolicy::Recreatable).unwrap();
+        let b = open_versioned(
+            &dir.join("b.sqlite"),
+            1,
+            reformatted,
+            ResetPolicy::Recreatable,
+        )
+        .unwrap();
         assert_eq!(schema_shape(&a).unwrap(), schema_shape(&b).unwrap());
-        assert_eq!(schema_shape(&a).unwrap().trim(), "t(id:INTEGER nn=0 pk=1, a:TEXT nn=1 pk=0)");
+        assert_eq!(
+            schema_shape(&a).unwrap().trim(),
+            "t(id:INTEGER nn=0 pk=1, a:TEXT nn=1 pk=0)"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

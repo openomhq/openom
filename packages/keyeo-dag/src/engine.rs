@@ -268,7 +268,9 @@ where
         //     are present (step 1), so ancestry is checkable; a re-applied op already in the DAG is exempt.
         if !self.merge_horizon.is_empty() && !self.ops.contains_key(&op.id()) {
             let descends = self.merge_horizon.iter().any(|h| {
-                op.parents().iter().any(|p| p == h || self.graph.has_path(*h, *p))
+                op.parents()
+                    .iter()
+                    .any(|p| p == h || self.graph.has_path(*h, *p))
             });
             if !descends {
                 return Err(Error::StaleFork);
@@ -380,7 +382,8 @@ where
                 {
                     let mut visiting = HashSet::new();
                     visiting.insert(*op_id);
-                    if let Some(target) = self.quorum_target(*op_id, &pid, &ignored, &mut visiting) {
+                    if let Some(target) = self.quorum_target(*op_id, &pid, &ignored, &mut visiting)
+                    {
                         if let Ok((s, _events)) = apply_action(new_state.clone(), &target) {
                             new_state = s;
                             effective.push(*op_id);
@@ -440,7 +443,10 @@ where
         // cut, so the effective-Add scan over `ops` alone would wrongly regress a shared group to `false`.
         self.base_has_been_shared
             || self.effective_ops().iter().any(|id| {
-                matches!(self.ops.get(id).map(super::dag::resolver::SignedOp::action), Some(MembershipAction::Add { .. }))
+                matches!(
+                    self.ops.get(id).map(super::dag::resolver::SignedOp::action),
+                    Some(MembershipAction::Add { .. })
+                )
             })
     }
 
@@ -561,8 +567,12 @@ where
     ) -> Option<MembershipAction<Op::MemberId, Op::R, Op::S>> {
         // The surviving Propose for this id, causally before the Commit.
         let (propose_id, target) = self.ops.iter().find_map(|(id, op)| match op.action() {
-            MembershipAction::Propose { proposal_id: pid, target }
-                if pid == proposal_id && !ignored.contains(id) && self.graph.has_path(*id, commit_id) =>
+            MembershipAction::Propose {
+                proposal_id: pid,
+                target,
+            } if pid == proposal_id
+                && !ignored.contains(id)
+                && self.graph.has_path(*id, commit_id) =>
             {
                 Some((*id, (**target).clone()))
             }
@@ -587,7 +597,10 @@ where
         approvers.insert(proposer);
         for (id, op) in &self.ops {
             if let MembershipAction::Approve { proposal_id: pid } = op.action() {
-                if pid == proposal_id && !ignored.contains(id) && self.graph.has_path(*id, commit_id) {
+                if pid == proposal_id
+                    && !ignored.contains(id)
+                    && self.graph.has_path(*id, commit_id)
+                {
                     let a = op.author().clone();
                     if eligible.contains(&a) {
                         approvers.insert(a);
@@ -738,7 +751,12 @@ impl<Op: SignedOp> keyeo_core::Compaction for Retained<'_, Op> {
         // — a membership / sealing split-brain vs a full-history replica. Reject rather than prune unsafely: the
         // caller must supply a COMPLETE cut across all concurrent branches (walk the frontier down until every
         // retained op descends from it). A single-branch tip in a forked DAG is not a valid cut.
-        let below_or_at = |o: &Op::OpId| stable.ops.iter().any(|t| t == o || state.graph.has_path(*o, *t));
+        let below_or_at = |o: &Op::OpId| {
+            stable
+                .ops
+                .iter()
+                .any(|t| t == o || state.graph.has_path(*o, *t))
+        };
         let above_all = |o: &Op::OpId| stable.ops.iter().all(|t| state.graph.has_path(*t, *o));
         if let Some(bad) = state.ops.keys().find(|o| !below_or_at(o) && !above_all(o)) {
             return Err(keyeo_core::CompactionError(format!(
@@ -853,7 +871,14 @@ mod compaction_tests {
         // A unique `sealing` tag per op so ops with the same parents (b and d both branch off a) don't collapse
         // to one content id.
         let mk = |tag: u8, parents: Vec<ContentId>| {
-            Op::content_addressed(gid.clone(), parents, me, MembershipAction::Reseal, vec![tag], &sk)
+            Op::content_addressed(
+                gid.clone(),
+                parents,
+                me,
+                MembershipAction::Reseal,
+                vec![tag],
+                &sk,
+            )
         };
         let a = mk(0, vec![]);
         let b = mk(1, vec![a.id]);
@@ -871,8 +896,16 @@ mod compaction_tests {
     #[test]
     fn keep_all_is_a_noop() {
         let (k, ..) = dag();
-        let out = <Retained<'_, TOp> as Compaction>::compact(&k.retained(), &Frontier { ops: vec![] }, RetentionPlan::KeepAll).unwrap();
-        assert!(out.is_none(), "KeepAll prunes nothing and authors no checkpoint");
+        let out = <Retained<'_, TOp> as Compaction>::compact(
+            &k.retained(),
+            &Frontier { ops: vec![] },
+            RetentionPlan::KeepAll,
+        )
+        .unwrap();
+        assert!(
+            out.is_none(),
+            "KeepAll prunes nothing and authors no checkpoint"
+        );
     }
 
     #[test]
@@ -886,7 +919,11 @@ mod compaction_tests {
             RetentionPlan::Snapshot { keep_last: 0 },
         )
         .unwrap_err();
-        assert!(err.0.contains("empty frontier"), "an empty frontier is rejected: {}", err.0);
+        assert!(
+            err.0.contains("empty frontier"),
+            "an empty frontier is rejected: {}",
+            err.0
+        );
     }
 
     #[test]
@@ -903,7 +940,11 @@ mod compaction_tests {
             RetentionPlan::Snapshot { keep_last: 0 },
         )
         .unwrap_err();
-        assert!(err.0.contains("non-dominating"), "a partial cut leaving a concurrent fork is rejected: {}", err.0);
+        assert!(
+            err.0.contains("non-dominating"),
+            "a partial cut leaving a concurrent fork is rejected: {}",
+            err.0
+        );
     }
 
     #[test]
@@ -920,7 +961,13 @@ mod compaction_tests {
         .unwrap()
         .unwrap();
         assert_eq!(out.prune.len(), 2, "a and b are below the complete cut");
-        assert!(out.prune.contains(&a) && out.prune.contains(&b), "both ancestors prune");
-        assert!(!out.prune.contains(&c) && !out.prune.contains(&d), "the frontier tips are the anchors, never pruned");
+        assert!(
+            out.prune.contains(&a) && out.prune.contains(&b),
+            "both ancestors prune"
+        );
+        assert!(
+            !out.prune.contains(&c) && !out.prune.contains(&d),
+            "the frontier tips are the anchors, never pruned"
+        );
     }
 }

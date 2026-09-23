@@ -269,7 +269,10 @@ fn a_cut_blocks_only_its_exact_pair_not_a_single_matching_endpoint() {
     let ids: Vec<_> = p.people.iter().map(|x| x.id.clone()).collect();
     assert_eq!(ids, vec!["pA".to_string(), "pB".to_string()]); // pB+pC merged, pA separate
     assert_eq!(p.people[1].also, vec!["pC".to_string()]);
-    assert!(p.conflicts.is_empty(), "the pA-pB constraint does not cut the pB-pC merge");
+    assert!(
+        p.conflicts.is_empty(),
+        "the pA-pB constraint does not cut the pB-pC merge"
+    );
 }
 
 #[test]
@@ -287,7 +290,10 @@ fn a_cut_does_not_block_a_merge_matching_only_its_first_endpoint() {
     let ids: Vec<_> = p.people.iter().map(|x| x.id.clone()).collect();
     assert_eq!(ids, vec!["pA".to_string(), "pC".to_string()]); // pA+pB merged, pC separate
     assert_eq!(p.people[0].also, vec!["pB".to_string()]);
-    assert!(p.conflicts.is_empty(), "the pA-pC constraint does not cut the pA-pB merge");
+    assert!(
+        p.conflicts.is_empty(),
+        "the pA-pC constraint does not cut the pA-pB merge"
+    );
 }
 
 #[test]
@@ -768,10 +774,19 @@ fn equiv_class_label_is_the_minimum_claim_id_not_the_first_visited() {
     let p = project(&recs, &Policy::default());
     let names = &p.people[0].names;
     let cls = |cid: &str| {
-        names.iter().find(|v| v.claim_id == cid).unwrap().equiv_class.clone()
+        names
+            .iter()
+            .find(|v| v.claim_id == cid)
+            .unwrap()
+            .equiv_class
+            .clone()
     };
     assert_eq!(cls("n1"), cls("n9"), "the two renderings are equivalent");
-    assert_eq!(cls("n1"), "n1", "the class label is the minimum claim id, not the first visited");
+    assert_eq!(
+        cls("n1"),
+        "n1",
+        "the class label is the minimum claim id, not the first visited"
+    );
 }
 
 #[test]

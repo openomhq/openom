@@ -112,10 +112,7 @@ mod tests {
         let code = generate_recovery_code().unwrap();
         // Flip the first alphanumeric char to a different valid base32 char.
         let mut chars: Vec<char> = code.expose().chars().collect();
-        let i = chars
-            .iter()
-            .position(char::is_ascii_alphanumeric)
-            .unwrap();
+        let i = chars.iter().position(char::is_ascii_alphanumeric).unwrap();
         chars[i] = if chars[i] == 'A' { 'B' } else { 'A' };
         let typo: String = chars.into_iter().collect();
         assert!(matches!(

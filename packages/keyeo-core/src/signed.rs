@@ -40,7 +40,11 @@ impl<T: CanonicalBytes, S: SignatureScheme> Signed<T, S> {
         body.write_canonical(&mut buf);
         let signature = signing_key.sign(&buf).to_bytes();
         let signer = signing_key.verifying_key().to_bytes();
-        Self { body, signer, signature }
+        Self {
+            body,
+            signer,
+            signature,
+        }
     }
 
     /// Verify the signature over the body's canonical bytes and, only if it holds, return the body. This is the
@@ -136,7 +140,9 @@ mod tests {
 
         // Tamper the signer key → fails (the tampered key didn't produce this signature).
         let mut wrong_key = signed.clone();
-        wrong_key.signer = edsign::SigningKey::from_seed(&[8u8; 32]).verifying_key().to_bytes();
+        wrong_key.signer = edsign::SigningKey::from_seed(&[8u8; 32])
+            .verifying_key()
+            .to_bytes();
         assert_eq!(wrong_key.verify(), None);
     }
 
@@ -167,7 +173,10 @@ mod tests {
             signature: vec![0u8; 63],
         })
         .unwrap();
-        assert!(postcard::from_bytes::<Signed<Body, Ed25519>>(&bad).is_err(), "a wrong-length signature is rejected");
+        assert!(
+            postcard::from_bytes::<Signed<Body, Ed25519>>(&bad).is_err(),
+            "a wrong-length signature is rejected"
+        );
     }
 
     #[test]
@@ -175,6 +184,9 @@ mod tests {
         let sk = edsign::SigningKey::from_seed(&[7u8; 32]);
         let a: Signed<Body, Ed25519> = Signed::sign(Body { n: 1, flag: true }, &sk);
         let b: Signed<Body, Ed25519> = Signed::sign(Body { n: 1, flag: false }, &sk);
-        assert_ne!(a.signature, b.signature, "the flag is inside the signed bytes");
+        assert_ne!(
+            a.signature, b.signature,
+            "the flag is inside the signed bytes"
+        );
     }
 }

@@ -74,7 +74,10 @@ mod tests {
         let p = "https://staging.openom.org";
         assert!(origin_matches("https://staging.openom.org", p));
         assert!(!origin_matches("https://evil.openom.org", p));
-        assert!(!origin_matches("http://staging.openom.org", p), "scheme must match");
+        assert!(
+            !origin_matches("http://staging.openom.org", p),
+            "scheme must match"
+        );
         assert!(!origin_matches("https://staging.openom.org.evil.com", p));
     }
 
@@ -88,11 +91,26 @@ mod tests {
     #[test]
     fn wildcard_rejects_deeper_hosts_paths_and_lookalikes() {
         let p = "https://*.proj.pages.dev";
-        assert!(!origin_matches("https://a.b.proj.pages.dev", p), "no extra label");
-        assert!(!origin_matches("https://.proj.pages.dev", p), "the label must be non-empty");
-        assert!(!origin_matches("https://evil-proj.pages.dev", p), "the leading dot anchors the suffix");
-        assert!(!origin_matches("https://proj.pages.dev.evil.com", p), "the suffix must end the host");
+        assert!(
+            !origin_matches("https://a.b.proj.pages.dev", p),
+            "no extra label"
+        );
+        assert!(
+            !origin_matches("https://.proj.pages.dev", p),
+            "the label must be non-empty"
+        );
+        assert!(
+            !origin_matches("https://evil-proj.pages.dev", p),
+            "the leading dot anchors the suffix"
+        );
+        assert!(
+            !origin_matches("https://proj.pages.dev.evil.com", p),
+            "the suffix must end the host"
+        );
         assert!(!origin_matches("https://abc.proj.pages.dev.evil.com", p));
-        assert!(!origin_matches("https://abc.proj.pages.dev/", p), "an origin carries no path");
+        assert!(
+            !origin_matches("https://abc.proj.pages.dev/", p),
+            "an origin carries no path"
+        );
     }
 }

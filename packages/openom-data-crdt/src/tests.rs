@@ -140,7 +140,11 @@ fn authority_is_by_committer_not_author() {
         "a moderator committed it → the removal applies despite the editor author"
     );
     // The same op, if only its editor author had committed it (by_author) — a non-moderator — is a no-op.
-    assert_eq!(live(&items, &mods(&[&did(2)])), ids([&n]), "editor-committed by a non-moderator → no removal");
+    assert_eq!(
+        live(&items, &mods(&[&did(2)])),
+        ids([&n]),
+        "editor-committed by a non-moderator → no removal"
+    );
 }
 
 #[test]
@@ -175,8 +179,15 @@ fn demotion_resurfaces_a_moderators_removal() {
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(remove(&n, &did(2))),
     ];
-    assert!(mat(&items, &mods(&[&did(2)])).is_empty(), "removed while did(2) moderates");
-    assert_eq!(live(&items, &mods(&[])), ids([&n]), "did(2) demoted → the removal no longer applies");
+    assert!(
+        mat(&items, &mods(&[&did(2)])).is_empty(),
+        "removed while did(2) moderates"
+    );
+    assert_eq!(
+        live(&items, &mods(&[])),
+        ids([&n]),
+        "did(2) demoted → the removal no longer applies"
+    );
 }
 
 #[test]
@@ -230,7 +241,7 @@ fn a_supersede_replacement_attributed_to_another_is_a_forgery() {
         ChannelItem::Op(supersede(&old, forged.clone(), &did(2))), // ...but written by did(2)
     ];
     assert!(mat(&items, &mods(&[&did(2)])).is_empty()); // prior killed, forgery dropped
-    // And when did(2) is NOT a moderator, neither the kill nor the injection happens — the prior stands.
+                                                        // And when did(2) is NOT a moderator, neither the kill nor the injection happens — the prior stands.
     assert_eq!(live(&items, &mods(&[])), ids([&old]));
 }
 
@@ -259,7 +270,10 @@ fn concurrent_supersede_of_one_prior_forks_into_two_live() {
         ChannelItem::Op(supersede(&old, ondevice_a.clone(), &did(1))),
         ChannelItem::Op(supersede(&old, ondevice_b.clone(), &did(1))),
     ];
-    assert_eq!(live(&items, &mods(&[&did(1)])), ids([&ondevice_a, &ondevice_b]));
+    assert_eq!(
+        live(&items, &mods(&[&did(1)])),
+        ids([&ondevice_a, &ondevice_b])
+    );
 }
 
 #[test]
@@ -418,7 +432,7 @@ fn channel_item_accessors_report_the_real_id_and_author() {
     assert_eq!(as_op.id(), op_id);
     assert_eq!(as_op.created_by(), did(2));
     assert_eq!(as_op.created_at(), hlc(2)); // remove() stamps hlc(2)
-    // The two items are distinct records/ops → distinct ids (a constant id() would make these equal).
+                                            // The two items are distinct records/ops → distinct ids (a constant id() would make these equal).
     assert_ne!(assert.id(), as_op.id());
 }
 

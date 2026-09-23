@@ -98,7 +98,9 @@ impl KeyringLifecycle for AppVault {
         floor: &[u8],
     ) -> Result<Recovered, VaultError> {
         match self {
-            Self::Chain(v) => v.recover(ctx, anchor, keystore, recovery_code, new_passphrase, floor),
+            Self::Chain(v) => {
+                v.recover(ctx, anchor, keystore, recovery_code, new_passphrase, floor)
+            }
             Self::Dag(v) => v.recover(ctx, anchor, keystore, recovery_code, new_passphrase, floor),
         }
     }

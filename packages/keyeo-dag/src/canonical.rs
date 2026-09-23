@@ -13,7 +13,7 @@
 use keyeo_core::{CanonicalBytes, Postcard, Role, SignatureScheme};
 
 use crate::dag::resolver::{
-    GroupId, GroupState, MemberInit, MemberState, MemberId, MembershipAction, OpId,
+    GroupId, GroupState, MemberId, MemberInit, MemberState, MembershipAction, OpId,
 };
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id, R, S> {
@@ -21,7 +21,12 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new MemberInit field is a compile error until it's encoded
         // into the signed/content-addressed bytes (OPE-277 crypto-review hardening). Byte order unchanged.
-        let Self { id, role, author_public_key, hpke_public_key } = self;
+        let Self {
+            id,
+            role,
+            author_public_key,
+            hpke_public_key,
+        } = self;
         Postcard(id).write_canonical(out);
         Postcard(role).write_canonical(out);
         out.extend_from_slice(author_public_key.as_ref());
@@ -68,7 +73,10 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                 Postcard(member).write_canonical(out);
                 Postcard(new_role).write_canonical(out);
             }
-            Self::Propose { proposal_id, target } => {
+            Self::Propose {
+                proposal_id,
+                target,
+            } => {
                 out.push(4);
                 out.extend_from_slice(proposal_id);
                 target.write_canonical(out); // binds the target into the proposal's signed bytes
@@ -168,7 +176,13 @@ impl<R: Role, S: SignatureScheme> CanonicalBytes for MemberState<R, S> {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new MemberState field is a compile error until it's bound into
         // the signed snapshot bytes — the same crypto-review guard the op/epoch encoders carry.
-        let Self { role, member_counter, access_counter, author_public_key, hpke_public_key } = self;
+        let Self {
+            role,
+            member_counter,
+            access_counter,
+            author_public_key,
+            hpke_public_key,
+        } = self;
         Postcard(role).write_canonical(out);
         out.extend_from_slice(&member_counter.to_le_bytes());
         out.extend_from_slice(&access_counter.to_le_bytes());

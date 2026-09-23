@@ -18,9 +18,9 @@
 
 use std::collections::HashMap;
 
-use opentelemetry::propagation::{Extractor, Injector};
 use openom::config::Config;
 use openom::telemetry;
+use opentelemetry::propagation::{Extractor, Injector};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::prelude::*;
 
@@ -56,8 +56,9 @@ fn main() {
 
     // Service B: recover the parent from the carrier (exactly as the server's make_span does) and
     // continue the same trace with a "server" child span.
-    let parent =
-        opentelemetry::global::get_text_map_propagator(|prop| prop.extract(&MapExtractor(&carrier)));
+    let parent = opentelemetry::global::get_text_map_propagator(|prop| {
+        prop.extract(&MapExtractor(&carrier))
+    });
     let server = tracing::info_span!(
         "otel_smoke.server",
         otel.kind = "server",

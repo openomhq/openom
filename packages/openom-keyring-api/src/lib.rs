@@ -123,7 +123,8 @@ impl MembershipEnvelope {
     /// # Errors
     /// Returns [`EnvelopeError`] if the bytes don't decode or carry an unknown/future version.
     pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeError> {
-        let env = <Self as ::prost::Message>::decode(bytes).map_err(|_| EnvelopeError::Malformed)?;
+        let env =
+            <Self as ::prost::Message>::decode(bytes).map_err(|_| EnvelopeError::Malformed)?;
         if env.version != MEMBERSHIP_ENVELOPE_VERSION {
             return Err(EnvelopeError::UnsupportedVersion(env.version));
         }
@@ -152,7 +153,9 @@ impl std::fmt::Display for EnvelopeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Malformed => write!(f, "malformed membership envelope"),
-            Self::UnsupportedVersion(v) => write!(f, "unsupported membership envelope version: {v}"),
+            Self::UnsupportedVersion(v) => {
+                write!(f, "unsupported membership envelope version: {v}")
+            }
         }
     }
 }
@@ -336,14 +339,20 @@ mod tests {
         let b = MembershipView::new(vec![m("bob", 2), m("carol", 4), m("owner", 1)], false);
         assert_eq!(a, b, "member order does not affect the resolved view");
         assert_eq!(
-            a.members.iter().map(|m| m.member_id.as_str()).collect::<Vec<_>>(),
+            a.members
+                .iter()
+                .map(|m| m.member_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["bob", "carol", "owner"],
         );
     }
 
     #[test]
     fn signer_and_owner_classification_matches_the_role_axis() {
-        let v = MembershipView::new(vec![m("owner", 1), m("bob", 2), m("dave", 3), m("ed", 4)], false);
+        let v = MembershipView::new(
+            vec![m("owner", 1), m("bob", 2), m("dave", 3), m("ed", 4)],
+            false,
+        );
         assert_eq!(v.owner().map(|o| o.member_id.as_str()), Some("owner"));
         // signers = Owner(1) + CoOwner(2); Maintainer(3)/Editor(4) are not.
         let signers: Vec<_> = v.signers().map(|s| s.member_id.clone()).collect();

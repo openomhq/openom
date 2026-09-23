@@ -106,7 +106,7 @@ mod tests {
     use super::*;
     use crate::wire::Member;
     use keyeo_crypto::{
-        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        codec, EncappedKey, Epoch as KeyeoEpoch, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
         X25519PublicKey,
     };
 
@@ -162,7 +162,10 @@ mod tests {
         let other = generate_identity().unwrap();
         let mut kr = sample_keyring();
         sign_keyring(&mut kr, &id);
-        assert!(matches!(verify_keyring(&kr, &other.verifying_key()), Err(SigError)));
+        assert!(matches!(
+            verify_keyring(&kr, &other.verifying_key()),
+            Err(SigError)
+        ));
     }
 
     #[test]
@@ -172,7 +175,10 @@ mod tests {
         let mut kr = sample_keyring();
         sign_keyring(&mut kr, &b);
         let trusted = [a.verifying_key(), b.verifying_key()];
-        assert_eq!(verify_keyring_any(&kr, &trusted).unwrap(), b.verifying_key());
+        assert_eq!(
+            verify_keyring_any(&kr, &trusted).unwrap(),
+            b.verifying_key()
+        );
 
         let rogue = generate_identity().unwrap();
         let mut kr2 = sample_keyring();
@@ -197,17 +203,26 @@ mod tests {
 
         let mut rolled = kr.clone();
         rolled.revision = 2;
-        assert!(matches!(verify_keyring(&rolled, &id.verifying_key()), Err(SigError)));
+        assert!(matches!(
+            verify_keyring(&rolled, &id.verifying_key()),
+            Err(SigError)
+        ));
 
         let mut swapped = kr.clone();
         let mut eps = swapped.key_material().unwrap();
         eps[0].wraps[0].ciphertext = WrappedDek::from_bytes([0u8; 48]);
         swapped.epochs = codec::encode_epochs(&eps);
-        assert!(matches!(verify_keyring(&swapped, &id.verifying_key()), Err(SigError)));
+        assert!(matches!(
+            verify_keyring(&swapped, &id.verifying_key()),
+            Err(SigError)
+        ));
 
         let mut escalated = kr.clone();
         escalated.members[0].role = 3; // OWNER -> ADMIN
-        assert!(matches!(verify_keyring(&escalated, &id.verifying_key()), Err(SigError)));
+        assert!(matches!(
+            verify_keyring(&escalated, &id.verifying_key()),
+            Err(SigError)
+        ));
     }
 
     /// Every field of the keyeo key material is bound in the signature via the payload commitment (it is
@@ -232,7 +247,10 @@ mod tests {
         };
         assert!(fails(&|e| e.ordinal = 5), "ordinal");
         assert!(fails(&|e| e.key_id = KeyId::new(vec![9, 9, 9])), "key_id");
-        assert!(fails(&|e| e.wraps[0].recipient = "someone-else".into()), "recipient");
+        assert!(
+            fails(&|e| e.wraps[0].recipient = "someone-else".into()),
+            "recipient"
+        );
         assert!(
             fails(&|e| e.wraps[0].ciphertext = WrappedDek::from_bytes([0u8; 48])),
             "ciphertext"
@@ -263,7 +281,10 @@ mod tests {
             signer_public_key: vec![],
             signature: vec![0u8; 10],
         }];
-        assert!(matches!(verify_keyring(&kr, &id.verifying_key()), Err(SigError)));
+        assert!(matches!(
+            verify_keyring(&kr, &id.verifying_key()),
+            Err(SigError)
+        ));
     }
 
     #[test]
@@ -272,7 +293,11 @@ mod tests {
         let mut kr = sample_keyring();
         let h0 = keyring_hash(&kr);
         sign_keyring(&mut kr, &id);
-        assert_eq!(h0, keyring_hash(&kr), "signatures are excluded from the chain hash");
+        assert_eq!(
+            h0,
+            keyring_hash(&kr),
+            "signatures are excluded from the chain hash"
+        );
         kr.revision = 2;
         assert_ne!(h0, keyring_hash(&kr), "content changes the chain hash");
     }
@@ -292,7 +317,10 @@ mod tests {
         let mut tampered = kr.clone();
         tampered.members[0].hpke_public_key = vec![0xAB; 32];
         assert!(
-            matches!(verify_keyring(&tampered, &id.verifying_key()), Err(SigError)),
+            matches!(
+                verify_keyring(&tampered, &id.verifying_key()),
+                Err(SigError)
+            ),
             "a payload-only change is bound via payload_commitment"
         );
 

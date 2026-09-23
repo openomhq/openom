@@ -224,7 +224,10 @@ fn b58_decode(input: &str) -> Result<Vec<u8>, DidError> {
     let zeros = input.bytes().take_while(|&b| b == b'1').count();
     let mut bytes: Vec<u8> = Vec::new(); // little-endian byte accumulator
     for c in input.bytes().skip(zeros) {
-        let pos = ALPHABET.iter().position(|&a| a == c).ok_or(DidError::BadBase58)?;
+        let pos = ALPHABET
+            .iter()
+            .position(|&a| a == c)
+            .ok_or(DidError::BadBase58)?;
         // `pos` indexes ALPHABET (58 entries), so it always fits u32; the fallback is unreachable.
         let mut carry = u32::try_from(pos).unwrap_or(0);
         for b in &mut bytes {
@@ -308,7 +311,10 @@ mod tests {
         // A base58 body of EXACTLY MAX_B58_LEN (128) must NOT trip the length guard — it fails later at
         // the multicodec check. Kills `>` -> `>=`, which would reject at the cap itself as BadLength.
         let at_cap = format!("did:key:z{}", "1".repeat(128));
-        assert_eq!(decode_ed25519(&at_cap), Err(DidError::UnsupportedMulticodec));
+        assert_eq!(
+            decode_ed25519(&at_cap),
+            Err(DidError::UnsupportedMulticodec)
+        );
         // One past the cap is a length error (true under both `>` and `>=`, documents the boundary).
         let over_cap = format!("did:key:z{}", "1".repeat(129));
         assert_eq!(decode_ed25519(&over_cap), Err(DidError::BadLength));

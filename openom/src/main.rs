@@ -38,7 +38,9 @@ async fn main() -> Result<(), lambda_http::Error> {
                     }
                 };
                 Runtime::new(lambda_http::Adapter::from(router))
-                    .layer(OpenTelemetryLayer::new(flush).with_trigger(OpenTelemetryFaasTrigger::Http))
+                    .layer(
+                        OpenTelemetryLayer::new(flush).with_trigger(OpenTelemetryFaasTrigger::Http),
+                    )
                     .run()
                     .await
             }

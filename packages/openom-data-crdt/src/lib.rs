@@ -282,7 +282,11 @@ pub fn materialize(
     moderators: &BTreeSet<String>,
 ) -> Vec<Record> {
     // An op governs only if a CURRENT moderator committed an entry carrying it (committer ∩ moderators ≠ ∅).
-    let authorized = |op: &Op| committers.get(&op.id).is_some_and(|c| !c.is_disjoint(moderators));
+    let authorized = |op: &Op| {
+        committers
+            .get(&op.id)
+            .is_some_and(|c| !c.is_disjoint(moderators))
+    };
 
     // 1. Every asserted record by id (bare Asserts + Supersede replacements in the acting author's own
     //    name — a replacement attributed to someone else is a forgery, dropped, else the projection

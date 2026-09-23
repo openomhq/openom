@@ -269,7 +269,10 @@ mod tests {
             "2026-02-22T13:10:00.000000Z"
         );
         // The logical counter rides in the last three fractional digits.
-        assert_eq!(Hlc::new(1_771_765_800_123, 7).to_string(), "2026-02-22T13:10:00.123007Z");
+        assert_eq!(
+            Hlc::new(1_771_765_800_123, 7).to_string(),
+            "2026-02-22T13:10:00.123007Z"
+        );
     }
 
     #[test]
@@ -311,24 +314,24 @@ mod tests {
     fn malformed_timestamps_are_rejected() {
         for bad in [
             "",
-            "2026-02-22T13:10:00.000Z",       // too few fractional digits
-            "2026-02-22T13:10:00.000000",     // no trailing Z
-            "2026-02-22 13:10:00.000000Z",    // space instead of T
-            "2026-13-22T13:10:00.000000Z",    // month 13
-            "2026-02-22T24:10:00.000000Z",    // hour 24
-            "2026-02-22T13:10:00.00000xZ",    // non-digit in the fraction
-            "1771765800000",                  // the old bare-int form
-            "2026-02-30T00:00:00.000000Z",    // Feb 30 does not exist
-            "2027-02-29T00:00:00.000000Z",    // 2027 is not a leap year
-            "2026-04-31T00:00:00.000000Z",    // April has 30 days
+            "2026-02-22T13:10:00.000Z",    // too few fractional digits
+            "2026-02-22T13:10:00.000000",  // no trailing Z
+            "2026-02-22 13:10:00.000000Z", // space instead of T
+            "2026-13-22T13:10:00.000000Z", // month 13
+            "2026-02-22T24:10:00.000000Z", // hour 24
+            "2026-02-22T13:10:00.00000xZ", // non-digit in the fraction
+            "1771765800000",               // the old bare-int form
+            "2026-02-30T00:00:00.000000Z", // Feb 30 does not exist
+            "2027-02-29T00:00:00.000000Z", // 2027 is not a leap year
+            "2026-04-31T00:00:00.000000Z", // April has 30 days
             // Each of these is length-correct with exactly one wrong separator, so ONLY that
             // separator's guard rejects it (kills the individual `||` -> `&&` mutations that a
             // wrong-length or multi-error string can't isolate).
-            "2026-02222T13:10:00.000000Z",    // b[7] is not '-'
-            "2026-02-22T13:10000.000000Z",    // b[16] is not ':'
-            "2026-02-22T13:10:000000000Z",    // b[19] is not '.'
-            "2026-02-22T13:10:00.0000000",    // b[26] is not 'Z'
-            "2026-02-22T13:10:60.000000Z",    // second 60 (> 59), with a valid separator layout
+            "2026-02222T13:10:00.000000Z", // b[7] is not '-'
+            "2026-02-22T13:10000.000000Z", // b[16] is not ':'
+            "2026-02-22T13:10:000000000Z", // b[19] is not '.'
+            "2026-02-22T13:10:00.0000000", // b[26] is not 'Z'
+            "2026-02-22T13:10:60.000000Z", // second 60 (> 59), with a valid separator layout
         ] {
             assert!(bad.parse::<Hlc>().is_err(), "{bad:?} must not parse");
         }
@@ -351,7 +354,11 @@ mod tests {
             "0000-01-01T00:00:00.000000Z", // z < 0 after the shift -> civil_from_days negative-z branch
             "0000-02-29T00:00:00.000000Z", // days_from_civil m<=2 -> y = -1 -> negative-year branch
         ] {
-            assert_eq!(s.parse::<Hlc>().unwrap().to_string(), s, "{s} must round-trip");
+            assert_eq!(
+                s.parse::<Hlc>().unwrap().to_string(),
+                s,
+                "{s} must round-trip"
+            );
         }
     }
 

@@ -402,7 +402,9 @@ mod tests {
         };
         assert!(moved(&|m| m["predicate"] = json!("openom.org/core/sex/v1")));
         assert!(moved(&|m| m["targetId"] = json!("per_other")));
-        assert!(moved(&|m| m["createdAt"] = json!("2026-02-22T13:10:00.000001Z")));
+        assert!(moved(
+            &|m| m["createdAt"] = json!("2026-02-22T13:10:00.000001Z")
+        ));
         assert!(moved(&|m| m["createdBy"] = json!(signer(2).1)));
         assert!(moved(&|m| m["citation"] = json!({ "sourceId": "other" })));
     }

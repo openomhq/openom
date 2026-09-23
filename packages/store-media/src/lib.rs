@@ -75,13 +75,22 @@ impl MediaStore {
     /// # Errors
     /// Returns an error string if the database can't be opened or the schema can't be applied.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
-        let conn = store_schema::open_versioned(path.as_ref(), SCHEMA_VERSION, SCHEMA, ResetPolicy::Recreatable)
-            .map_err(|e| e.to_string())?;
-        Ok(Self { conn: Mutex::new(conn) })
+        let conn = store_schema::open_versioned(
+            path.as_ref(),
+            SCHEMA_VERSION,
+            SCHEMA,
+            ResetPolicy::Recreatable,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Store `sealed` (opaque, host-sealed) bytes under the content address `hash` (SHA-256 of the plaintext,
@@ -92,7 +101,9 @@ impl MediaStore {
     /// # Errors
     /// Returns an error string if the write fails.
     pub fn put(&self, hash: &str, sealed: &[u8], meta: PutMeta) -> Result<(), String> {
-        let mime = meta.mime.unwrap_or_else(|| "application/octet-stream".to_string());
+        let mime = meta
+            .mime
+            .unwrap_or_else(|| "application/octet-stream".to_string());
         self.conn()
             .execute(
                 "INSERT INTO blobs (hash, mime, w, h, size, bytes, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -109,7 +120,9 @@ impl MediaStore {
     /// Returns an error string if the read fails.
     pub fn has(&self, hash: &str) -> Result<bool, String> {
         self.conn()
-            .query_row("SELECT 1 FROM blobs WHERE hash = ?1", params![hash], |_| Ok(()))
+            .query_row("SELECT 1 FROM blobs WHERE hash = ?1", params![hash], |_| {
+                Ok(())
+            })
             .optional()
             .map(|o| o.is_some())
             .map_err(|e| e.to_string())
@@ -171,11 +184,14 @@ impl MediaStore {
     /// Returns an error string if the read fails.
     pub fn list(&self) -> Result<Vec<String>, String> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT hash FROM blobs").map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT hash FROM blobs")
+            .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -184,7 +200,13 @@ mod tests {
     use super::{MediaStore, PutMeta};
 
     fn jpeg_meta() -> PutMeta {
-        PutMeta { mime: Some("image/jpeg".into()), w: Some(64), h: Some(48), size: 10, created: 1_000 }
+        PutMeta {
+            mime: Some("image/jpeg".into()),
+            w: Some(64),
+            h: Some(48),
+            size: 10,
+            created: 1_000,
+        }
     }
 
     #[test]
@@ -194,8 +216,20 @@ mod tests {
         // and treats the bytes as opaque.
         s.put("deadbeef", b"sealed-1", jpeg_meta()).unwrap();
         // Same hash → no-op (a nonced re-seal with different bytes must NOT displace the first entry).
-        s.put("deadbeef", b"sealed-2-different", PutMeta { created: 2_000, ..jpeg_meta() }).unwrap();
-        assert_eq!(s.list().unwrap(), vec!["deadbeef".to_string()], "deduped to one entry by hash");
+        s.put(
+            "deadbeef",
+            b"sealed-2-different",
+            PutMeta {
+                created: 2_000,
+                ..jpeg_meta()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            s.list().unwrap(),
+            vec!["deadbeef".to_string()],
+            "deduped to one entry by hash"
+        );
 
         assert!(s.has("deadbeef").unwrap());
         let meta = s.meta("deadbeef").unwrap().unwrap();
@@ -205,17 +239,40 @@ mod tests {
             "metadata is the first put's; size is the PLAINTEXT length, not the sealed byte count"
         );
         let (sealed, mime) = s.get_sealed("deadbeef").unwrap().unwrap();
-        assert_eq!((sealed.as_slice(), mime.as_str()), (&b"sealed-1"[..], "image/jpeg"), "first bytes kept");
+        assert_eq!(
+            (sealed.as_slice(), mime.as_str()),
+            (&b"sealed-1"[..], "image/jpeg"),
+            "first bytes kept"
+        );
 
         // A different hash is a distinct entry; default mime when none given.
-        s.put("cafef00d", b"other", PutMeta { mime: None, w: None, h: None, size: 5, created: 3_000 }).unwrap();
-        assert_eq!(s.meta("cafef00d").unwrap().unwrap().mime, "application/octet-stream", "default mime");
+        s.put(
+            "cafef00d",
+            b"other",
+            PutMeta {
+                mime: None,
+                w: None,
+                h: None,
+                size: 5,
+                created: 3_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            s.meta("cafef00d").unwrap().unwrap().mime,
+            "application/octet-stream",
+            "default mime"
+        );
 
         s.delete("deadbeef").unwrap();
         assert!(!s.has("deadbeef").unwrap());
         assert!(s.get_sealed("deadbeef").unwrap().is_none());
         assert!(s.meta("deadbeef").unwrap().is_none());
-        assert_eq!(s.list().unwrap(), vec!["cafef00d".to_string()], "delete removed only the target");
+        assert_eq!(
+            s.list().unwrap(),
+            vec!["cafef00d".to_string()],
+            "delete removed only the target"
+        );
     }
 
     /// Golden-shape tripwire (see the vault store's equivalent): a [`super::SCHEMA`] change breaks this and

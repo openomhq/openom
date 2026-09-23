@@ -58,7 +58,10 @@ pub enum MeterError {
     /// lockout). `limit`/`used` are the owner's plan figures, present ONLY for a caller at or above
     /// [`BILLING_ARG_MIN_ROLE`] (F1: a lower-role collaborator must not learn the owner's tier/headroom);
     /// `None` → the client renders a figure-free message.
-    CapacityExceeded { limit: Option<i64>, used: Option<i64> },
+    CapacityExceeded {
+        limit: Option<i64>,
+        used: Option<i64>,
+    },
     /// The gate's own SQL failed — surfaced as 500, cause logged not leaked.
     Internal(String),
 }
@@ -71,10 +74,14 @@ const BILLING_ARG_MIN_ROLE: i16 = openom_roles::ROLE_MAINTAINER;
 impl From<MeterError> for ApiError {
     fn from(e: MeterError) -> Self {
         match e {
-            MeterError::RateLimited { retry_after_secs } => Self::TooManyRequests(retry_after_secs.max(1)),
+            MeterError::RateLimited { retry_after_secs } => {
+                Self::TooManyRequests(retry_after_secs.max(1))
+            }
             MeterError::CapacityExceeded { limit, used } => {
                 let args = match (limit, used) {
-                    (Some(limit), Some(used)) => serde_json::json!({ "limit": limit, "used": used }),
+                    (Some(limit), Some(used)) => {
+                        serde_json::json!({ "limit": limit, "used": used })
+                    }
                     _ => serde_json::Value::Null,
                 };
                 Self::Coded {
@@ -96,13 +103,14 @@ async fn caller_is_privileged(tx: &mut Transaction<'_, Postgres>, cx: MeterCtx) 
     if cx.member == cx.account {
         return true; // the tree owner
     }
-    let role: Option<i16> = sqlx::query_scalar("SELECT role FROM tree_access WHERE tree_id = $1 AND member_id = $2")
-        .bind(cx.tree)
-        .bind(cx.member)
-        .fetch_optional(&mut **tx)
-        .await
-        .ok()
-        .flatten();
+    let role: Option<i16> =
+        sqlx::query_scalar("SELECT role FROM tree_access WHERE tree_id = $1 AND member_id = $2")
+            .bind(cx.tree)
+            .bind(cx.member)
+            .fetch_optional(&mut **tx)
+            .await
+            .ok()
+            .flatten();
     role.is_some_and(|r| r <= BILLING_ARG_MIN_ROLE)
 }
 
@@ -140,7 +148,12 @@ pub trait Meter: Send + Sync {
     ///
     /// # Errors
     /// Reserved for a future synchronous read gate; today always `Ok`.
-    async fn charge_read(&self, pool: &PgPool, cx: MeterCtx, bytes: Option<i64>) -> Result<(), MeterError>;
+    async fn charge_read(
+        &self,
+        pool: &PgPool,
+        cx: MeterCtx,
+        bytes: Option<i64>,
+    ) -> Result<(), MeterError>;
 
     /// RECONCILE: credit reclaimed bytes back to the owner's tree-byte capacity, in the sweep's row-delete tx
     /// (GC, `gc.rs`). Mirrors media's `release()`.
@@ -231,10 +244,18 @@ impl Meter for PgMeter {
         if member_ok.rows_affected() != 1 {
             // A positive ceil'd retry-after in whole seconds; the saturating f64->u64 cast is intentional.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let exact = if m_rate > 0.0 { (1.0 / m_rate).ceil() as u64 } else { 60 };
+            let exact = if m_rate > 0.0 {
+                (1.0 / m_rate).ceil() as u64
+            } else {
+                60
+            };
             // F1: a non-privileged caller gets a fixed coarse backoff, not the exact 1/rate that would reveal
             // the owner's plan rate. Privileged callers (owner/co-owner/maintainer) get the precise value.
-            let retry_after_secs = if caller_is_privileged(tx, cx).await { exact } else { exact.max(60) };
+            let retry_after_secs = if caller_is_privileged(tx, cx).await {
+                exact
+            } else {
+                exact.max(60)
+            };
             tracing::info!(event = "rate_rejected", resource = "meter", tree = %cx.tree, member = %cx.member);
             return Err(MeterError::RateLimited { retry_after_secs });
         }
@@ -256,12 +277,13 @@ impl Meter for PgMeter {
                 // F1: attach the owner's plan figures ONLY for a privileged caller; a lower-role collaborator
                 // gets the code with no numbers, so it can't read the owner's tier/headroom.
                 let (limit, used) = if caller_is_privileged(tx, cx).await {
-                    let row: (i64, i64) =
-                        sqlx::query_as("SELECT max_tree_bytes, tree_used_bytes FROM accounts WHERE id = $1")
-                            .bind(cx.account)
-                            .fetch_one(&mut **tx)
-                            .await
-                            .map_err(|e| MeterError::Internal(e.to_string()))?;
+                    let row: (i64, i64) = sqlx::query_as(
+                        "SELECT max_tree_bytes, tree_used_bytes FROM accounts WHERE id = $1",
+                    )
+                    .bind(cx.account)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(|e| MeterError::Internal(e.to_string()))?;
                     (Some(row.0), Some(row.1))
                 } else {
                     (None, None)
@@ -311,14 +333,23 @@ impl Meter for PgMeter {
             // The create caller is always the tree owner (creating their own tree), so the exact 1/rate
             // retry-after leaks nothing (it's their own plan rate).
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let retry_after_secs = if rate > 0.0 { (1.0 / rate).ceil() as u64 } else { 60 };
+            let retry_after_secs = if rate > 0.0 {
+                (1.0 / rate).ceil() as u64
+            } else {
+                60
+            };
             tracing::info!(event = "rate_rejected", resource = "create_tree", owner = %account);
             return Err(MeterError::RateLimited { retry_after_secs });
         }
         Ok(())
     }
 
-    async fn charge_read(&self, pool: &PgPool, cx: MeterCtx, bytes: Option<i64>) -> Result<(), MeterError> {
+    async fn charge_read(
+        &self,
+        pool: &PgPool,
+        cx: MeterCtx,
+        bytes: Option<i64>,
+    ) -> Result<(), MeterError> {
         // Best-effort: a metering write must never fail the read it counts. Log a store error and proceed.
         let res = sqlx::query(
             "INSERT INTO usage_month (account_id, tree_id, member_id, month, read_ops, bytes_read)
@@ -347,11 +378,13 @@ impl Meter for PgMeter {
     ) -> Result<(), sqlx::Error> {
         // Clamp at 0: the tree-byte meter is monotonic-until-GC, and a credit must never drive it negative
         // (mirrors media `release`, defensively floored).
-        sqlx::query("UPDATE accounts SET tree_used_bytes = GREATEST(tree_used_bytes - $2, 0) WHERE id = $1")
-            .bind(owner)
-            .bind(bytes)
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query(
+            "UPDATE accounts SET tree_used_bytes = GREATEST(tree_used_bytes - $2, 0) WHERE id = $1",
+        )
+        .bind(owner)
+        .bind(bytes)
+        .execute(&mut **tx)
+        .await?;
         Ok(())
     }
 }

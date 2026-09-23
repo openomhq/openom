@@ -66,7 +66,14 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             author_public_key,
             hpke_public_key,
             ..
-        } => apply_add(&mut state, member, role, author_public_key, hpke_public_key, &mut events)?,
+        } => apply_add(
+            &mut state,
+            member,
+            role,
+            author_public_key,
+            hpke_public_key,
+            &mut events,
+        )?,
         MembershipAction::Remove { member } => apply_remove(&mut state, member, &mut events)?,
         MembershipAction::ChangeRole { member, new_role } => {
             apply_change_role(&mut state, member, new_role, &mut events)?;
@@ -79,17 +86,32 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             new_author_public_key,
             new_hpke_public_key,
             ..
-        } => retarget_keys(&mut state, member, new_author_public_key, new_hpke_public_key, "re-found")?,
+        } => retarget_keys(
+            &mut state,
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+            "re-found",
+        )?,
         // Voluntary self-rekey: same mechanics as a re-founding, but authorized by the member's current
         // key, not the recovery authority. Not a recovery, so it does not join the reset-merge carve-out.
         MembershipAction::Retarget {
             member,
             new_author_public_key,
             new_hpke_public_key,
-        } => retarget_keys(&mut state, member, new_author_public_key, new_hpke_public_key, "retarget")?,
+        } => retarget_keys(
+            &mut state,
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+            "retarget",
+        )?,
         // Replace the pinned recovery authority. Membership is untouched — this only changes who may
         // authorize a future recovery (signed by the CURRENT authority, checked by the caller).
-        MembershipAction::RotateRecoveryAuthority { new_reset_authority, .. } => {
+        MembershipAction::RotateRecoveryAuthority {
+            new_reset_authority,
+            ..
+        } => {
             state.reset_authority = Some(new_reset_authority.clone());
         }
         // All membership-inert no-ops, for different reasons:

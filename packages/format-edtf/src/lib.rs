@@ -256,7 +256,10 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
 /// bound is `<= 99` and fits `u8` — the saturating fallback is unreachable.
 fn parse_u8_range(s: &str) -> Option<(u8, u8)> {
     let (lo, hi) = parse_digits_range(s)?;
-    Some((u8::try_from(lo).unwrap_or(u8::MAX), u8::try_from(hi).unwrap_or(u8::MAX)))
+    Some((
+        u8::try_from(lo).unwrap_or(u8::MAX),
+        u8::try_from(hi).unwrap_or(u8::MAX),
+    ))
 }
 
 /// Numeric [min, max] of a run of digits and `X` (unspecified) — `X→0` for min, `X→9` for max.
@@ -440,7 +443,10 @@ mod tests {
         );
         // Winter spans into the next year.
         let winter = parse("2001-24").unwrap();
-        assert_eq!((winter.min, winter.max), (Some(d(2001, 12, 1)), Some(d(2002, 2, 28))));
+        assert_eq!(
+            (winter.min, winter.max),
+            (Some(d(2001, 12, 1)), Some(d(2002, 2, 28)))
+        );
     }
 
     #[test]
@@ -448,17 +454,27 @@ mod tests {
         let closed = parse("1964/2008").unwrap();
         assert_eq!(
             (closed.kind, closed.min, closed.max),
-            (EdtfKind::Interval, Some(d(1964, 1, 1)), Some(d(2008, 12, 31)))
+            (
+                EdtfKind::Interval,
+                Some(d(1964, 1, 1)),
+                Some(d(2008, 12, 31))
+            )
         );
 
         let open_end = parse("1985-04-12/..").unwrap();
         assert_eq!((open_end.min, open_end.max), (Some(d(1985, 4, 12)), None));
 
         let unknown_end = parse("1985/").unwrap();
-        assert_eq!((unknown_end.min, unknown_end.max), (Some(d(1985, 1, 1)), None));
+        assert_eq!(
+            (unknown_end.min, unknown_end.max),
+            (Some(d(1985, 1, 1)), None)
+        );
 
         let open_start = parse("../1985").unwrap();
-        assert_eq!((open_start.min, open_start.max), (None, Some(d(1985, 12, 31))));
+        assert_eq!(
+            (open_start.min, open_start.max),
+            (None, Some(d(1985, 12, 31)))
+        );
 
         // Qualifier on one side propagates to the interval.
         assert!(parse("1984?/1990").unwrap().uncertain);
@@ -467,10 +483,16 @@ mod tests {
     #[test]
     fn bce_years() {
         let bce = parse("-0044").unwrap();
-        assert_eq!((bce.min, bce.max), (Some(d(-44, 1, 1)), Some(d(-44, 12, 31))));
+        assert_eq!(
+            (bce.min, bce.max),
+            (Some(d(-44, 1, 1)), Some(d(-44, 12, 31)))
+        );
         // "-004X" → years -49..-40; min is the more-negative bound.
         let range = parse("-004X").unwrap();
-        assert_eq!((range.min, range.max), (Some(d(-49, 1, 1)), Some(d(-40, 12, 31))));
+        assert_eq!(
+            (range.min, range.max),
+            (Some(d(-49, 1, 1)), Some(d(-40, 12, 31)))
+        );
     }
 
     #[test]
@@ -524,8 +546,8 @@ mod tests {
         // `lo > hi` guards' `>` -> `==` (which would admit lo > hi and build a bogus month/day).
         assert!(parse("2000-5X").is_err()); // month 50..59
         assert!(parse("2000-01-5X").is_err()); // day 50..59
-        // 280: winter's max uses the FOLLOWING year for its February length — kills `year_max + 1`
-        // -> `year_max * 1`. 2003 -> 2004 (leap), so the correct end is 29 Feb 2004, not 28.
+                                               // 280: winter's max uses the FOLLOWING year for its February length — kills `year_max + 1`
+                                               // -> `year_max * 1`. 2003 -> 2004 (leap), so the correct end is 29 Feb 2004, not 28.
         assert_eq!(parse("2003-24").unwrap().max, Some(d(2004, 2, 29)));
     }
 

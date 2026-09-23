@@ -13,14 +13,14 @@
 //! [`PullError::ResetPending`] (the client's out-of-band re-verify ceremony) and is adopted via
 //! [`KeyringChainBlobSync::accept_reset`], never silently walked.
 
-use store_blob::{BlobError, BlobStore, Etag, Precondition};
 use prost::Message;
+use store_blob::{BlobError, BlobStore, Etag, Precondition};
 
 use crate::keyring::signing_bytes as keyring_signing_bytes;
 use crate::wire::Keyring;
 use crate::{
-    keyring_hash, sign_keyring, verify_reset, verify_transition, verify_walk, KeyringError,
-    KeyringAnchor, SigningKey,
+    keyring_hash, sign_keyring, verify_reset, verify_transition, verify_walk, KeyringAnchor,
+    KeyringError, SigningKey,
 };
 
 const HEAD: &str = "keyring/head";
@@ -76,7 +76,10 @@ impl std::fmt::Display for SyncError {
             Self::Malformed(m) => write!(f, "malformed keyring transport state: {m}"),
             Self::Conflict => write!(f, "head advanced concurrently; retry"),
             Self::DraftContentChanged => {
-                write!(f, "draft content changed since review; re-review before countersigning")
+                write!(
+                    f,
+                    "draft content changed since review; re-review before countersigning"
+                )
             }
         }
     }
@@ -88,7 +91,10 @@ impl std::error::Error for SyncError {}
 pub enum PullError {
     Sync(SyncError),
     /// The served head is OLDER than what we've accepted — a rollback / stale-serve attack.
-    Rollback { have: u32, served: u32 },
+    Rollback {
+        have: u32,
+        served: u32,
+    },
     /// The head is a recovery RESET (a new, deliberately-unendorsed founder). The client must confirm it
     /// out of band (surface the hash + revision), then call [`KeyringChainBlobSync::accept_reset`].
     ResetPending,
@@ -101,7 +107,9 @@ impl std::fmt::Display for PullError {
             Self::Rollback { have, served } => {
                 write!(f, "rollback: have revision {have}, store served {served}")
             }
-            Self::ResetPending => write!(f, "head is a recovery reset; awaiting out-of-band confirm"),
+            Self::ResetPending => {
+                write!(f, "head is a recovery reset; awaiting out-of-band confirm")
+            }
         }
     }
 }
@@ -137,10 +145,11 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     /// Returns [`SyncError::Conflict`] on a concurrent head advance, or [`SyncError`] on a store/decode error.
     pub fn publish(&mut self, keyring_bytes: &[u8]) -> Result<(), SyncError> {
         let keyring = decode(keyring_bytes)?;
-        match self
-            .store
-            .put(&rev_key(keyring.revision), keyring_bytes, Precondition::IfAbsent)
-        {
+        match self.store.put(
+            &rev_key(keyring.revision),
+            keyring_bytes,
+            Precondition::IfAbsent,
+        ) {
             Ok(_) | Err(BlobError::PreconditionFailed) => {} // immutable + idempotent
             Err(e) => return Err(SyncError::Store(e)),
         }
@@ -149,13 +158,16 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
             Some(e) => Precondition::IfMatch(e.clone()),
             None => Precondition::IfAbsent,
         };
-        let etag = self.store.put(HEAD, keyring_bytes, pre).map_err(|e| match e {
-            BlobError::PreconditionFailed => SyncError::Conflict,
-            // A keyring HEAD is a pointer, never GC-reaped below a floor, so a `Gone` on this write is a
-            // store-level anomaly, not a bootstrap signal — surface it as a store error (exhaustiveness for
-            // the new `BlobError::Gone`, OPE-409 C2).
-            err @ (BlobError::Backend(_) | BlobError::Gone) => SyncError::Store(err),
-        })?;
+        let etag = self
+            .store
+            .put(HEAD, keyring_bytes, pre)
+            .map_err(|e| match e {
+                BlobError::PreconditionFailed => SyncError::Conflict,
+                // A keyring HEAD is a pointer, never GC-reaped below a floor, so a `Gone` on this write is a
+                // store-level anomaly, not a bootstrap signal — surface it as a store error (exhaustiveness for
+                // the new `BlobError::Gone`, OPE-409 C2).
+                err @ (BlobError::Backend(_) | BlobError::Gone) => SyncError::Store(err),
+            })?;
         self.head_etag = Some(etag);
         self.anchor = Some(KeyringAnchor::from_keyring(&keyring));
         Ok(())
@@ -188,7 +200,11 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
         let Some(anchor) = self.anchor.clone() else {
             return self.bootstrap().map_err(PullError::Sync);
         };
-        let Some((bytes, etag)) = self.store.get(HEAD).map_err(|e| PullError::Sync(e.into()))? else {
+        let Some((bytes, etag)) = self
+            .store
+            .get(HEAD)
+            .map_err(|e| PullError::Sync(e.into()))?
+        else {
             return Ok(None);
         };
         let head = decode(&bytes).map_err(PullError::Sync)?;
@@ -214,7 +230,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 .store
                 .get(&rev_key(n))
                 .map_err(|e| PullError::Sync(e.into()))?
-                .ok_or(PullError::Sync(SyncError::Malformed("missing revision in history")))?;
+                .ok_or(PullError::Sync(SyncError::Malformed(
+                    "missing revision in history",
+                )))?;
             hops.push(decode(&rb).map_err(PullError::Sync)?);
         }
         hops.push(head);
@@ -243,7 +261,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
         let keyring = decode(&bytes)?;
         if let Some(a) = &self.anchor {
             if keyring.revision < a.revision {
-                return Err(SyncError::Malformed("reset revision is behind the watermark"));
+                return Err(SyncError::Malformed(
+                    "reset revision is behind the watermark",
+                ));
             }
         }
         // A reset accepted against an existing anchor must be continuous with — and signed by — the
@@ -268,7 +288,11 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     /// Returns [`SyncError`] on a store error or if the `proposal_id` is already claimed.
     pub fn propose(&self, proposal_id: &str, candidate_bytes: &[u8]) -> Result<(), SyncError> {
         decode(candidate_bytes)?; // must be a decodable keyring
-        match self.store.put(&draft_key(proposal_id), candidate_bytes, Precondition::IfAbsent) {
+        match self.store.put(
+            &draft_key(proposal_id),
+            candidate_bytes,
+            Precondition::IfAbsent,
+        ) {
             Ok(_) => Ok(()),
             Err(BlobError::PreconditionFailed) => Err(SyncError::Conflict), // that proposal id is taken
             Err(e) => Err(SyncError::Store(e)),
@@ -319,10 +343,11 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 return Err(SyncError::DraftContentChanged);
             }
             sign_keyring(&mut candidate, key);
-            match self
-                .store
-                .put(&dkey, &candidate.encode_to_vec(), Precondition::IfMatch(etag))
-            {
+            match self.store.put(
+                &dkey,
+                &candidate.encode_to_vec(),
+                Precondition::IfMatch(etag),
+            ) {
                 Ok(_) => return Ok(()),
                 Err(BlobError::PreconditionFailed) => {} // concurrent countersign — refetch + re-check
                 Err(e) => return Err(SyncError::Store(e)),
@@ -354,7 +379,11 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 };
                 match self.store.put(HEAD, &bytes, pre) {
                     Ok(etag) => {
-                        let _ = self.store.put(&rev_key(draft.revision), &bytes, Precondition::IfAbsent);
+                        let _ = self.store.put(
+                            &rev_key(draft.revision),
+                            &bytes,
+                            Precondition::IfAbsent,
+                        );
                         let _ = self.store.delete(&dkey, Precondition::Any); // best-effort cleanup
                         self.head_etag = Some(etag);
                         self.anchor = Some(new_anchor);
@@ -367,8 +396,7 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
             // The draft no longer chains onto the head we trust — it moved; rebuild + re-propose.
             Err(KeyringError::Fork | KeyringError::NonSequential) => Ok(Promotion::Stale),
             // A structurally-valid candidate that just lacks the quorum yet.
-            Err(KeyringError::UnendorsedSetChange |
-KeyringError::UnendorsedOrdinaryChange) => {
+            Err(KeyringError::UnendorsedSetChange | KeyringError::UnendorsedOrdinaryChange) => {
                 Ok(Promotion::NotReady)
             }
             Err(e) => Err(SyncError::Chain(format!("{e:?}"))),
@@ -410,11 +438,21 @@ mod tests {
         let encapped = EncappedKey::from_bytes([0u8; 32]);
         let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
         let m = if method == WRAP_RRK_HPKE {
-            WrapMethod::RrkHpke { encapped, recipient_key }
+            WrapMethod::RrkHpke {
+                encapped,
+                recipient_key,
+            }
         } else {
-            WrapMethod::MemberHpke { encapped, recipient_key }
+            WrapMethod::MemberHpke {
+                encapped,
+                recipient_key,
+            }
         };
-        KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
+        KeyeoWrap {
+            recipient: id.into(),
+            method: m,
+            ciphertext: WrappedDek::from_bytes([1u8; 48]),
+        }
     }
     fn bytes(k: &Keyring) -> Vec<u8> {
         k.encode_to_vec()
@@ -515,7 +553,10 @@ mod tests {
 
         // A head served BELOW our watermark is a rollback, not an advance.
         store.put(HEAD, &bytes(&g), Precondition::Any).unwrap();
-        assert!(matches!(consumer.pull(), Err(PullError::Rollback { have: 3, served: 1 })));
+        assert!(matches!(
+            consumer.pull(),
+            Err(PullError::Rollback { have: 3, served: 1 })
+        ));
     }
 
     #[test]
@@ -551,14 +592,29 @@ mod tests {
         assert_eq!(consumer.revision(), Some(2));
 
         // Behind the watermark → refused.
-        store.put(HEAD, &bytes(&reset_at(9, 1)), Precondition::Any).unwrap();
-        assert!(consumer.accept_reset().is_err(), "a reset behind the watermark is refused");
+        store
+            .put(HEAD, &bytes(&reset_at(9, 1)), Precondition::Any)
+            .unwrap();
+        assert!(
+            consumer.accept_reset().is_err(),
+            "a reset behind the watermark is refused"
+        );
         // At the watermark → accepted (no prior RVK to gate).
-        store.put(HEAD, &bytes(&reset_at(9, 2)), Precondition::Any).unwrap();
-        assert!(consumer.accept_reset().is_ok(), "a reset at the watermark is accepted");
+        store
+            .put(HEAD, &bytes(&reset_at(9, 2)), Precondition::Any)
+            .unwrap();
+        assert!(
+            consumer.accept_reset().is_ok(),
+            "a reset at the watermark is accepted"
+        );
         // Ahead of the watermark → accepted.
-        store.put(HEAD, &bytes(&reset_at(8, 3)), Precondition::Any).unwrap();
-        assert!(consumer.accept_reset().is_ok(), "a reset ahead of the watermark is accepted");
+        store
+            .put(HEAD, &bytes(&reset_at(8, 3)), Precondition::Any)
+            .unwrap();
+        assert!(
+            consumer.accept_reset().is_ok(),
+            "a reset ahead of the watermark is accepted"
+        );
     }
 
     #[test]
@@ -573,14 +629,18 @@ mod tests {
         // A forged reset that re-founds under NO recovery authority must be refused: the prior anchor
         // pinned an RVK this reset neither carries nor is signed by. (If the RVK filter were inverted the
         // gate would go inactive and this forged reset would be accepted.)
-        store.put(HEAD, &bytes(&reset_at(9, 1)), Precondition::Any).unwrap();
+        store
+            .put(HEAD, &bytes(&reset_at(9, 1)), Precondition::Any)
+            .unwrap();
         assert!(
             consumer.accept_reset().is_err(),
             "an RVK-pinned anchor must reject a reset lacking the recovery authority"
         );
 
         // The legitimate reset — carrying the same RVK and co-signed by it — is accepted.
-        store.put(HEAD, &bytes(&genesis_with_rvk(9, 42)), Precondition::Any).unwrap();
+        store
+            .put(HEAD, &bytes(&genesis_with_rvk(9, 42)), Precondition::Any)
+            .unwrap();
         assert!(
             consumer.accept_reset().is_ok(),
             "a reset carrying and signed by the pinned RVK is accepted"

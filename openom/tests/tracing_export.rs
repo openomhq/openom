@@ -65,9 +65,17 @@ async fn batch_exporter_delivers_over_http_and_force_flush_drains() {
         let tracer = provider.tracer("openom-export-test");
         tracer.in_span("export_smoke", |_cx| {});
     }
-    provider.force_flush().expect("force_flush drains the batch to the backend");
+    provider
+        .force_flush()
+        .expect("force_flush drains the batch to the backend");
 
     // 4. The receiver must have received the export with a non-empty protobuf body.
-    assert!(hits.load(Ordering::SeqCst) >= 1, "OTLP receiver got no export POST — spans were dropped");
-    assert!(bytes.load(Ordering::SeqCst) > 0, "export POST body was empty");
+    assert!(
+        hits.load(Ordering::SeqCst) >= 1,
+        "OTLP receiver got no export POST — spans were dropped"
+    );
+    assert!(
+        bytes.load(Ordering::SeqCst) > 0,
+        "export POST body was empty"
+    );
 }

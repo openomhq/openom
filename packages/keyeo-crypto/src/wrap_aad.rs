@@ -81,9 +81,21 @@ mod tests {
     fn rrk_wrap_aad_binds_each_input() {
         let base = rrk_wrap_aad(b"tree-16-byte-abc", b"member", 1);
         assert!(!base.is_empty());
-        assert_ne!(base, rrk_wrap_aad(b"other-16byte-abc", b"member", 1), "group_id is bound");
-        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", b"other", 1), "member_id is bound");
-        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", b"member", 2), "wrap_method is bound");
+        assert_ne!(
+            base,
+            rrk_wrap_aad(b"other-16byte-abc", b"member", 1),
+            "group_id is bound"
+        );
+        assert_ne!(
+            base,
+            rrk_wrap_aad(b"tree-16-byte-abc", b"other", 1),
+            "member_id is bound"
+        );
+        assert_ne!(
+            base,
+            rrk_wrap_aad(b"tree-16-byte-abc", b"member", 2),
+            "wrap_method is bound"
+        );
     }
 
     #[test]
@@ -98,6 +110,9 @@ mod tests {
     fn length_framing_prevents_concatenation_forgery() {
         // `("a","bc") != ("ab","c")` — the length prefixes make adjacent fields unambiguous, so two
         // different field splits can never produce the same AAD.
-        assert_ne!(wrap_aad(b"a", b"bc", b"m", 1), wrap_aad(b"ab", b"c", b"m", 1));
+        assert_ne!(
+            wrap_aad(b"a", b"bc", b"m", 1),
+            wrap_aad(b"ab", b"c", b"m", 1)
+        );
     }
 }

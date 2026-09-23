@@ -8,7 +8,7 @@
 //! structurally impossible. Every generic field is covered here; the rest of the binding's payload is
 //! bound through the opaque `payload_commitment` the binding computes.
 
-use crate::{DocHash, Governance, GroupId, Doc, PayloadCommitment, Revision, Signer};
+use crate::{Doc, DocHash, Governance, GroupId, PayloadCommitment, Revision, Signer};
 use keyeo_core::{CanonicalBytes, Postcard, SignatureScheme};
 use serde::Serialize;
 use sha2::{Digest, Sha256};

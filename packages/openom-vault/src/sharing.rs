@@ -56,7 +56,10 @@ pub fn account_tree_role(
     let is_founder = match engine {
         EngineKind::Chain => {
             let decoded = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
-            let member = decoded.members.iter().find(|member| member.member_id == account.member_id);
+            let member = decoded
+                .members
+                .iter()
+                .find(|member| member.member_id == account.member_id);
             let Some(member) = member else {
                 return Ok(None);
             };
@@ -140,7 +143,10 @@ fn dag_basis_tokens(anchor: &[u8]) -> Result<Vec<String>, VaultError> {
     if wm.len() % 32 != 0 {
         return Err(err("dag watermark is not a whole number of op-ids"));
     }
-    Ok(wm.chunks_exact(32).map(|c| format!("op:{}", hex(c))).collect())
+    Ok(wm
+        .chunks_exact(32)
+        .map(|c| format!("op:{}", hex(c)))
+        .collect())
 }
 
 /// Decode `["op:<hex>", ...]` back to the concatenated 32-byte floor for `check_floor`. `None` if any token
@@ -180,7 +186,9 @@ fn split_length_prefixed(buf: &[u8]) -> Result<Vec<&[u8]>, VaultError> {
         }
         let len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
         i += 4;
-        let end = i.checked_add(len).ok_or_else(|| err("length prefix overflow"))?;
+        let end = i
+            .checked_add(len)
+            .ok_or_else(|| err("length prefix overflow"))?;
         if end > buf.len() {
             return Err(err("length prefix overruns hops buffer"));
         }
@@ -239,7 +247,11 @@ pub fn chain_watermark_carry(revision: u32, stored: &[u8]) -> Vec<u8> {
 pub fn chain_head_signers_flat(head_keyring: &[u8]) -> Result<Vec<u8>, VaultError> {
     let kr = Keyring::decode(head_keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
     let anchor = openom_keyring_chain::KeyringAnchor::from_keyring(&kr);
-    Ok(anchor.trusted_signers.iter().flat_map(|s| s.public_key.iter().copied()).collect())
+    Ok(anchor
+        .trusted_signers
+        .iter()
+        .flat_map(|s| s.public_key.iter().copied())
+        .collect())
 }
 
 // --- summary DTOs (serde) --------------------------------------------------------------------------
@@ -300,7 +312,11 @@ pub fn keyring_summary(engine: EngineKind, keyring: &[u8]) -> Result<String, Vau
                         role: i16::try_from(m.role).unwrap_or(i16::MAX),
                     })
                     .collect(),
-                basis: vec![format!("rev:{}:{}", k.revision, hex(keyring_hash(&k).as_slice()))],
+                basis: vec![format!(
+                    "rev:{}:{}",
+                    k.revision,
+                    hex(keyring_hash(&k).as_slice())
+                )],
             }
         }
     };
@@ -439,10 +455,16 @@ pub fn verify_keyring_walk(
         .collect::<Result<Vec<_>, _>>()?;
     let genesis = &decoded[0];
     if genesis.revision != 1 {
-        return Err(err("first keyring in the history is not the genesis (revision 1)"));
+        return Err(err(
+            "first keyring in the history is not the genesis (revision 1)",
+        ));
     }
     // TOFU the genesis founder: the sole role==MEMBER_OWNER member's author key.
-    let owners: Vec<_> = genesis.members.iter().filter(|m| m.role == MEMBER_OWNER).collect();
+    let owners: Vec<_> = genesis
+        .members
+        .iter()
+        .filter(|m| m.role == MEMBER_OWNER)
+        .collect();
     let founder = match owners.as_slice() {
         [only] => *only,
         [] => return Err(err("genesis keyring declares no owner")),
@@ -464,12 +486,16 @@ pub fn verify_keyring_walk(
     // Bind the verified history to the invite's out-of-band pin — a PREFIX: the pinned revision must appear
     // in the verified history with the pinned hash, while the head may be >= it.
     if pinned_revision < 1 || pinned_revision > head.revision {
-        return Err(err("invite-pinned revision is outside the verified keyring history"));
+        return Err(err(
+            "invite-pinned revision is outside the verified keyring history",
+        ));
     }
     // genesis == revision 1 + verify_walk enforces contiguous ascending, so revision r is at index r-1.
     let pinned_body = &decoded[(pinned_revision - 1) as usize];
     if keyring_hash(pinned_body).as_slice() != pinned_hash {
-        return Err(err("keyring at the invite-pinned revision does not match the pin"));
+        return Err(err(
+            "keyring at the invite-pinned revision does not match the pin",
+        ));
     }
     let signers = head
         .trusted_signers
@@ -480,8 +506,11 @@ pub fn verify_keyring_walk(
         })
         .collect::<Vec<_>>();
     let signers_json = serde_json::to_string(&signers).map_err(|e| err(e.to_string()))?;
-    let trusted_signers_flat =
-        head.trusted_signers.iter().flat_map(|s| s.public_key.iter().copied()).collect();
+    let trusted_signers_flat = head
+        .trusted_signers
+        .iter()
+        .flat_map(|s| s.public_key.iter().copied())
+        .collect();
     Ok(WalkedHistory {
         revision: head.revision,
         head_keyring: bodies.last().expect("non-empty run").clone(),
@@ -524,7 +553,8 @@ pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, VaultError> 
     // The server checks `update.version != KEYRING_UPDATE_VERSION` (openom/src/keyring.rs); no shared const
     // yet, so this literal tracks that value.
     const KEYRING_UPDATE_VERSION: u32 = 1;
-    let kr = Keyring::decode(keyring).map_err(|e| err(format!("not a decodable chain keyring: {e}")))?;
+    let kr =
+        Keyring::decode(keyring).map_err(|e| err(format!("not a decodable chain keyring: {e}")))?;
     let update = KeyringUpdate {
         version: KEYRING_UPDATE_VERSION,
         tree_id: kr.tree_id.clone(),
@@ -556,7 +586,11 @@ pub fn dag_anchor_pin(anchor: &[u8]) -> Result<Vec<u8>, VaultError> {
 /// # Errors
 /// Returns [`VaultError`] on a malformed anchor/pin or any failed trust check (founder substitution, rollback,
 /// wrong tree, checkpoint).
-pub fn verify_dag_anchor(anchor: &[u8], tree_id: &[u8], pin: &[u8]) -> Result<AcceptedKeyring, VaultError> {
+pub fn verify_dag_anchor(
+    anchor: &[u8],
+    tree_id: &[u8],
+    pin: &[u8],
+) -> Result<AcceptedKeyring, VaultError> {
     let pin = dag_client::DagPin::decode(pin).map_err(|e| err(e.to_string()))?;
     dag_client::verify_anchor(anchor, tree_id, &pin).map_err(|e| err(e.to_string()))?;
     let watermark = dag_client::watermark(anchor).map_err(|e| err(e.to_string()))?;
@@ -596,7 +630,11 @@ pub fn accept_remote_dag_anchor(
 /// Never fails today (the anchor is passed through opaquely); returns [`VaultError`] for signature symmetry
 /// with the chain wrap.
 #[allow(clippy::unnecessary_wraps)]
-pub fn wrap_dag_keyring_update(anchor: &[u8], tree_id: &[u8], revision: u32) -> Result<Vec<u8>, VaultError> {
+pub fn wrap_dag_keyring_update(
+    anchor: &[u8],
+    tree_id: &[u8],
+    revision: u32,
+) -> Result<Vec<u8>, VaultError> {
     const KEYRING_UPDATE_VERSION: u32 = 1;
     let update = KeyringUpdate {
         version: KEYRING_UPDATE_VERSION,
@@ -638,13 +676,16 @@ pub fn accept_reset_keyring(
     candidate: &[u8],
 ) -> Result<AcceptedKeyring, VaultError> {
     let anchor_kr = Keyring::decode(anchor).map_err(|e| err(format!("bad anchor keyring: {e}")))?;
-    let cand = Keyring::decode(candidate).map_err(|e| err(format!("bad candidate keyring: {e}")))?;
+    let cand =
+        Keyring::decode(candidate).map_err(|e| err(format!("bad candidate keyring: {e}")))?;
     if anchor_kr.tree_id != tree_id || cand.tree_id != tree_id {
         return Err(err("keyring is for a different tree"));
     }
     // Must supersede our trusted head — never roll back or fork.
     if cand.revision != anchor_kr.revision + 1 {
-        return Err(err("a reset must be exactly the next revision after the trusted head"));
+        return Err(err(
+            "a reset must be exactly the next revision after the trusted head",
+        ));
     }
     if cand.prev_keyring_hash.as_slice() != keyring_hash(&anchor_kr) {
         return Err(err("reset does not chain onto the trusted head"));
@@ -652,8 +693,11 @@ pub fn accept_reset_keyring(
     // Reader-side RVK continuity gate: the candidate must pin the SAME recovery authority the trusted head
     // pinned (and be signed by it). The prior authority is the trusted anchor's own RVK (empty ⇒ inert).
     let prior_rvk = KeyringAnchor::from_keyring(&anchor_kr).recovery_verifying_key;
-    let new_anchor = verify_reset((!prior_rvk.is_empty()).then_some(prior_rvk.as_slice()), &cand)
-        .map_err(|e| err(e.to_string()))?;
+    let new_anchor = verify_reset(
+        (!prior_rvk.is_empty()).then_some(prior_rvk.as_slice()),
+        &cand,
+    )
+    .map_err(|e| err(e.to_string()))?;
     Ok(AcceptedKeyring {
         keyring: candidate.to_vec(),
         watermark: new_anchor.revision.to_be_bytes().to_vec(),
@@ -721,13 +765,20 @@ pub fn provision_member(passphrase: &Passphrase) -> Result<MemberAccount, VaultE
 ///
 /// # Errors
 /// Returns [`VaultError`] on a malformed chain keyring or a failed dag resolve.
-pub fn moderators_from_keyring(engine: EngineKind, keyring: &[u8]) -> Result<Vec<String>, VaultError> {
+pub fn moderators_from_keyring(
+    engine: EngineKind,
+    keyring: &[u8],
+) -> Result<Vec<String>, VaultError> {
     let view = match engine {
         EngineKind::Chain => {
             let kr = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
             openom_keyring_chain::membership_view(&kr)
         }
-        EngineKind::Dag => dag_client::resolve(keyring).map_err(|e| err(e.to_string()))?.members,
+        EngineKind::Dag => {
+            dag_client::resolve(keyring)
+                .map_err(|e| err(e.to_string()))?
+                .members
+        }
     };
     Ok(crate::membership::moderators(&view).into_iter().collect())
 }
@@ -787,12 +838,18 @@ impl MemberEpochSecret {
     /// member — the caller treats that as "nothing to adopt", not a hard failure).
     pub fn adopt(&self, keyring: &[u8]) -> Result<AdoptedEpochs, VaultError> {
         match self.engine {
-            EngineKind::Chain => {
-                vault::adopt_member_epochs(keyring, &self.hpke_secret, &self.tree_id, &self.member_id)
-            }
-            EngineKind::Dag => {
-                DagVault.adopt_member_epochs(keyring, &self.hpke_secret, &self.tree_id, &self.member_id)
-            }
+            EngineKind::Chain => vault::adopt_member_epochs(
+                keyring,
+                &self.hpke_secret,
+                &self.tree_id,
+                &self.member_id,
+            ),
+            EngineKind::Dag => DagVault.adopt_member_epochs(
+                keyring,
+                &self.hpke_secret,
+                &self.tree_id,
+                &self.member_id,
+            ),
         }
     }
 }
@@ -827,7 +884,9 @@ fn parse_keyring_role(s: &str) -> Result<KeyringRole, VaultError> {
 /// required and the length must be a whole multiple of 32.
 fn parse_trusted_signers(bytes: &[u8]) -> Result<Vec<VerifyingKey>, VaultError> {
     if bytes.is_empty() || bytes.len() % 32 != 0 {
-        return Err(err("trustedSigners must be one or more concatenated 32-byte keys"));
+        return Err(err(
+            "trustedSigners must be one or more concatenated 32-byte keys",
+        ));
     }
     bytes
         .chunks_exact(32)
@@ -1179,8 +1238,8 @@ pub fn unlock_as_member(
     replica_id: &[u8],
     min_revision: u32,
 ) -> Result<MemberUnlock, VaultError> {
-    let kdf =
-        keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|_| err("bad kdf params"))?;
+    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
+        .map_err(|_| err("bad kdf params"))?;
     let member = MemberId::new(member_id);
     let epoch_secret = |engine, hpke_secret| MemberEpochSecret {
         engine,
@@ -1332,7 +1391,10 @@ mod tests {
         assert_eq!(unwrap_chain_keyring(&chain).unwrap(), body);
 
         let dag = MembershipEnvelope::wrap(EngineKind::Dag, body).encode();
-        assert!(unwrap_chain_keyring(&dag).is_err(), "a dag envelope is refused");
+        assert!(
+            unwrap_chain_keyring(&dag).is_err(),
+            "a dag envelope is refused"
+        );
         assert!(unwrap_chain_keyring(b"not an envelope").is_err());
     }
 
@@ -1342,7 +1404,10 @@ mod tests {
         assert_eq!(full.len(), 4 + 16 + 32);
         assert_eq!(&full[..4], 7u32.to_be_bytes());
         // A wrongly-sized key id / dek hash falls back to a bare revision.
-        assert_eq!(chain_wm_pinned(7, &[1u8; 8], &[2u8; 32]), 7u32.to_be_bytes().to_vec());
+        assert_eq!(
+            chain_wm_pinned(7, &[1u8; 8], &[2u8; 32]),
+            7u32.to_be_bytes().to_vec()
+        );
     }
 
     /// SPIKE (OPE-388 de-risk): drive the CHAIN genesis-walk member-join end-to-end at the rlib level, to
@@ -1373,18 +1438,34 @@ mod tests {
         )
         .unwrap();
         let owner_key = prov.did_key.to_public_key(); // the signer bob pins
-        // OPE-543: the owner's on-tree id is SELF-CERTIFYING — `derive_member_id(account key)`, not the caller's
-        // "acct-owner" label — so the owner-path DEK lookups must be keyed by the derived id.
+                                                      // OPE-543: the owner's on-tree id is SELF-CERTIFYING — `derive_member_id(account key)`, not the caller's
+                                                      // "acct-owner" label — so the owner-path DEK lookups must be keyed by the derived id.
         let owner_derived = derive_member_id(
-            &owner_ks.unlock(owner_pass.expose()).unwrap().root.identity.verifying_key().to_bytes(),
+            &owner_ks
+                .unlock(owner_pass.expose())
+                .unwrap()
+                .root
+                .identity
+                .verifying_key()
+                .to_bytes(),
         );
         let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
         let bob = vault::provision_member(&bob_pass).unwrap();
         // The joiner id self-certifies its author key (OPE-543 `Joiner::from_bytes` admission).
         let bob_id = derive_member_id(&bob.author_public_key);
         let shared = super::add_member(
-            EngineKind::Chain, &prov.keyring, &owner_pass, &owner_ks_bytes, b"tree-uuid-16byte", &owner_derived, b"ro", 1,
-            &bob_id, "editor", &bob.author_public_key, &bob.hpke_public_key,
+            EngineKind::Chain,
+            &prov.keyring,
+            &owner_pass,
+            &owner_ks_bytes,
+            b"tree-uuid-16byte",
+            &owner_derived,
+            b"ro",
+            1,
+            &bob_id,
+            "editor",
+            &bob.author_public_key,
+            &bob.hpke_public_key,
         )
         .unwrap()
         .keyring;
@@ -1402,16 +1483,33 @@ mod tests {
         let walk = super::verify_keyring_walk(b"tree-uuid-16byte", &hops, 1, &pin_hash).unwrap();
         assert_eq!(walk.revision, 2, "walks to the shared head");
         assert_eq!(walk.head_keyring, shared, "head body is the rev-2 keyring");
-        assert_eq!(split_length_prefixed(&walk.bodies_framed).unwrap().len(), 2, "retains both revisions");
+        assert_eq!(
+            split_length_prefixed(&walk.bodies_framed).unwrap().len(),
+            2,
+            "retains both revisions"
+        );
 
         // Bob joins at the verified head, pinning the owner as the trusted signer.
         let unlocked = super::unlock_as_member(
-            EngineKind::Chain, &walk.head_keyring, &bob_pass,
+            EngineKind::Chain,
+            &walk.head_keyring,
+            &bob_pass,
             &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-            b"tree-uuid-16byte", &bob_id, &owner_key, b"rb", walk.revision,
+            b"tree-uuid-16byte",
+            &bob_id,
+            &owner_key,
+            b"rb",
+            walk.revision,
         )
         .unwrap();
-        assert!(!unlocked.did_key.is_empty(), "bob unlocks as a member and gets his author did:key");
-        assert_eq!(unlocked.watermark.len(), 4 + 16 + 32, "the head watermark is the OPE-286 pinned form");
+        assert!(
+            !unlocked.did_key.is_empty(),
+            "bob unlocks as a member and gets his author did:key"
+        );
+        assert_eq!(
+            unlocked.watermark.len(),
+            4 + 16 + 32,
+            "the head watermark is the OPE-286 pinned form"
+        );
     }
 }

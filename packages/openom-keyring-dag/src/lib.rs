@@ -29,7 +29,9 @@ pub use openom_keyring_api::derive_member_id;
 ///
 /// Wraps the `i16` so a role can be a signed,
 /// content-addressed op field (keyeo requires `Role: Serialize`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct KeyringRole(pub i16);
 
 impl KeyringRole {
@@ -101,7 +103,15 @@ pub fn sign_op(
     let canonical = keyeo_dag::canonical_encode(&group_id, &parents, &author, &action, &[]);
     let signature = key.sign(&canonical).to_bytes();
     let author_public_key = key.verifying_key().to_bytes();
-    keyeo_dag::Op::new(id, group_id, parents, author, action, signature, author_public_key)
+    keyeo_dag::Op::new(
+        id,
+        group_id,
+        parents,
+        author,
+        action,
+        signature,
+        author_public_key,
+    )
 }
 
 /// openom keyring authority — v1, founder-signed governance (multi-signer quorum is v2).
@@ -148,12 +158,7 @@ impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
     // carries its own security rationale (OPE-543: why on-tree re-founding/rotation/rekey is unauthorized).
     // Collapsing them would erase that per-op documentation, so the identical-body lint is allowed here.
     #[allow(clippy::match_same_arms)]
-    fn is_authorized(
-        &self,
-        state: &KeyringState,
-        author: &String,
-        action: &KeyringAction,
-    ) -> bool {
+    fn is_authorized(&self, state: &KeyringState, author: &String, action: &KeyringAction) -> bool {
         // Genesis Create: authorized ONLY at an unestablished causal position (no members yet), with the
         // author a listed initial member and EXACTLY ONE Owner (the founder). The empty-state gate is the
         // OPE-271 hardening: keyeo's `apply_action` applies a `Create` by *replacing* the whole
@@ -181,7 +186,12 @@ impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
         };
         match action {
             MembershipAction::Create { .. } => false, // handled above
-            MembershipAction::Add { member, role, author_public_key, .. } => {
+            MembershipAction::Add {
+                member,
+                role,
+                author_public_key,
+                ..
+            } => {
                 // No second Owner, ever; the author must out-rank what the target role needs; AND (OPE-543)
                 // the member id must be self-certifying against the carried key. Covers reactivation too (a
                 // re-add of a removed member flows through this same arm).
@@ -388,8 +398,7 @@ impl QuorumPolicy<String, KeyringRole, Ed25519> for KeyringQuorum {
             return Requirement::All(HashSet::new());
         }
         let excluded = target_member(target);
-        let co_owners =
-            || Self::signer_set(state, excluded, |r| r == KeyringRole::CO_OWNER);
+        let co_owners = || Self::signer_set(state, excluded, |r| r == KeyringRole::CO_OWNER);
         let sole = || Box::new(Requirement::Sole(founder.clone()));
         match self.rule {
             QuorumRule::FounderOnly => Requirement::Sole(founder),
@@ -432,7 +441,11 @@ mod tests {
         }
     }
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
-        Keyeo::new(KeyringState::create(keyeo_dag::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
+        Keyeo::new(
+            KeyringState::create(keyeo_dag::GroupId::unscoped(), members),
+            KeyringAccess,
+            StrongRemove,
+        )
     }
     fn add(role: KeyringRole, seed: u8) -> KeyringAction {
         MembershipAction::Add {
@@ -473,11 +486,23 @@ mod tests {
         ))
         .unwrap();
         // founder adds bob into the signer set (touching a signer → needs Owner ✓)
-        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1)))
-            .unwrap();
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        ))
+        .unwrap();
         // bob (a signer) adds carol as an ordinary Editor (touching an ordinary member → needs a signer ✓)
-        k.apply(sign_op([3; 32], vec![[2; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2)))
-            .unwrap();
+        k.apply(sign_op(
+            [3; 32],
+            vec![[2; 32]],
+            mid(2),
+            add(KeyringRole::EDITOR, 3),
+            &sk(2),
+        ))
+        .unwrap();
 
         assert_eq!(
             members(&k),
@@ -498,7 +523,13 @@ mod tests {
             minit(KeyringRole::MAINTAINER, 4),
         ]);
         let r = k
-            .apply(sign_op([1; 32], vec![], mid(4), add(KeyringRole::EDITOR, 9), &sk(4)))
+            .apply(sign_op(
+                [1; 32],
+                vec![],
+                mid(4),
+                add(KeyringRole::EDITOR, 9),
+                &sk(4),
+            ))
             .unwrap();
         assert!(matches!(r, ApplyOutcome::Applied { events } if events.is_empty()));
         assert!(
@@ -535,9 +566,7 @@ mod tests {
             [2; 32],
             vec![[1; 32]],
             mid(2),
-            MembershipAction::Remove {
-                member: mid(1),
-            },
+            MembershipAction::Remove { member: mid(1) },
             &sk(2),
         ))
         .unwrap();
@@ -563,17 +592,24 @@ mod tests {
         ))
         .unwrap();
         // a second Owner is forbidden
-        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::OWNER, 5), &sk(1)))
-            .unwrap();
-        assert!(!members(&k).iter().any(|(m, _)| m == &mid(5)), "no second Owner");
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::OWNER, 5),
+            &sk(1),
+        ))
+        .unwrap();
+        assert!(
+            !members(&k).iter().any(|(m, _)| m == &mid(5)),
+            "no second Owner"
+        );
         // the Owner cannot self-remove
         k.apply(sign_op(
             [3; 32],
             vec![[1; 32]],
             mid(1),
-            MembershipAction::Remove {
-                member: mid(1),
-            },
+            MembershipAction::Remove { member: mid(1) },
             &sk(1),
         ))
         .unwrap();
@@ -614,8 +650,14 @@ mod tests {
             &sk(1),
         ))
         .unwrap();
-        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1)))
-            .unwrap();
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        ))
+        .unwrap();
 
         // Attack A — a second genesis childed on the real chain (sorts AFTER it in topo order: the classic
         // "later Create replaces the accumulated state" wipe).
@@ -631,16 +673,13 @@ mod tests {
             )
         };
         k.apply(re_found(9, vec![[2; 32]])).unwrap(); // admitted (self-certifying), folded as a no-op
-        // Attack B — a CONCURRENT second genesis (no parents) whose OpId [0;32] sorts BEFORE the real
-        // genesis [1;32], so it is folded FIRST — defeating any naive "first Create wins" rule.
+                                                      // Attack B — a CONCURRENT second genesis (no parents) whose OpId [0;32] sorts BEFORE the real
+                                                      // genesis [1;32], so it is folded FIRST — defeating any naive "first Create wins" rule.
         k.apply(re_found(0, vec![])).unwrap();
 
         assert_eq!(
             members(&k),
-            roster(&[
-                (2, KeyringRole::CO_OWNER),
-                (1, KeyringRole::OWNER),
-            ]),
+            roster(&[(2, KeyringRole::CO_OWNER), (1, KeyringRole::OWNER),]),
             "neither a later nor an OpId-grinding concurrent Create may re-found the group"
         );
         assert!(
@@ -676,7 +715,13 @@ mod tests {
 
         // Mallory forges an op AS "bob" (a co-owner who could add an editor) but signs it with HER key
         // (seed 9), so the op carries vk(9), not bob's registered vk(2).
-        let forged = sign_op([2; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 9), &sk(9));
+        let forged = sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(2),
+            add(KeyringRole::EDITOR, 9),
+            &sk(9),
+        );
         let outcome = k.apply(forged).unwrap(); // admitted — the signature matches its own carried key ...
         assert!(
             matches!(outcome, ApplyOutcome::Applied { events } if events.is_empty()),
@@ -688,8 +733,14 @@ mod tests {
         );
 
         // Control: the REAL bob, signing with his registered key (seed 2), adds an editor as expected.
-        k.apply(sign_op([3; 32], vec![[1; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2)))
-            .unwrap();
+        k.apply(sign_op(
+            [3; 32],
+            vec![[1; 32]],
+            mid(2),
+            add(KeyringRole::EDITOR, 3),
+            &sk(2),
+        ))
+        .unwrap();
         assert!(
             members(&k).iter().any(|(m, _)| m == &mid(3)),
             "the same action by the author's registered key is authorized — the key identity is the gate"
@@ -709,44 +760,65 @@ mod tests {
             [1; 32],
             vec![],
             mid(1),
-            MembershipAction::Create { initial_members: vec![minit(KeyringRole::OWNER, 1)] },
+            MembershipAction::Create {
+                initial_members: vec![minit(KeyringRole::OWNER, 1)],
+            },
             &sk(1),
         ))
         .unwrap();
-        k.apply(sign_op([2; 32], vec![[1; 32]], mid(1), add(KeyringRole::CO_OWNER, 2), &sk(1)))
-            .unwrap();
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::CO_OWNER, 2),
+            &sk(1),
+        ))
+        .unwrap();
 
         // Pin the horizon at the current tip [2].
         k.set_merge_horizon(vec![[2; 32]]);
 
         // A fork off [1] (before the horizon) is rejected outright.
-        let stale = k.apply(sign_op([4; 32], vec![[1; 32]], mid(1), add(KeyringRole::EDITOR, 9), &sk(1)));
+        let stale = k.apply(sign_op(
+            [4; 32],
+            vec![[1; 32]],
+            mid(1),
+            add(KeyringRole::EDITOR, 9),
+            &sk(1),
+        ));
         assert!(
             matches!(stale, Err(keyeo_dag::Error::StaleFork)),
             "a fork from before the horizon is rejected, not merged"
         );
-        assert!(!k.state().members.contains_key(&mid(9)), "and never enters the resolved state");
+        assert!(
+            !k.state().members.contains_key(&mid(9)),
+            "and never enters the resolved state"
+        );
 
         // An op building ON the horizon [2] is accepted normally.
-        k.apply(sign_op([3; 32], vec![[2; 32]], mid(1), add(KeyringRole::EDITOR, 3), &sk(1)))
-            .unwrap();
-        assert!(k.state().members.contains_key(&mid(3)), "an op that builds on the horizon is accepted");
+        k.apply(sign_op(
+            [3; 32],
+            vec![[2; 32]],
+            mid(1),
+            add(KeyringRole::EDITOR, 3),
+            &sk(1),
+        ))
+        .unwrap();
+        assert!(
+            k.state().members.contains_key(&mid(3)),
+            "an op that builds on the horizon is accepted"
+        );
     }
 
     #[test]
     fn any_non_owner_may_remove_themselves() {
         // The widen decision: any non-Owner may self-remove (a BYO/offline convenience), even an Editor.
-        let mut k = engine(&[
-            minit(KeyringRole::OWNER, 1),
-            minit(KeyringRole::EDITOR, 6),
-        ]);
+        let mut k = engine(&[minit(KeyringRole::OWNER, 1), minit(KeyringRole::EDITOR, 6)]);
         k.apply(sign_op(
             [1; 32],
             vec![],
             mid(6),
-            MembershipAction::Remove {
-                member: mid(6),
-            },
+            MembershipAction::Remove { member: mid(6) },
             &sk(6),
         ))
         .unwrap();
@@ -764,16 +836,23 @@ mod tests {
             minit(KeyringRole::CO_OWNER, 2),
             minit(KeyringRole::EDITOR, 3),
         ]);
-        k.apply(sign_op([1; 32], vec![], mid(2), add(KeyringRole::EDITOR, 4), &sk(2)))
-            .unwrap();
-        assert!(members(&k).iter().any(|(m, _)| m == &mid(4)), "a CoOwner may add an ordinary member");
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            mid(2),
+            add(KeyringRole::EDITOR, 4),
+            &sk(2),
+        ))
+        .unwrap();
+        assert!(
+            members(&k).iter().any(|(m, _)| m == &mid(4)),
+            "a CoOwner may add an ordinary member"
+        );
         k.apply(sign_op(
             [2; 32],
             vec![[1; 32]],
             mid(2),
-            MembershipAction::Remove {
-                member: mid(3),
-            },
+            MembershipAction::Remove { member: mid(3) },
             &sk(2),
         ))
         .unwrap();
@@ -788,18 +867,35 @@ mod tests {
         // A structurally-valid op whose signature is over the wrong bytes must be rejected by the
         // engine's authenticate step, i.e. by Ed25519::verify (edsign verify_strict).
         let mut k = engine(&[minit(KeyringRole::OWNER, 1)]);
-        let action = MembershipAction::Remove {
-            member: mid(1),
-        };
+        let action = MembershipAction::Remove { member: mid(1) };
         let bad_sig = sk(1).sign(b"not the canonical op bytes").to_bytes();
-        let op = keyeo_dag::Op::new([1; 32], keyeo_dag::GroupId::unscoped(), vec![], mid(1), action, bad_sig, vk(1));
-        assert!(matches!(k.apply(op).unwrap_err(), keyeo_dag::Error::BadSignature));
+        let op = keyeo_dag::Op::new(
+            [1; 32],
+            keyeo_dag::GroupId::unscoped(),
+            vec![],
+            mid(1),
+            action,
+            bad_sig,
+            vk(1),
+        );
+        assert!(matches!(
+            k.apply(op).unwrap_err(),
+            keyeo_dag::Error::BadSignature
+        ));
     }
 
     // ---- v2 multi-signer quorum (FounderOrUnanimity) ----
 
-    fn quorum_engine_with(members: &[KeyringMemberInit], quorum: KeyringQuorum) -> KeyringQuorumEngine {
-        Keyeo::with_quorum(KeyringState::create(keyeo_dag::GroupId::unscoped(), members), KeyringAccess, StrongRemove, quorum)
+    fn quorum_engine_with(
+        members: &[KeyringMemberInit],
+        quorum: KeyringQuorum,
+    ) -> KeyringQuorumEngine {
+        Keyeo::with_quorum(
+            KeyringState::create(keyeo_dag::GroupId::unscoped(), members),
+            KeyringAccess,
+            StrongRemove,
+            quorum,
+        )
     }
     fn quorum_engine(members: &[KeyringMemberInit]) -> KeyringQuorumEngine {
         quorum_engine_with(members, KeyringQuorum::founder_or_unanimity())
@@ -815,26 +911,58 @@ mod tests {
             &sk(1),
         )
     }
-    fn propose(id: u8, parents: Vec<[u8; 32]>, author: impl Into<String>, seed: u8, target: KeyringAction) -> KeyringOp {
+    fn propose(
+        id: u8,
+        parents: Vec<[u8; 32]>,
+        author: impl Into<String>,
+        seed: u8,
+        target: KeyringAction,
+    ) -> KeyringOp {
         sign_op(
             [id; 32],
             parents,
             author,
-            MembershipAction::Propose { proposal_id: [7; 32], target: Box::new(target) },
+            MembershipAction::Propose {
+                proposal_id: [7; 32],
+                target: Box::new(target),
+            },
             &sk(seed),
         )
     }
     fn approve(id: u8, parents: Vec<[u8; 32]>, author: impl Into<String>, seed: u8) -> KeyringOp {
-        sign_op([id; 32], parents, author, MembershipAction::Approve { proposal_id: [7; 32] }, &sk(seed))
+        sign_op(
+            [id; 32],
+            parents,
+            author,
+            MembershipAction::Approve {
+                proposal_id: [7; 32],
+            },
+            &sk(seed),
+        )
     }
     fn commit(id: u8, parents: Vec<[u8; 32]>, author: impl Into<String>, seed: u8) -> KeyringOp {
-        sign_op([id; 32], parents, author, MembershipAction::Commit { proposal_id: [7; 32] }, &sk(seed))
+        sign_op(
+            [id; 32],
+            parents,
+            author,
+            MembershipAction::Commit {
+                proposal_id: [7; 32],
+            },
+            &sk(seed),
+        )
     }
     fn promote(seed: u8, new_role: KeyringRole) -> KeyringAction {
-        MembershipAction::ChangeRole { member: mid(seed), new_role }
+        MembershipAction::ChangeRole {
+            member: mid(seed),
+            new_role,
+        }
     }
     fn q_role_of(k: &KeyringQuorumEngine, member: &str) -> Option<KeyringRole> {
-        k.state().members.get(member).filter(|m| m.is_active()).map(|m| m.role)
+        k.state()
+            .members
+            .get(member)
+            .filter(|m| m.is_active())
+            .map(|m| m.role)
     }
 
     #[test]
@@ -849,10 +977,21 @@ mod tests {
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(2),
+            2,
+            promote(6, KeyringRole::CO_OWNER),
+        ))
+        .unwrap();
         k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
         k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
-        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::CO_OWNER), "unanimity of co-owners promotes");
+        assert_eq!(
+            q_role_of(&k, &mid(6)),
+            Some(KeyringRole::CO_OWNER),
+            "unanimity of co-owners promotes"
+        );
     }
 
     #[test]
@@ -867,9 +1006,20 @@ mod tests {
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(2),
+            2,
+            promote(6, KeyringRole::CO_OWNER),
+        ))
+        .unwrap();
         k.apply(commit(3, vec![[2; 32]], mid(2), 2)).unwrap();
-        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::EDITOR), "bob alone is not unanimity");
+        assert_eq!(
+            q_role_of(&k, &mid(6)),
+            Some(KeyringRole::EDITOR),
+            "bob alone is not unanimity"
+        );
     }
 
     #[test]
@@ -882,9 +1032,20 @@ mod tests {
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], mid(1), 1, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(1),
+            1,
+            promote(6, KeyringRole::CO_OWNER),
+        ))
+        .unwrap();
         k.apply(commit(3, vec![[2; 32]], mid(1), 1)).unwrap();
-        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::CO_OWNER), "founder alone suffices");
+        assert_eq!(
+            q_role_of(&k, &mid(6)),
+            Some(KeyringRole::CO_OWNER),
+            "founder alone suffices"
+        );
     }
 
     #[test]
@@ -899,10 +1060,21 @@ mod tests {
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], mid(2), 2, MembershipAction::Remove { member: mid(1) })).unwrap();
+        k.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(2),
+            2,
+            MembershipAction::Remove { member: mid(1) },
+        ))
+        .unwrap();
         k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
         k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
-        assert_eq!(q_role_of(&k, &mid(1)), Some(KeyringRole::OWNER), "no quorum can remove the Owner");
+        assert_eq!(
+            q_role_of(&k, &mid(1)),
+            Some(KeyringRole::OWNER),
+            "no quorum can remove the Owner"
+        );
     }
 
     // ---- dynamic quorum: per-keyring QuorumRule ----
@@ -919,16 +1091,38 @@ mod tests {
         // co-owners bob + carol try to promote ed -> refused under FounderOnly.
         let mut k = quorum_engine_with(&m, KeyringQuorum::founder_only());
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(2),
+            2,
+            promote(6, KeyringRole::CO_OWNER),
+        ))
+        .unwrap();
         k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
         k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
-        assert_eq!(q_role_of(&k, &mid(6)), Some(KeyringRole::EDITOR), "co-owner unanimity is powerless here");
+        assert_eq!(
+            q_role_of(&k, &mid(6)),
+            Some(KeyringRole::EDITOR),
+            "co-owner unanimity is powerless here"
+        );
         // the founder alone still governs.
         let mut k2 = quorum_engine_with(&m, KeyringQuorum::founder_only());
         k2.apply(genesis(&m)).unwrap();
-        k2.apply(propose(2, vec![[1; 32]], mid(1), 1, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        k2.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(1),
+            1,
+            promote(6, KeyringRole::CO_OWNER),
+        ))
+        .unwrap();
         k2.apply(commit(3, vec![[2; 32]], mid(1), 1)).unwrap();
-        assert_eq!(q_role_of(&k2, &mid(6)), Some(KeyringRole::CO_OWNER), "founder alone governs");
+        assert_eq!(
+            q_role_of(&k2, &mid(6)),
+            Some(KeyringRole::CO_OWNER),
+            "founder alone governs"
+        );
     }
 
     #[test]
@@ -944,18 +1138,41 @@ mod tests {
         // Two signers (bob proposer + carol) is short of 3 -> refused.
         let mut short = quorum_engine_with(&m, KeyringQuorum::threshold(3));
         short.apply(genesis(&m)).unwrap();
-        short.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        short
+            .apply(propose(
+                2,
+                vec![[1; 32]],
+                mid(2),
+                2,
+                promote(6, KeyringRole::CO_OWNER),
+            ))
+            .unwrap();
         short.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
         short.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
-        assert_eq!(q_role_of(&short, &mid(6)), Some(KeyringRole::EDITOR), "2 of 4 is short of the threshold");
+        assert_eq!(
+            q_role_of(&short, &mid(6)),
+            Some(KeyringRole::EDITOR),
+            "2 of 4 is short of the threshold"
+        );
         // Three signers (bob + carol + dave) meet 3-of-4 -> applied, without the founder.
         let mut ok = quorum_engine_with(&m, KeyringQuorum::threshold(3));
         ok.apply(genesis(&m)).unwrap();
-        ok.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(6, KeyringRole::CO_OWNER))).unwrap();
+        ok.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(2),
+            2,
+            promote(6, KeyringRole::CO_OWNER),
+        ))
+        .unwrap();
         ok.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
         ok.apply(approve(4, vec![[3; 32]], mid(4), 4)).unwrap();
         ok.apply(commit(5, vec![[4; 32]], mid(2), 2)).unwrap();
-        assert_eq!(q_role_of(&ok, &mid(6)), Some(KeyringRole::CO_OWNER), "3 of 4 signers meet the threshold");
+        assert_eq!(
+            q_role_of(&ok, &mid(6)),
+            Some(KeyringRole::CO_OWNER),
+            "3 of 4 signers meet the threshold"
+        );
     }
 
     #[test]
@@ -969,7 +1186,9 @@ mod tests {
             [1; 32],
             vec![],
             mid(1),
-            MembershipAction::Create { initial_members: vec![founder] },
+            MembershipAction::Create {
+                initial_members: vec![founder],
+            },
             &sk(1),
         ))
         .unwrap();
@@ -991,7 +1210,10 @@ mod tests {
             &sk(1),
         ))
         .unwrap();
-        assert!(members(&k2).is_empty(), "a two-Owner Create must not seed the group");
+        assert!(
+            members(&k2).is_empty(),
+            "a two-Owner Create must not seed the group"
+        );
     }
 
     #[test]
@@ -1007,7 +1229,14 @@ mod tests {
         ];
         let mut k = quorum_engine(&m);
         k.apply(genesis(&m)).unwrap();
-        k.apply(propose(2, vec![[1; 32]], mid(2), 2, promote(4, KeyringRole::EDITOR))).unwrap();
+        k.apply(propose(
+            2,
+            vec![[1; 32]],
+            mid(2),
+            2,
+            promote(4, KeyringRole::EDITOR),
+        ))
+        .unwrap();
         k.apply(approve(3, vec![[2; 32]], mid(3), 3)).unwrap();
         k.apply(commit(4, vec![[3; 32]], mid(2), 2)).unwrap();
         assert_eq!(
@@ -1022,12 +1251,27 @@ mod tests {
         // A member removed at an earlier causal position has no authority over a later op it authors: the
         // change must not take effect. (The resolver voids a removed author's op, so this holds independent
         // of the is_authorized `is_active` guard — which is why that guard is a defensive one.)
-        let mut k = engine(&[minit(KeyringRole::OWNER, 1), minit(KeyringRole::CO_OWNER, 2)]);
-        k.apply(sign_op([2; 32], vec![], mid(1), MembershipAction::Remove { member: mid(2) }, &sk(1)))
-            .unwrap();
+        let mut k = engine(&[
+            minit(KeyringRole::OWNER, 1),
+            minit(KeyringRole::CO_OWNER, 2),
+        ]);
+        k.apply(sign_op(
+            [2; 32],
+            vec![],
+            mid(1),
+            MembershipAction::Remove { member: mid(2) },
+            &sk(1),
+        ))
+        .unwrap();
         // bob's add is a CHILD of his own removal — bob is inactive at this position.
-        k.apply(sign_op([3; 32], vec![[2; 32]], mid(2), add(KeyringRole::EDITOR, 3), &sk(2)))
-            .unwrap();
+        k.apply(sign_op(
+            [3; 32],
+            vec![[2; 32]],
+            mid(2),
+            add(KeyringRole::EDITOR, 3),
+            &sk(2),
+        ))
+        .unwrap();
         assert!(
             !members(&k).iter().any(|(id, _)| id == &mid(3)),
             "a removed (inactive) member cannot authorize a change"
@@ -1045,12 +1289,18 @@ mod tests {
             [1; 32],
             vec![],
             mid(1),
-            MembershipAction::Create { initial_members: vec![minit(KeyringRole::OWNER, 1)] },
+            MembershipAction::Create {
+                initial_members: vec![minit(KeyringRole::OWNER, 1)],
+            },
             &sk(1),
         ))
         .unwrap();
         let forged_id = "aaaaaaaa-aaaa-8aaa-8aaa-aaaaaaaaaaaa".to_string();
-        assert_ne!(forged_id, mid(3), "the forged id is deliberately not the key's uuid8");
+        assert_ne!(
+            forged_id,
+            mid(3),
+            "the forged id is deliberately not the key's uuid8"
+        );
         k.apply(sign_op(
             [2; 32],
             vec![[1; 32]],
@@ -1086,10 +1336,15 @@ mod tests {
             [1; 32],
             vec![],
             forged.id.clone(),
-            MembershipAction::Create { initial_members: vec![forged] },
+            MembershipAction::Create {
+                initial_members: vec![forged],
+            },
             &sk(1),
         ))
         .unwrap();
-        assert!(members(&k).is_empty(), "a Create with a non-self-certifying member does not seed");
+        assert!(
+            members(&k).is_empty(),
+            "a Create with a non-self-certifying member does not seed"
+        );
     }
 }

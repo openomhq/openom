@@ -120,7 +120,14 @@ mod tests {
     fn content_id_verifies_and_detects_tampering() {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
         let action = MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [1u8; 32] };
-        let op = Op::content_addressed(GroupId::unscoped(), vec![], [3u8; 32], action, Vec::new(), &sk);
+        let op = Op::content_addressed(
+            GroupId::unscoped(),
+            vec![],
+            [3u8; 32],
+            action,
+            Vec::new(),
+            &sk,
+        );
 
         // The id names this content; re-derivation matches.
         assert!(verify_content_id(&op));

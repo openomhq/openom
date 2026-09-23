@@ -118,7 +118,13 @@ fn minit(seed: u8, role: TestRole) -> MemberInit<[u8; 32], TestRole, Ed25519> {
 /// Mint an op whose MEMBER-id author is `author` but which is SIGNED by `signer` (they differ for a
 /// recovery `ReFound`, where the owner id is the author and the recovery key is the signer). The op carries
 /// the signer's public key as `author_public_key`, exactly as the transport would.
-fn op(id: u64, parents: Vec<u64>, author: [u8; 32], signer: &ed25519_dalek::SigningKey, action: Action) -> TestOp {
+fn op(
+    id: u64,
+    parents: Vec<u64>,
+    author: [u8; 32],
+    signer: &ed25519_dalek::SigningKey,
+    action: Action,
+) -> TestOp {
     Op::new(
         id,
         GroupId::unscoped(),
@@ -166,7 +172,9 @@ fn engine(genesis: &[MemberInit<[u8; 32], TestRole, Ed25519>], rvk_pub: [u8; 32]
         vec![],
         pk(1),
         &kp(1),
-        MembershipAction::Create { initial_members: genesis.to_vec() },
+        MembershipAction::Create {
+            initial_members: genesis.to_vec(),
+        },
     ))
     .unwrap();
     k
@@ -186,10 +194,17 @@ fn an_ordinary_member_add_concurrent_with_recovery_auto_merges() {
     // Never lose an innocent edit: an ordinary (non-signer) add concurrent with a recovery re-founding is
     // NOT privileged, so it is not carved out — both survive.
     let rvk = kp(42);
-    let mut k = engine(&[minit(1, TestRole::Admin), minit(2, TestRole::Admin)], rvk.verifying_key().to_bytes());
-    k.apply(op(2, vec![1], pk(2), &kp(2), add(5, TestRole::Editor))).unwrap();
+    let mut k = engine(
+        &[minit(1, TestRole::Admin), minit(2, TestRole::Admin)],
+        rvk.verifying_key().to_bytes(),
+    );
+    k.apply(op(2, vec![1], pk(2), &kp(2), add(5, TestRole::Editor)))
+        .unwrap();
     k.apply(op(3, vec![1], pk(1), &rvk, refound(7))).unwrap();
-    assert!(is_member(&k, 5), "an ordinary add concurrent with recovery auto-merges");
+    assert!(
+        is_member(&k, 5),
+        "an ordinary add concurrent with recovery auto-merges"
+    );
     assert_eq!(owner_key(&k), pk(7), "the owner is recovered");
 }
 
@@ -198,15 +213,26 @@ fn a_privileged_op_concurrent_with_recovery_is_voided_but_a_later_owner_op_stand
     // The carve-out: a signer add (privileged) concurrent with a surviving recovery is voided — precisely the
     // escalation a recovery defends against. A post-recovery signer add on the NEW key still stands.
     let rvk = kp(42);
-    let mut k = engine(&[minit(1, TestRole::Admin), minit(2, TestRole::Admin)], rvk.verifying_key().to_bytes());
-    k.apply(op(2, vec![1], pk(1), &kp(1), add(9, TestRole::Admin))).unwrap();
+    let mut k = engine(
+        &[minit(1, TestRole::Admin), minit(2, TestRole::Admin)],
+        rvk.verifying_key().to_bytes(),
+    );
+    k.apply(op(2, vec![1], pk(1), &kp(1), add(9, TestRole::Admin)))
+        .unwrap();
     k.apply(op(3, vec![1], pk(1), &rvk, refound(7))).unwrap();
-    assert!(!is_member(&k, 9), "a signer add concurrent with the recovery is carve-out-voided");
+    assert!(
+        !is_member(&k, 9),
+        "a signer add concurrent with the recovery is carve-out-voided"
+    );
     assert_eq!(owner_key(&k), pk(7), "the owner is recovered");
     assert!(is_member(&k, 2), "the innocent co-owner is untouched");
     // Post-recovery, the recovered owner (new key sk(7)) adds a signer — not concurrent with the recovery.
-    k.apply(op(4, vec![3], pk(1), &kp(7), add(3, TestRole::Admin))).unwrap();
-    assert!(is_member(&k, 3), "the recovered owner governs normally on the new key");
+    k.apply(op(4, vec![3], pk(1), &kp(7), add(3, TestRole::Admin)))
+        .unwrap();
+    assert!(
+        is_member(&k, 3),
+        "the recovered owner governs normally on the new key"
+    );
 }
 
 #[test]
@@ -226,8 +252,16 @@ fn reset_merge_converges_regardless_of_arrival_order() {
     k2.apply(recovery).unwrap();
     k2.apply(thief).unwrap();
 
-    assert_eq!(k1.state().active_members(), k2.state().active_members(), "converges regardless of order");
-    assert_eq!(owner_key(&k1), owner_key(&k2), "the recovered owner key converges");
+    assert_eq!(
+        k1.state().active_members(),
+        k2.state().active_members(),
+        "converges regardless of order"
+    );
+    assert_eq!(
+        owner_key(&k1),
+        owner_key(&k2),
+        "the recovered owner key converges"
+    );
     assert!(!is_member(&k1, 9), "the carve-out held in both orders");
 }
 
@@ -242,15 +276,24 @@ fn a_concurrent_refound_ladder_cannot_hijack_a_rotation() {
     let rvk1 = kp(42); // leaked recovery key the attacker holds
     let rvk2 = kp(43); // the owner's fresh authority
     let rvk_att = kp(44); // the authority the attacker tries to install
-    let mut k = engine(&[minit(1, TestRole::Admin)], rvk1.verifying_key().to_bytes());
+    let mut k = engine(
+        &[minit(1, TestRole::Admin)],
+        rvk1.verifying_key().to_bytes(),
+    );
     // R — owner's identity-gated rotation to rvk2 (signed by the owner's member key sk(1)).
-    k.apply(op(2, vec![1], pk(1), &kp(1), rotate(&rvk2))).unwrap();
+    k.apply(op(2, vec![1], pk(1), &kp(1), rotate(&rvk2)))
+        .unwrap();
     // F — attacker ReFound → vk(9), CONCURRENT with R, signed by the leaked rvk1.
     k.apply(op(3, vec![1], pk(1), &rvk1, refound(9))).unwrap();
     // R_att — attacker rotation to rvk_att, authored as the founder, signed by vk(9)=sk(9) (F's registered key).
-    k.apply(op(4, vec![3], pk(1), &kp(9), rotate(&rvk_att))).unwrap();
+    k.apply(op(4, vec![3], pk(1), &kp(9), rotate(&rvk_att)))
+        .unwrap();
 
-    assert_eq!(owner_key(&k), pk(1), "F is carve-out-voided — the founder key is unchanged");
+    assert_eq!(
+        owner_key(&k),
+        pk(1),
+        "F is carve-out-voided — the founder key is unchanged"
+    );
     assert_eq!(
         k.state().reset_authority,
         Some(rvk2.verifying_key().to_bytes()),

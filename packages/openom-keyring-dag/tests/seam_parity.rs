@@ -11,20 +11,24 @@
 //! such rule, so to keep the cross-engine comparison honest both sides use the SAME derived ids (via
 //! [`mid`]) — the chain simply carries them as opaque labels.
 
-use keyeo_dag::{MemberInit, MembershipAction};
-use openom_keyring_chain::verifier::ChainVerifier;
-use openom_keyring_dag::verifier::{bootstrap_update, op_update, DagVerifier};
-use openom_keyring_dag::{derive_member_id, sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
-use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
-use openom_protocol::v1::MemberRole;
-use openom_keyring_chain::wire::{Keyring, Member};
+use edsign::SigningKey;
 use keyeo_crypto::{
-    codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap,
+    codec, EncappedKey, Epoch as KeyeoEpoch, KeyId, Wrap as KeyeoWrap,
     WrapMethod as KeyeoWrapMethod, WrappedDek, X25519PublicKey,
 };
+use keyeo_dag::{MemberInit, MembershipAction};
+use openom_keyring_api::{
+    EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError,
+};
+use openom_keyring_chain::verifier::ChainVerifier;
+use openom_keyring_chain::wire::{Keyring, Member};
+use openom_keyring_dag::verifier::{bootstrap_update, op_update, DagVerifier};
+use openom_keyring_dag::{
+    derive_member_id, sign_op, KeyringAction, KeyringMemberInit, KeyringRole,
+};
+use openom_protocol::v1::MemberRole;
 use openom_protocol::Message;
 use openom_roles::MEMBER_OWNER;
-use edsign::SigningKey;
 
 fn sk(seed: u8) -> SigningKey {
     SigningKey::from_seed(&[seed; 32])
@@ -43,7 +47,10 @@ fn mid(seed: u8) -> String {
 /// The shared contract we compare across engines: the resolved (`member_id`, role) set. Key bytes are
 /// engine inputs, not semantic divergence, so they're excluded.
 fn semantic(v: &MembershipView) -> Vec<(String, i16)> {
-    v.members.iter().map(|m| (m.member_id.clone(), m.role)).collect()
+    v.members
+        .iter()
+        .map(|m| (m.member_id.clone(), m.role))
+        .collect()
 }
 
 // ── chain construction (founder-only genesis + an ordinary "carol" add) ──
@@ -52,11 +59,21 @@ fn wrap(id: &str, method: i32) -> KeyeoWrap<String> {
     let encapped = EncappedKey::from_bytes([0u8; 32]);
     let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
     let m = if method == KeyeoWrapMethod::TAG_RRK_HPKE {
-        KeyeoWrapMethod::RrkHpke { encapped, recipient_key }
+        KeyeoWrapMethod::RrkHpke {
+            encapped,
+            recipient_key,
+        }
     } else {
-        KeyeoWrapMethod::MemberHpke { encapped, recipient_key }
+        KeyeoWrapMethod::MemberHpke {
+            encapped,
+            recipient_key,
+        }
     };
-    KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
+    KeyeoWrap {
+        recipient: id.into(),
+        method: m,
+        ciphertext: WrappedDek::from_bytes([1u8; 48]),
+    }
 }
 fn push_wrap(k: &mut Keyring, w: KeyeoWrap<String>) {
     let mut eps = k.key_material().unwrap();
@@ -153,17 +170,41 @@ fn both_engines_resolve_the_same_membership_for_equivalent_authorized_ops() {
     // chain
     let cg = chain_genesis();
     let c_boot = cv.admit(None, &chain_env(&cg)).unwrap();
-    let c_next = cv.admit(Some(&c_boot.state), &chain_env(&chain_add_carol(&cg, 1))).unwrap();
+    let c_next = cv
+        .admit(Some(&c_boot.state), &chain_env(&chain_add_carol(&cg, 1)))
+        .unwrap();
 
     // dag
     let gm = vec![dag_minit(KeyringRole::OWNER, 1)];
-    let gop = sign_op([1; 32], vec![], mid(1), MembershipAction::Create { initial_members: gm.clone() }, &sk(1));
+    let gop = sign_op(
+        [1; 32],
+        vec![],
+        mid(1),
+        MembershipAction::Create {
+            initial_members: gm.clone(),
+        },
+        &sk(1),
+    );
     let d_boot = dv.admit(None, &bootstrap_update(&gm, None, &gop)).unwrap();
-    let add = sign_op([2; 32], vec![[1; 32]], mid(1), dag_add(KeyringRole::EDITOR, 3), &sk(1));
+    let add = sign_op(
+        [2; 32],
+        vec![[1; 32]],
+        mid(1),
+        dag_add(KeyringRole::EDITOR, 3),
+        &sk(1),
+    );
     let d_next = dv.admit(Some(&d_boot.state), &op_update(&add)).unwrap();
 
-    assert_eq!(semantic(&c_boot.view), semantic(&d_boot.view), "genesis membership agrees");
-    assert_eq!(semantic(&c_next.view), semantic(&d_next.view), "post-add membership agrees");
+    assert_eq!(
+        semantic(&c_boot.view),
+        semantic(&d_boot.view),
+        "genesis membership agrees"
+    );
+    assert_eq!(
+        semantic(&c_next.view),
+        semantic(&d_next.view),
+        "post-add membership agrees"
+    );
     let mut expected = vec![(mid(3), 4), (mid(1), 1)];
     expected.sort();
     let mut got = semantic(&c_next.view);
@@ -186,16 +227,38 @@ fn both_engines_refuse_a_permanently_unauthorized_change() {
     let cg = with_maintainer_dave(chain_genesis());
     let c_boot = cv.admit(None, &chain_env(&cg)).unwrap();
     let c_out = cv.admit(Some(&c_boot.state), &chain_env(&chain_add_carol(&cg, 4)));
-    assert_eq!(c_out.unwrap_err(), VerifyError::Unauthorized, "chain refuses an unauthorized change");
+    assert_eq!(
+        c_out.unwrap_err(),
+        VerifyError::Unauthorized,
+        "chain refuses an unauthorized change"
+    );
 
     // dag: dave (a member, not a signer) authors Add(carol) — unauthorized at its causal position.
     let gm = vec![
         dag_minit(KeyringRole::OWNER, 1),
         dag_minit(KeyringRole::MAINTAINER, 4),
     ];
-    let gop = sign_op([1; 32], vec![], mid(1), MembershipAction::Create { initial_members: gm.clone() }, &sk(1));
+    let gop = sign_op(
+        [1; 32],
+        vec![],
+        mid(1),
+        MembershipAction::Create {
+            initial_members: gm.clone(),
+        },
+        &sk(1),
+    );
     let d_boot = dv.admit(None, &bootstrap_update(&gm, None, &gop)).unwrap();
-    let daves_add = sign_op([2; 32], vec![[1; 32]], mid(4), dag_add(KeyringRole::EDITOR, 3), &sk(4));
+    let daves_add = sign_op(
+        [2; 32],
+        vec![[1; 32]],
+        mid(4),
+        dag_add(KeyringRole::EDITOR, 3),
+        &sk(4),
+    );
     let d_out = dv.admit(Some(&d_boot.state), &op_update(&daves_add));
-    assert_eq!(d_out.unwrap_err(), VerifyError::Unauthorized, "dag refuses the unauthorized-at-position op");
+    assert_eq!(
+        d_out.unwrap_err(),
+        VerifyError::Unauthorized,
+        "dag refuses the unauthorized-at-position op"
+    );
 }

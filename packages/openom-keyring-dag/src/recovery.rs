@@ -52,8 +52,14 @@ mod tests {
         // HKDF + dedicated label is exactly what separates the recovery-authority role from every other
         // use of the same secret.
         let secret = [7u8; 32];
-        let direct = edsign::SigningKey::from_seed(&secret).verifying_key().to_bytes();
-        assert_ne!(rvk_public(&secret), direct, "the RVK must be domain-separated, not the raw seed key");
+        let direct = edsign::SigningKey::from_seed(&secret)
+            .verifying_key()
+            .to_bytes();
+        assert_ne!(
+            rvk_public(&secret),
+            direct,
+            "the RVK must be domain-separated, not the raw seed key"
+        );
     }
 
     #[test]
@@ -70,6 +76,9 @@ mod tests {
         let msg = b"a refound op's canonical bytes";
         let sig = rvk.sign(msg);
         let vk = edsign::VerifyingKey::from_bytes(&rvk_public(&secret)).unwrap();
-        assert!(vk.verify(msg, &sig).is_ok(), "the pinned rvk_public verifies an RVK signature");
+        assert!(
+            vk.verify(msg, &sig).is_ok(),
+            "the pinned rvk_public verifies an RVK signature"
+        );
     }
 }
