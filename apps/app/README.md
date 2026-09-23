@@ -73,6 +73,8 @@ the account transport only after all three exist; its observable auth, custody, 
 It probes `/me` before every binding decision, signs the exact pinned token claims for registration, and resumes an
 interrupted register-then-backup flow from durable binding/pending state. Account backup writes use the server's strong
 `ETag` with `If-Match`; reconciliation stays machine-readable in facade state and never silently adopts remote custody.
+Concurrent `enableSync()` callers share one serialized operation, and a successful upload only clears the exact pending
+version it acknowledged.
 Owned and joined trees both borrow that account handle;
 joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
 from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle

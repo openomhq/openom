@@ -490,4 +490,205 @@ describe('AccountSession registration and backup coordinator', () => {
       code: 'identity_conflict', reason: 'auth_identity_changed_during_operation',
     });
   });
+
+  it('stops after one stale-timestamp re-sign and clears volatile register state', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const remote = {
+      me: vi.fn(async () => { throw unregistered(); }),
+      register: vi.fn(async () => {
+        throw makeError('stale_timestamp', { args: { server_time: now + 30 } });
+      }),
+      putKeystore: vi.fn(),
+      getKeystore: vi.fn(),
+    };
+    const session = new AccountSession(backend());
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.register()).rejects.toMatchObject({ code: 'stale_timestamp' });
+
+    expect(remote.register).toHaveBeenCalledTimes(2);
+    expect(session.state().pending).toEqual(new Set());
+    expect(session.state().auth).toBe('signedIn');
+  });
+
+  it('stops after one expired-token restart and clears volatile register state', async () => {
+    const provider = auth();
+    const remote = {
+      me: vi.fn(async () => { throw unregistered(); }),
+      register: vi.fn(async () => { throw makeError('auth_required', { httpStatus: 401 }); }),
+      putKeystore: vi.fn(),
+      getKeystore: vi.fn(),
+    };
+    const session = new AccountSession(backend());
+    await session.initialize();
+    session.attachSync({ auth: provider, remote });
+
+    await expect(session.register()).rejects.toMatchObject({ code: 'auth_required' });
+
+    expect(remote.register).toHaveBeenCalledTimes(2);
+    expect(provider.registrationAttempt).toHaveBeenLastCalledWith({ forceRefresh: true });
+    expect(session.state().pending).toEqual(new Set());
+    expect(session.state().auth).toBe('expired');
+  });
+
+  it('retains a newer pending operation when an older successful PUT loses the compare-clear race', async () => {
+    const binding = { issuer: 'https://issuer', subject: 'provider-sub', memberId: 'member-local' };
+    const newerVersion = version(2, 9);
+    const newerPending = { kind: 'revoke', version: newerVersion, binding };
+    const newerRecord = record('member-local', {
+      revision: 4,
+      identity: {
+        memberId: 'member-local', version: newerVersion, floor: 2, effectiveFloor: 2,
+      },
+      binding,
+      pendingBackup: newerPending,
+    });
+    const core = backend({
+      initialRecord: record('member-local', { binding }),
+      overrides: {
+        accountAcknowledgeBackup: vi.fn(async () => ({
+          cleared: false, record: newerRecord, storagePersistence: 'granted',
+        })),
+      },
+    });
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local', keystore: null, generation: 0, etag: '"empty"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (_bytes, generation) => ({ generation, etag: '"stored-old"' })),
+      getKeystore: vi.fn(),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await session.backup();
+
+    expect(session.state().pending).toEqual(new Set(['revoke']));
+    expect(session.state().binding).toBe('bound');
+    expect(session.state().conflict).toBeNull();
+  });
+
+  it('surfaces a matching persisted binding as ambiguous when the server is unregistered', async () => {
+    const binding = { issuer: 'https://issuer', subject: 'provider-sub', memberId: 'member-local' };
+    const remote = {
+      me: vi.fn(async () => { throw unregistered(); }),
+      register: vi.fn(),
+      putKeystore: vi.fn(),
+      getKeystore: vi.fn(),
+    };
+    const session = new AccountSession(backend({ initialRecord: record('member-local', { binding }) }));
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.enableSync()).rejects.toMatchObject({ code: 'identity_conflict' });
+
+    expect(remote.register).not.toHaveBeenCalled();
+    expect(session.state().conflict).toMatchObject({
+      code: 'identity_conflict', reason: 'registration_preconditions_ambiguous',
+    });
+  });
+
+  it('recognizes an exact remote backup as the local identity backup', async () => {
+    const keystore = new Uint8Array([4, 5]);
+    const blobHash = new Uint8Array(await crypto.subtle.digest('SHA-256', keystore));
+    const binding = { issuer: 'https://issuer', subject: 'provider-sub', memberId: 'member-local' };
+    const local = record('member-local', {
+      identity: {
+        memberId: 'member-local', version: { generation: 1, blobHash }, floor: 1, effectiveFloor: 1,
+      },
+      binding,
+    });
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local', keystore, generation: 1, etag: '"stored"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(),
+      getKeystore: vi.fn(),
+    };
+    const session = new AccountSession(backend({ initialRecord: local }));
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await session.probe();
+
+    expect(session.state().binding).toBe('backedUp');
+    expect(session.state().conflict).toBeNull();
+    expect(remote.putKeystore).not.toHaveBeenCalled();
+  });
+
+  it('resumes a durable backup after the server stored a response the client never received', async () => {
+    const keystore = new Uint8Array([4, 5]);
+    const blobHash = new Uint8Array(await crypto.subtle.digest('SHA-256', keystore));
+    const binding = { issuer: 'https://issuer', subject: 'provider-sub', memberId: 'member-local' };
+    const local = record('member-local', {
+      identity: {
+        memberId: 'member-local', version: { generation: 1, blobHash }, floor: 1, effectiveFloor: 1,
+      },
+      binding,
+    });
+    let stored = null;
+    let loseResponse = true;
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local',
+        keystore: stored?.keystore ?? null,
+        generation: stored?.generation ?? 0,
+        etag: stored?.etag ?? '"empty"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (bytes, generation) => {
+        stored = { keystore: bytes.slice(), generation, etag: '"stored"' };
+        if (loseResponse) {
+          loseResponse = false;
+          throw makeError('request_failed');
+        }
+        return { generation, etag: stored.etag };
+      }),
+      getKeystore: vi.fn(),
+    };
+    const session = new AccountSession(backend({ initialRecord: local }));
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.backup()).rejects.toMatchObject({ code: 'request_failed' });
+    expect(session.state().pending).toEqual(new Set(['backup']));
+
+    await session.enableSync();
+
+    expect(remote.putKeystore).toHaveBeenCalledTimes(2);
+    expect(session.state().pending).toEqual(new Set());
+    expect(session.state().binding).toBe('backedUp');
+  });
+
+  it('coalesces simultaneous enableSync callers into one register-and-backup operation', async () => {
+    let registered = false;
+    const remote = {
+      me: vi.fn(async () => {
+        if (!registered) throw unregistered();
+        return { memberId: 'member-local', keystore: null, generation: 0, etag: '"empty"' };
+      }),
+      register: vi.fn(async ({ memberId }) => {
+        registered = true;
+        return { memberId };
+      }),
+      putKeystore: vi.fn(async (_bytes, generation) => ({ generation, etag: '"stored"' })),
+      getKeystore: vi.fn(),
+    };
+    const session = new AccountSession(backend());
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    const first = session.enableSync();
+    const second = session.enableSync();
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+
+    expect(remote.register).toHaveBeenCalledTimes(1);
+    expect(remote.putKeystore).toHaveBeenCalledTimes(1);
+    expect(session.state().binding).toBe('backedUp');
+  });
 });

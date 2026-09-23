@@ -72,6 +72,7 @@ export class AccountSession {
   });
   #subs = new Set();
   #tail = Promise.resolve();
+  #enableSyncPromise = null;
   #clockOffsetSeconds = 0;
 
   constructor(core) {
@@ -192,12 +193,19 @@ export class AccountSession {
   }
 
   enableSync() {
-    return this.#serialize(async () => {
+    if (this.#enableSyncPromise) return this.#enableSyncPromise;
+    const operation = this.#serialize(async () => {
       const probe = await this.#probeRemote();
       if (probe.status === 'unregistered') await this.#register(probe);
       else this.#assertProbeMatchesLocal(probe);
       return this.#backup();
     });
+    this.#enableSyncPromise = operation;
+    void operation.then(
+      () => { if (this.#enableSyncPromise === operation) this.#enableSyncPromise = null; },
+      () => { if (this.#enableSyncPromise === operation) this.#enableSyncPromise = null; },
+    );
+    return operation;
   }
 
   dispose() {
@@ -304,6 +312,11 @@ export class AccountSession {
           checkpoint: { etag: accepted.etag, version: expected.version },
         });
         this.#acceptSync(acknowledged);
+        if (!acknowledged.cleared) {
+          this.#remoteProbe = null;
+          this.#publish();
+          return this.state();
+        }
         this.#conflict = null;
         this.#remoteProbe = {
           ...probe,
