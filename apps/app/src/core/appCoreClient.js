@@ -6,14 +6,20 @@ import * as Comlink from '../vendor/comlink.js';
 import { normalizeUnknown, isAppError } from './errorModel.js';
 import { createNativeAppCore, isNativeHost } from './nativeAppCore.js';
 
-/** @typedef {import('./types/appCoreApi.js').AppCoreClient} AppCoreClient */
+/** @typedef {import('./types/appCoreApi.js').AppCoreFacade} AppCoreFacade */
 /** @typedef {import('./types/appCoreApi.js').AppCoreTransport} AppCoreTransport */
+/** @typedef {import('./types/domain.js').DocId} DocId */
+/** @typedef {import('./remoteStore.js').RemoteStore} RemoteStore */
+/** @typedef {{ readonly state: 'synced', readonly at: number, readonly anomalies: number } | { readonly state: 'offline' | 'error', readonly error: unknown }} SyncDriverStatus */
+/** @typedef {{ readonly subscribeEdits?: (callback: () => void) => (() => void), readonly onStatus?: (status: SyncDriverStatus) => void, readonly onAuthError?: (error: unknown) => void, readonly onSecurity?: (error: unknown) => void, readonly onTick?: () => void, readonly cadenceMs?: number }} SyncDriverOptions */
+/** @typedef {{ syncNow(): void, stop(): void }} SyncDriver */
 
 /** @type {Worker | null} */
 let workerRef = null;
-/** @type {AppCoreClient | null} */
+/** @type {AppCoreFacade | null} */
 let apiRef = null;
 
+/** @type {ReturnType<typeof setInterval> | null} */
 let heartbeatTimer = null;
 
 // Silent-hang detection (C3): a CRASHED worker fires an 'error' event (handled below), but a WEDGED one (a
@@ -26,10 +32,10 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_MAX_MISSES = 2;
 
-/** @param {AppCoreClient} api */
+/** @param {AppCoreFacade} api */
 function startHeartbeat(api) {
   let misses = 0;
-  clearInterval(heartbeatTimer);
+  if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(async () => {
     let alive = false;
     try {
@@ -45,7 +51,7 @@ function startHeartbeat(api) {
     if (alive) { misses = 0; return; }
     misses += 1;
     if (misses >= HEARTBEAT_MAX_MISSES) {
-      clearInterval(heartbeatTimer);
+      if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
       heartbeatTimer = null;
       console.error('[openom] app-core worker unresponsive — no heartbeat');
       globalThis.dispatchEvent?.(new CustomEvent('openom:worker-error', { detail: 'worker unresponsive' }));
@@ -59,7 +65,7 @@ function startHeartbeat(api) {
  * Under Tauri (OPE-427 Full-A / OPE-429), returns the NATIVE-mode client — the DEK + engine + local store run
  * in the Rust host and this drives them over `invoke`; no Web Worker, no wasm on this side. On the web it's the
  * Comlink-wrapped wasm worker as before. Both present the same method surface, so callers don't branch.
- * @returns {AppCoreClient}
+ * @returns {AppCoreFacade}
  */
 export function appCoreWorker() {
   if (apiRef) return apiRef;
@@ -68,19 +74,21 @@ export function appCoreWorker() {
     return apiRef;
   }
   workerRef = new Worker(new URL('./appCore.worker.js', import.meta.url), { type: 'module' });
-  apiRef = /** @type {AppCoreClient} */ (Comlink.wrap(workerRef));
-  workerRef.addEventListener('error', (e) => {
+  apiRef = /** @type {import('./types/appCoreApi.js').AppCoreClient} */ (Comlink.wrap(workerRef));
+  workerRef.addEventListener('error', (event) => {
+    const detail = event instanceof ErrorEvent ? event.message : String(event);
     // eslint-disable-next-line no-console
-    console.error('[openom] app-core worker error', e?.message ?? e);
-    globalThis.dispatchEvent?.(new CustomEvent('openom:worker-error', { detail: e?.message }));
+    console.error('[openom] app-core worker error', detail);
+    globalThis.dispatchEvent?.(new CustomEvent('openom:worker-error', { detail }));
   });
-  startHeartbeat(apiRef); // detect a silent hang, not just a crash
-  return apiRef;
+  const api = apiRef;
+  startHeartbeat(api); // detect a silent hang, not just a crash
+  return api;
 }
 
 /** Tear the worker down (fatal error / identity change) so a fresh one is created next time. */
 export function resetAppCoreWorker() {
-  clearInterval(heartbeatTimer);
+  if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
   heartbeatTimer = null;
   try {
     workerRef?.terminate();
@@ -95,6 +103,7 @@ export function resetAppCoreWorker() {
  * The network transport the worker calls (Comlink-proxied in). A thin adapter over `RemoteStore`, which
  * keeps auth + serverUrl on the main thread. The DATA channel is a BlobStore (list/get/put over opaque
  * object keys — the worker never parses a key); the keyring / access channels ride the same RemoteStore.
+ * @param {RemoteStore} remoteStore
  * @returns {AppCoreTransport}
  */
 export function remoteTransport(remoteStore) {
@@ -150,16 +159,20 @@ export const DEFAULT_SYNC_CADENCE_MS = 1100;
  * function.
  */
 export function startSyncDriver(
+  /** @type {AppCoreFacade} */
   worker,
+  /** @type {DocId} */
   docId,
+  /** @type {SyncDriverOptions} */
   {
     subscribeEdits, onStatus, onAuthError, onSecurity, onTick,
     cadenceMs = DEFAULT_SYNC_CADENCE_MS,
   } = {},
-) {
+) /** @type {SyncDriver} */ {
   let stopped = false;
   let inflight = false;
   let dirty = false;
+  /** @type {ReturnType<typeof setTimeout> | null} */
   let timer = null;
   let lastTickAt = 0; // when the last tick STARTED — the cadence floor is measured from here
   const DEBOUNCE_MS = 300; // let a burst of edits settle before syncing
@@ -170,13 +183,14 @@ export function startSyncDriver(
   // Route a tick failure (an AppError from the worker, or a worker/Comlink death) to the right callback:
   // an auth-required error re-gates; a transient error keeps the driver polling silently ('offline'); a
   // permanent one surfaces ('error'). The AppError rides along so the UI localizes on its code (OPE-418).
+  /** @param {unknown} raw */
   function routeError(raw) {
     const err = isAppError(raw) ? raw : normalizeUnknown(raw);
     if (err.code === 'auth_required') { onAuthError?.(err); return; }
     onStatus?.({ state: err.retriable ? 'offline' : 'error', error: err });
     // Honor server backpressure: a rate-limited tick (429 carrying Retry-After) re-arms after exactly that
     // delay rather than waiting out the full poll interval.
-    if (err.retriable && err.retryAfter > 0) arm(err.retryAfter * 1000);
+    if (err.retriable && typeof err.retryAfter === 'number' && err.retryAfter > 0) arm(err.retryAfter * 1000);
   }
 
   async function tick() {
@@ -212,6 +226,7 @@ export function startSyncDriver(
 
   // Arm a single pending tick `delay` ms out. Coalesces: concurrent triggers collapse onto the one pending
   // timer (every trigger does the same work, so the soonest-permissible tick serves them all).
+  /** @param {number} delay */
   function arm(delay) {
     if (stopped || timer !== null) return;
     timer = setTimeout(runTick, Math.max(0, delay));
@@ -227,7 +242,7 @@ export function startSyncDriver(
     syncNow: () => arm(0),
     stop() {
       stopped = true;
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
       clearInterval(poll);
       globalThis.removeEventListener?.('online', onOnline);
       try { unsub(); } catch { /* best-effort */ }

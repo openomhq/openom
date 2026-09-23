@@ -1,9 +1,40 @@
 import { isAppError, makeError } from './errorModel.js';
 
+/** @typedef {import('./types/appCoreApi.js').AppCoreFacade} AppCoreFacade */
+/** @typedef {import('./types/appCoreApi.js').AccountSyncState} AccountSyncState */
+/** @typedef {import('./types/appCoreApi.js').AccountSyncRecord} AccountSyncRecord */
+/** @typedef {import('./types/appCoreApi.js').AccountCandidateCredential} AccountCandidateCredential */
+/** @typedef {import('./types/contracts.js').AccountBackupCheckpoint} AccountBackupCheckpoint */
+/** @typedef {import('./types/contracts.js').AccountBinding} AccountBinding */
+/** @typedef {import('./types/contracts.js').AccountVersion} AccountVersion */
+/** @typedef {import('./types/domain.js').AccountBlobHashBytes} AccountBlobHashBytes */
+/** @typedef {import('./types/domain.js').AuthIssuer} AuthIssuer */
+/** @typedef {import('./types/domain.js').AuthSubject} AuthSubject */
+/** @typedef {import('./types/domain.js').MemberId} MemberId */
+/** @typedef {import('./types/domain.js').Passphrase} Passphrase */
+/** @typedef {import('./types/domain.js').RecoveryCode} RecoveryCode */
+/** @typedef {import('./types/session.js').AuthRegistrationAttempt} AuthRegistrationAttempt */
+/** @typedef {import('./types/session.js').AuthSession} AuthSession */
+/** @typedef {import('./types/accountSession.js').AccountAuthState} AccountAuthState */
+/** @typedef {import('./types/accountSession.js').AccountBindingClassification} AccountBindingClassification */
+/** @typedef {import('./types/accountSession.js').AccountConflict} AccountConflict */
+/** @typedef {import('./types/accountSession.js').AccountCustodyState} AccountCustodyState */
+/** @typedef {import('./types/accountSession.js').AccountPendingAction} AccountPendingAction */
+/** @typedef {import('./types/accountSession.js').AccountProbe} AccountProbe */
+/** @typedef {import('./types/accountSession.js').AccountSessionOptions} AccountSessionOptions */
+/** @typedef {import('./types/accountSession.js').AccountSessionState} AccountSessionState */
+/** @typedef {import('./types/accountSession.js').InternalAccountSessionState} InternalAccountSessionState */
+/** @typedef {import('./types/accountSession.js').KeptOfflineContext} KeptOfflineContext */
+/** @typedef {import('./types/accountSession.js').RegisteredAccountProbe} RegisteredAccountProbe */
+/** @typedef {import('./types/accountSession.js').RemoteAccountBackup} RemoteAccountBackup */
+/** @typedef {import('./types/accountSession.js').UnregisteredAccountProbe} UnregisteredAccountProbe */
+/** @typedef {import('./remoteStore.js').RemoteStore} RemoteStore */
+
 const ACCOUNT_STATES = new Set(['none', 'locked', 'unlocked']);
 const MAX_CLOCK_OFFSET_SECONDS = 24 * 60 * 60;
 const MAX_BACKUP_SNAPSHOT_ATTEMPTS = 2;
 
+/** @param {Uint8Array | null | undefined} left @param {Uint8Array | null | undefined} right */
 function bytesEqual(left, right) {
   return left instanceof Uint8Array
     && right instanceof Uint8Array
@@ -11,6 +42,7 @@ function bytesEqual(left, right) {
     && left.every((byte, index) => byte === right[index]);
 }
 
+/** @param {AccountBinding | null} left @param {AccountBinding | null} right */
 function bindingEqual(left, right) {
   return left !== null && right !== null
     && left.issuer === right.issuer
@@ -18,16 +50,21 @@ function bindingEqual(left, right) {
     && left.memberId === right.memberId;
 }
 
+/** @param {AccountVersion | null} left @param {AccountVersion | null} right */
 function versionEqual(left, right) {
   return left !== null && right !== null
     && left.generation === right.generation
     && bytesEqual(left.blobHash, right.blobHash);
 }
 
+/** @param {Uint8Array} bytes @returns {Promise<AccountBlobHashBytes>} */
 async function blobHash(bytes) {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return /** @type {AccountBlobHashBytes} */ (
+    new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes)))
+  );
 }
 
+/** @param {RemoteAccountBackup} remote @param {AccountBackupCheckpoint | null} checkpoint */
 async function remoteMatchesCheckpoint(remote, checkpoint) {
   if (!checkpoint || remote.etag !== checkpoint.etag) return false;
   if (checkpoint.version === null) return remote.keystore === null;
@@ -36,6 +73,7 @@ async function remoteMatchesCheckpoint(remote, checkpoint) {
 }
 
 /** Exhaustive default-deny classification before credential or backup-version verification. */
+/** @param {{ record: AccountSyncRecord | null, attempt: AuthRegistrationAttempt, remote: RemoteAccountBackup | null }} input @returns {Readonly<AccountBindingClassification>} */
 export function classifyAccountBindingState({ record, attempt, remote }) {
   const localMemberId = record?.identity.memberId ?? null;
   const localBinding = record?.binding ?? null;
@@ -69,10 +107,12 @@ export function classifyAccountBindingState({ record, attempt, remote }) {
   return Object.freeze({ action: 'reconcile' });
 }
 
+/** @param {AccountConflict | null} conflict @returns {Readonly<AccountConflict> | null} */
 function cloneConflict(conflict) {
   return conflict === null ? null : Object.freeze({ ...conflict });
 }
 
+/** @param {InternalAccountSessionState} state @returns {AccountSessionState} */
 function publicState(state) {
   return Object.freeze({
     ...state,
@@ -82,6 +122,7 @@ function publicState(state) {
   });
 }
 
+/** @param {InternalAccountSessionState} left @param {InternalAccountSessionState} right */
 function sameState(left, right) {
   return left.auth === right.auth
     && left.account === right.account
@@ -95,24 +136,43 @@ function sameState(left, right) {
 }
 
 export class AccountSession {
+  /** @type {AppCoreFacade} */
   #core;
+  /** @type {AuthSession | null} */
   #auth = null;
+  /** @type {RemoteStore | null} */
   #remote = null;
+  /** @type {(() => void) | null} */
   #unsubscribeAuth = null;
+  /** @type {AccountSessionOptions['wakeTarget']} */
   #wakeTarget;
+  /** @type {AccountSessionOptions['visibilityTarget']} */
   #visibilityTarget;
+  /** @type {AccountSessionOptions['locks']} */
   #backupLocks;
+  /** @type {string} */
   #backupLockName;
+  /** @type {() => void} */
   #onOnline;
+  /** @type {() => void} */
   #onVisibility;
+  /** @type {AccountCustodyState} */
   #account = 'none';
+  /** @type {MemberId | null} */
   #memberId = null;
+  /** @type {AccountSyncState} */
   #sync = { record: null, storagePersistence: 'unavailable' };
+  /** @type {AccountAuthState} */
   #authState = 'signedOut';
+  /** @type {AccountProbe | null} */
   #remoteProbe = null;
+  /** @type {AccountConflict | null} */
   #conflict = null;
+  /** @type {KeptOfflineContext | null} */
   #keptOfflineFor = null;
+  /** @type {Set<AccountPendingAction>} */
   #volatilePending = new Set();
+  /** @type {InternalAccountSessionState} */
   #state = Object.freeze({
     auth: 'signedOut',
     account: 'none',
@@ -123,12 +183,18 @@ export class AccountSession {
     retainedIdentities: Object.freeze([]),
     storagePersistence: 'unavailable',
   });
+  /** @type {Set<(state: AccountSessionState) => void>} */
   #subs = new Set();
+  /** @type {Promise<unknown>} */
   #tail = Promise.resolve();
+  /** @type {Promise<unknown> | null} */
   #enableSyncPromise = null;
+  /** @type {Promise<unknown> | null} */
   #retryPendingPromise = null;
+  /** @type {number} */
   #clockOffsetSeconds = 0;
 
+  /** @param {AppCoreFacade} core @param {AccountSessionOptions} [options] */
   constructor(core, {
     wakeTarget = globalThis,
     visibilityTarget = globalThis.document ?? null,
@@ -151,14 +217,17 @@ export class AccountSession {
     this.#visibilityTarget?.addEventListener?.('visibilitychange', this.#onVisibility);
   }
 
+  /** @returns {AccountSessionState} */
   state() {
     return publicState(this.#state);
   }
 
+  /** @returns {MemberId | null} */
   memberId() {
     return this.#memberId;
   }
 
+  /** @param {(state: AccountSessionState) => void} callback */
   onChange(callback) {
     this.#subs.add(callback);
     return () => this.#subs.delete(callback);
@@ -176,6 +245,7 @@ export class AccountSession {
     return this.state();
   }
 
+  /** @param {{ auth: AuthSession, remote: RemoteStore | null }} dependencies */
   attachSync({ auth, remote }) {
     if (typeof auth?.registrationAttempt !== 'function'
       || typeof auth?.subject !== 'function'
@@ -199,15 +269,18 @@ export class AccountSession {
     return this.state();
   }
 
+  /** @param {Passphrase} passphrase */
   async createAccount(passphrase) {
     const opened = await this.#core.accountCreate(passphrase);
     const identity = opened.memberId ? opened : { ...opened, ...(await this.#core.accountPublicIdentity()) };
+    if (!identity.memberId) throw makeError('internal', { cause: 'created account omitted its member identity' });
     this.#setCustody('unlocked', identity.memberId);
     await this.#refreshLocalSync();
     this.#clearRemoteContext();
     return identity;
   }
 
+  /** @param {Passphrase} passphrase */
   async unlock(passphrase) {
     const identity = await this.#core.accountUnlock(passphrase);
     this.#setCustody('unlocked', identity.memberId);
@@ -216,15 +289,18 @@ export class AccountSession {
     return identity;
   }
 
+  /** @param {RecoveryCode} recoveryCode @param {Passphrase} newPassphrase */
   recover(recoveryCode, newPassphrase) {
     return this.#serialize(async () => {
       const opened = await this.#core.accountRecover({ recoveryCode, newPassphrase });
       const identity = opened.memberId ? opened : { ...opened, ...(await this.#core.accountPublicIdentity()) };
+      if (!identity.memberId) throw makeError('internal', { cause: 'recovered account omitted its member identity' });
       this.#setCustody('unlocked', identity.memberId);
       return this.#completeCredentialMutation(identity);
     });
   }
 
+  /** @param {Passphrase} current @param {Passphrase} next */
   changePassphrase(current, next) {
     return this.#serialize(async () => {
       const changed = await this.#core.accountChangePassphrase({ current, next });
@@ -232,6 +308,7 @@ export class AccountSession {
     });
   }
 
+  /** @param {Passphrase} passphrase */
   revokeCredentials(passphrase) {
     return this.#serialize(async () => {
       const rotated = await this.#core.accountRotateRoot({ passphrase });
@@ -239,6 +316,7 @@ export class AccountSession {
     });
   }
 
+  /** @param {AuthIssuer} issuer @param {AuthSubject} subject @param {number} timestamp */
   async registerProof(issuer, subject, timestamp) {
     return this.#core.accountRegisterProof({ issuer, subject, timestamp });
   }
@@ -293,10 +371,12 @@ export class AccountSession {
     return operation;
   }
 
+  /** @param {AccountCandidateCredential} credential */
   restore(credential) {
     return this.#serialize(() => this.#restoreRemoteIdentity(credential, false));
   }
 
+  /** @param {AccountCandidateCredential} credential */
   adoptRemoteIdentity(credential) {
     return this.#serialize(() => this.#restoreRemoteIdentity(credential, true));
   }
@@ -328,6 +408,7 @@ export class AccountSession {
     this.#subs.clear();
   }
 
+  /** @template Value @param {() => Promise<Value> | Value} operation @returns {Promise<Value>} */
   #serialize(operation) {
     const run = () => operation();
     const result = this.#tail.then(run, run);
@@ -335,6 +416,7 @@ export class AccountSession {
     return result;
   }
 
+  /** @template {object} Result @param {Result} result */
   async #completeCredentialMutation(result) {
     await this.#refreshLocalSync();
     this.#clearRemoteContext();
@@ -367,6 +449,7 @@ export class AccountSession {
       && this.#keptOfflineFor === null;
   }
 
+  /** @param {{ readonly discover?: boolean }} [options] */
   #triggerPendingRetry({ discover = false } = {}) {
     if (this.#auth === null || this.#remote === null) return;
     if (!discover && this.#sync.record?.pendingBackup == null) return;
@@ -375,6 +458,7 @@ export class AccountSession {
     });
   }
 
+  /** @param {UnregisteredAccountProbe | null} [initialProbe] */
   async #register(initialProbe = null) {
     this.#requireUnlockedLocalAccount();
     this.#volatilePending.add('register');
@@ -383,6 +467,8 @@ export class AccountSession {
     let authRetried = false;
     let staleRetried = false;
     try {
+      const { remote } = this.#requireNetwork();
+      /** @type {AccountProbe | null} */
       let probe = initialProbe;
       for (;;) {
         probe ??= await this.#probeRemote({ forceRefresh });
@@ -397,7 +483,7 @@ export class AccountSession {
           probe.attempt.issuer, probe.attempt.subject, timestamp,
         );
         try {
-          const registered = await this.#remote.register({
+          const registered = await remote.register({
             memberId: identity.memberId,
             authorPublicKey: identity.authorPublicKey,
             signature,
@@ -435,20 +521,23 @@ export class AccountSession {
     }
   }
 
+  /** @param {{ readonly pendingOnly?: boolean }} [options] */
   #backup({ pendingOnly = false } = {}) {
     const operation = () => this.#backupUnderLock({ pendingOnly });
     if (typeof this.#backupLocks?.request !== 'function') return operation();
     return this.#backupLocks.request(this.#backupLockName, operation);
   }
 
+  /** @param {{ readonly pendingOnly: boolean }} options */
   async #backupUnderLock({ pendingOnly }) {
     await this.#refreshLocalSync();
-    this.#requireUnlockedLocalAccount();
-    if (pendingOnly && this.#sync.record.pendingBackup === null) return this.state();
+    const { record, memberId } = this.#requireUnlockedLocalAccount();
+    const { remote } = this.#requireNetwork();
+    if (pendingOnly && record.pendingBackup === null) return this.state();
     for (let snapshotAttempt = 0; snapshotAttempt < MAX_BACKUP_SNAPSHOT_ATTEMPTS; snapshotAttempt += 1) {
       const probe = await this.#probeRemote();
       this.#assertProbeMatchesLocal(probe);
-      const binding = this.#bindingFor(probe.attempt, this.#localMemberId());
+      const binding = this.#bindingFor(probe.attempt, memberId);
       const staged = await this.#core.accountStageBackup({ kind: 'backup', binding });
       this.#acceptSync(staged);
       const expected = staged.record?.pendingBackup;
@@ -462,7 +551,7 @@ export class AccountSession {
       }
 
       try {
-        const accepted = await this.#remote.putKeystore(snapshot.keystore, snapshot.generation, {
+        const accepted = await remote.putKeystore(snapshot.keystore, snapshot.generation, {
           etag: probe.remote.etag,
           accessToken: probe.attempt.accessToken,
         });
@@ -501,6 +590,7 @@ export class AccountSession {
     throw makeError('version_conflict', { cause: 'account snapshot changed while staging backup' });
   }
 
+  /** @param {AccountCandidateCredential} credential @param {boolean} allowReplacement */
   async #restoreRemoteIdentity(credential, allowReplacement) {
     this.#volatilePending.add('restore');
     this.#publish();
@@ -511,7 +601,7 @@ export class AccountSession {
         throw makeError('invalid_request', { cause: 'the bound remote identity has no account backup' });
       }
       const durable = this.#sync.record;
-      const recoveryResume = typeof credential?.recoveryCode === 'string'
+      const recoveryResume = 'recoveryCode' in credential && typeof credential.recoveryCode === 'string'
         && durable?.identity.memberId === probe.remote.memberId
         && durable.pendingBackup?.kind === 'revoke'
         && bindingEqual(durable.pendingBackup.binding, this.#bindingFor(probe.attempt, probe.remote.memberId))
@@ -555,6 +645,7 @@ export class AccountSession {
           version: { generation: probe.remote.generation, blobHash: remoteHash },
         },
       });
+      if (!adopted.memberId) throw makeError('internal', { cause: 'adopted account omitted its member identity' });
       this.#setCustody('unlocked', adopted.memberId);
       await this.#refreshLocalSync();
       this.#remoteProbe = probe;
@@ -583,15 +674,19 @@ export class AccountSession {
     }
   }
 
+  /** @param {import('./errorModel.js').AppError} error @param {RegisteredAccountProbe} probe */
   async #surfaceBackupConflict(error, probe) {
+    const { remote: remoteStore } = this.#requireNetwork();
+    /** @type {Awaited<ReturnType<RemoteStore['getKeystore']>> | null} */
     let remote = null;
     try {
-      remote = await this.#remote.getKeystore({ accessToken: probe.attempt.accessToken });
+      remote = await remoteStore.getKeystore({ accessToken: probe.attempt.accessToken });
     } catch {
       remote = null;
     }
     const local = this.#sync.record?.identity;
-    const rollback = remote?.keystore !== null && local && remote.generation < local.effectiveFloor;
+    const rollback = remote !== null && remote.keystore !== null && local !== undefined
+      && remote.generation < local.effectiveFloor;
     this.#setConflict({
       code: rollback ? 'account_backup_rollback' : error.code,
       reason: 'backup_reconciliation_required',
@@ -601,12 +696,13 @@ export class AccountSession {
     });
   }
 
+  /** @param {{ readonly forceRefresh?: boolean }} [options] @returns {Promise<AccountProbe>} */
   async #probeRemote({ forceRefresh = false } = {}) {
-    this.#requireNetwork();
+    const { auth } = this.#requireNetwork();
     let refresh = forceRefresh;
     for (;;) {
       try {
-        const attempt = await this.#auth.registrationAttempt({ forceRefresh: refresh });
+        const attempt = await auth.registrationAttempt({ forceRefresh: refresh });
         return await this.#probeRemoteWithAttempt(attempt);
       } catch (error) {
         if (!refresh && isAppError(error) && error.code === 'auth_required') {
@@ -619,19 +715,23 @@ export class AccountSession {
     }
   }
 
+  /** @param {AuthRegistrationAttempt} attempt @returns {Promise<AccountProbe>} */
   async #probeRemoteWithAttempt(attempt) {
+    const { remote: remoteStore } = this.#requireNetwork();
     this.#validateAttempt(attempt);
     this.#assertAttemptStillCurrent(attempt);
     this.#authState = 'signedIn';
     try {
-      const remote = await this.#remote.me({ accessToken: attempt.accessToken });
+      const remote = await remoteStore.me({ accessToken: attempt.accessToken });
       this.#assertAttemptStillCurrent(attempt);
+      /** @type {RegisteredAccountProbe} */
       const probe = { status: 'registered', attempt, remote };
       await this.#acceptRegisteredProbe(probe);
       return probe;
     } catch (error) {
       if (isAppError(error) && error.code === 'unregistered') {
         this.#assertAttemptStillCurrent(attempt);
+        /** @type {UnregisteredAccountProbe} */
         const probe = { status: 'unregistered', attempt, remote: null };
         this.#acceptUnregisteredProbe(probe);
         return probe;
@@ -640,6 +740,7 @@ export class AccountSession {
     }
   }
 
+  /** @param {RegisteredAccountProbe} probe */
   async #acceptRegisteredProbe(probe) {
     const localMemberId = this.#localMemberId();
     const localBinding = this.#sync.record?.binding ?? null;
@@ -648,6 +749,7 @@ export class AccountSession {
       attempt: probe.attempt,
       remote: probe.remote,
     });
+    /** @type {AccountConflict | null} */
     let conflict = classification.action === 'conflict' ? {
       code: 'identity_conflict',
       reason: classification.reason,
@@ -659,36 +761,43 @@ export class AccountSession {
     } : null;
     if (classification.action === 'conflict') {
       // Default-deny classification completes before any remote generation/hash is considered.
-    } else if (probe.remote.keystore !== null) {
-      const local = this.#sync.record.identity;
-      const remoteHash = await blobHash(probe.remote.keystore);
-      const pendingFromCheckpoint = this.#sync.record.pendingBackup !== null
-        && versionEqual(this.#sync.record.pendingBackup.version, local.version)
-        && await remoteMatchesCheckpoint(probe.remote, this.#sync.record.acknowledgedBackup);
-      if (!pendingFromCheckpoint && probe.remote.generation < local.effectiveFloor) {
-        conflict = {
-          code: 'account_backup_rollback', reason: 'remote_generation_below_local_floor',
-          localGeneration: local.effectiveFloor,
-          remoteGeneration: probe.remote.generation,
-        };
-      } else if (!pendingFromCheckpoint && (probe.remote.generation !== local.version.generation
-        || !bytesEqual(remoteHash, local.version.blobHash))) {
-        conflict = {
-          code: 'account_backup_precondition_failed', reason: 'remote_backup_requires_verification',
-          localGeneration: local.version.generation,
-          remoteGeneration: probe.remote.generation,
-          remoteEtag: probe.remote.etag,
-        };
-      }
-      if (conflict === null) await this.#confirmProbeBinding(probe, localBinding, localMemberId);
     } else {
-      await this.#confirmProbeBinding(probe, localBinding, localMemberId);
+      const record = this.#sync.record;
+      if (record === null || localMemberId === null) {
+        throw makeError('internal', { cause: 'reconciliation requires a local account record' });
+      }
+      if (probe.remote.keystore !== null) {
+        const local = record.identity;
+        const remoteHash = await blobHash(probe.remote.keystore);
+        const pendingFromCheckpoint = record.pendingBackup !== null
+          && versionEqual(record.pendingBackup.version, local.version)
+          && await remoteMatchesCheckpoint(probe.remote, record.acknowledgedBackup);
+        if (!pendingFromCheckpoint && probe.remote.generation < local.effectiveFloor) {
+          conflict = {
+            code: 'account_backup_rollback', reason: 'remote_generation_below_local_floor',
+            localGeneration: local.effectiveFloor,
+            remoteGeneration: probe.remote.generation,
+          };
+        } else if (!pendingFromCheckpoint && (probe.remote.generation !== local.version.generation
+          || !bytesEqual(remoteHash, local.version.blobHash))) {
+          conflict = {
+            code: 'account_backup_precondition_failed', reason: 'remote_backup_requires_verification',
+            localGeneration: local.version.generation,
+            remoteGeneration: probe.remote.generation,
+            remoteEtag: probe.remote.etag,
+          };
+        }
+        if (conflict === null) await this.#confirmProbeBinding(probe, localBinding, localMemberId);
+      } else {
+        await this.#confirmProbeBinding(probe, localBinding, localMemberId);
+      }
     }
     this.#remoteProbe = probe;
     this.#conflict = conflict;
     this.#publish();
   }
 
+  /** @param {RegisteredAccountProbe} probe @param {AccountBinding | null} localBinding @param {MemberId} localMemberId */
   async #confirmProbeBinding(probe, localBinding, localMemberId) {
     const binding = this.#bindingFor(probe.attempt, localMemberId);
     if (!bindingEqual(localBinding, binding)) {
@@ -696,6 +805,7 @@ export class AccountSession {
     }
   }
 
+  /** @param {UnregisteredAccountProbe} probe */
   #acceptUnregisteredProbe(probe) {
     const classification = classifyAccountBindingState({
       record: this.#sync.record,
@@ -711,6 +821,7 @@ export class AccountSession {
     this.#publish();
   }
 
+  /** @param {AccountProbe} probe @returns {asserts probe is RegisteredAccountProbe} */
   #assertProbeMatchesLocal(probe) {
     if (probe.status !== 'registered') throw makeError('unregistered', { httpStatus: 403 });
     if (this.#conflict !== null || probe.remote.memberId !== this.#localMemberId()) {
@@ -718,6 +829,7 @@ export class AccountSession {
     }
   }
 
+  /** @param {AccountProbe} probe @returns {asserts probe is UnregisteredAccountProbe} */
   #assertRegistrationIsUnambiguous(probe) {
     if (probe.status !== 'unregistered') throw makeError('identity_conflict');
     const record = this.#sync.record;
@@ -734,10 +846,12 @@ export class AccountSession {
     }
   }
 
+  /** @param {AuthRegistrationAttempt} attempt @param {MemberId} memberId @returns {AccountBinding} */
   #bindingFor(attempt, memberId) {
     return { issuer: attempt.issuer, subject: attempt.subject, memberId };
   }
 
+  /** @param {AuthRegistrationAttempt} attempt */
   #validateAttempt(attempt) {
     if (typeof attempt?.accessToken !== 'string' || attempt.accessToken.length === 0
       || typeof attempt?.issuer !== 'string'
@@ -746,6 +860,7 @@ export class AccountSession {
     }
   }
 
+  /** @param {AuthRegistrationAttempt} attempt */
   #assertAttemptStillCurrent(attempt) {
     const currentSubject = this.#auth?.subject() ?? null;
     if (currentSubject === null) throw makeError('auth_required', { cause: 'auth session changed during account sync' });
@@ -759,17 +874,22 @@ export class AccountSession {
     }
   }
 
+  /** @returns {{ auth: AuthSession, remote: RemoteStore }} */
   #requireNetwork() {
     if (!this.#auth || !this.#auth.subject()) throw makeError('auth_required');
     if (!this.#remote) throw makeError('unavailable', { cause: 'account sync backend is not configured' });
+    return { auth: this.#auth, remote: this.#remote };
   }
 
+  /** @returns {{ record: AccountSyncRecord, memberId: MemberId }} */
   #requireUnlockedLocalAccount() {
     if (this.#account !== 'unlocked' || !this.#memberId || !this.#sync.record) {
       throw makeError('invalid_request', { cause: 'account sync requires an unlocked local account' });
     }
+    return { record: this.#sync.record, memberId: this.#memberId };
   }
 
+  /** @returns {MemberId | null} */
   #localMemberId() {
     return this.#sync.record?.identity.memberId ?? null;
   }
@@ -778,8 +898,9 @@ export class AccountSession {
     return Math.floor(Date.now() / 1000) + this.#clockOffsetSeconds;
   }
 
+  /** @param {unknown} serverTime */
   #adoptServerClock(serverTime) {
-    if (!Number.isSafeInteger(serverTime) || serverTime < 0) return false;
+    if (typeof serverTime !== 'number' || !Number.isSafeInteger(serverTime) || serverTime < 0) return false;
     const offset = serverTime - Math.floor(Date.now() / 1000);
     if (Math.abs(offset) > MAX_CLOCK_OFFSET_SECONDS) return false;
     this.#clockOffsetSeconds = offset;
@@ -795,6 +916,7 @@ export class AccountSession {
     this.#triggerPendingRetry();
   }
 
+  /** @param {unknown} error */
   #markExpired(error) {
     if (isAppError(error) && (error.code === 'auth_required' || error.code === 'session_expired')) {
       this.#authState = 'expired';
@@ -810,11 +932,13 @@ export class AccountSession {
     this.#publish();
   }
 
+  /** @param {AccountConflict} conflict */
   #setConflict(conflict) {
     this.#conflict = conflict;
     this.#publish();
   }
 
+  /** @param {AccountCustodyState} account @param {MemberId | null} memberId */
   #setCustody(account, memberId) {
     this.#account = account;
     this.#memberId = memberId;
@@ -825,6 +949,7 @@ export class AccountSession {
     this.#acceptSync(await this.#core.accountSyncState());
   }
 
+  /** @param {AccountSyncState} sync */
   #acceptSync(sync) {
     this.#sync = {
       record: sync?.record ?? null,
@@ -833,6 +958,7 @@ export class AccountSession {
     this.#publish();
   }
 
+  /** @returns {import('./types/accountSession.js').AccountBindingState} */
   #bindingState() {
     if (this.#conflict === null && this.#remoteProbe?.status === 'registered') {
       return this.#remoteProbe.remote.keystore === null ? 'bound' : 'backedUp';
@@ -845,6 +971,7 @@ export class AccountSession {
       : 'bound';
   }
 
+  /** @returns {AccountPendingAction[]} */
   #pending() {
     const pending = new Set(this.#volatilePending);
     const durable = this.#sync.record?.pendingBackup?.kind;
@@ -853,6 +980,7 @@ export class AccountSession {
   }
 
   #publish() {
+    /** @type {InternalAccountSessionState} */
     const next = {
       auth: this.#authState,
       account: this.#account,

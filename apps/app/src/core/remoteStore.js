@@ -9,8 +9,189 @@ import { ConflictError, AuthError } from './store.js';
 import { makeError, isAppError } from './errorModel.js';
 import { ERROR_CODES } from './errorCodes.generated.js';
 
-const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) : new Uint8Array(0));
-const b64encode = (u8) => btoa(String.fromCharCode(...u8)); // STANDARD base64, matching the server's decoder
+/** @typedef {import('./types/domain.js').AccountBackupEtag} AccountBackupEtag */
+/** @typedef {import('./types/domain.js').AccountGeneration} AccountGeneration */
+/** @typedef {import('./types/domain.js').AccountKeystoreBytes} AccountKeystoreBytes */
+/** @typedef {import('./types/domain.js').AuthorPublicKeyBytes} AuthorPublicKeyBytes */
+/** @typedef {import('./types/domain.js').CoveredFrontierJson} CoveredFrontierJson */
+/** @typedef {import('./types/domain.js').HpkePublicKeyBytes} HpkePublicKeyBytes */
+/** @typedef {import('./types/domain.js').InviteId} InviteId */
+/** @typedef {import('./types/domain.js').InviteMacBytes} InviteMacBytes */
+/** @typedef {import('./types/domain.js').InvitePinBytes} InvitePinBytes */
+/** @typedef {import('./types/domain.js').KeyringEngine} KeyringEngine */
+/** @typedef {import('./types/domain.js').KeyringRevision} KeyringRevision */
+/** @typedef {import('./types/domain.js').KeyringUpdateBytes} KeyringUpdateBytes */
+/** @typedef {import('./types/domain.js').MemberId} MemberId */
+/** @typedef {import('./types/domain.js').MemberRole} MemberRole */
+/** @typedef {import('./types/domain.js').ProposalEnvelopeBytes} ProposalEnvelopeBytes */
+/** @typedef {import('./types/domain.js').ProposalCiphertextHashBytes} ProposalCiphertextHashBytes */
+/** @typedef {import('./types/domain.js').ProposalId} ProposalId */
+/** @typedef {import('./types/domain.js').RegistrationProofBytes} RegistrationProofBytes */
+/** @typedef {import('./types/domain.js').RemoteTreeKey} RemoteTreeKey */
+/** @typedef {import('./types/domain.js').ReplicaHex} ReplicaHex */
+/** @typedef {import('./types/domain.js').TreeObjectBytes} TreeObjectBytes */
+/** @typedef {import('./types/domain.js').TreeObjectKey} TreeObjectKey */
+/** @typedef {import('./types/domain.js').TreeUuid} TreeUuid */
+/** @typedef {import('./types/appCoreApi.js').StoredMembershipSummary} StoredMembershipSummary */
+/** @typedef {import('./types/appCoreApi.js').MembershipSummaryUpdate} MembershipSummaryUpdate */
+/** @typedef {import('./types/appCoreApi.js').MembershipSummaryPutResult} MembershipSummaryPutResult */
+/** @typedef {{ readonly forceRefresh?: boolean }} AccessTokenOptions */
+/** @typedef {(options?: AccessTokenOptions) => Promise<string>} AccessTokenProvider */
+/** @typedef {{ getAccessToken(options?: AccessTokenOptions): Promise<string> }} AccessTokenSession */
+/** @typedef {AccessTokenProvider | AccessTokenSession | null} RemoteAuth */
+/** @typedef {{ readonly method?: string, readonly extraHeaders?: Record<string, string>, readonly body?: BodyInit | null | undefined, readonly authRetry?: boolean, readonly accessToken?: string | undefined }} SendOptions */
+/** @typedef {{ readonly forceRefresh?: boolean, readonly accessToken?: string | undefined }} HeaderOptions */
+/** @typedef {{ readonly inviteId: InviteId, readonly uuid: TreeUuid, readonly role: MemberRole, readonly engine: KeyringEngine, readonly pin: InvitePinBytes, readonly metaMac: InviteMacBytes, readonly recipientPin: string | null, readonly expiry: number }} PendingInvite */
+/** @typedef {{ readonly inviteId: InviteId, readonly memberId: MemberId, readonly hpkePublicKey: HpkePublicKeyBytes, readonly authorPublicKey: AuthorPublicKeyBytes, readonly tag: InviteMacBytes }} InviteClaim */
+/** @typedef {{ readonly memberId: MemberId, readonly authorPublicKey: AuthorPublicKeyBytes, readonly signature: RegistrationProofBytes, readonly ts: number }} RegistrationProof */
+/** @typedef {import('./types/appCoreApi.js').RemoteProposal} RemoteProposal */
+/** @typedef {import('./types/appCoreApi.js').RemoteHistoryPage} RemoteHistoryPage */
+/** @typedef {{ readonly accessToken: string }} PinnedTokenOptions */
+/** @typedef {{ readonly accessToken?: string }} OptionalTokenOptions */
+/** @typedef {{ readonly etag?: AccountBackupEtag | undefined, readonly accessToken?: string | undefined }} BackupWriteOptions */
+
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** @param {unknown} value @param {string} field @returns {Record<string, unknown>} */
+function record(value, field) {
+  if (!isRecord(value)) throw new TypeError(`Invalid server response: ${field} must be an object`);
+  return value;
+}
+
+/** @param {unknown} value @param {string} field @returns {string} */
+function requiredString(value, field) {
+  if (typeof value !== 'string' || value.length === 0) throw new TypeError(`Invalid server response: ${field} must be a nonempty string`);
+  return value;
+}
+
+/** @param {unknown} value @param {string} field @returns {number} */
+function requiredSafeInteger(value, field) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`Invalid server response: ${field} must be a nonnegative safe integer`);
+  }
+  return value;
+}
+
+/** @param {unknown} value @param {string} field @returns {number | null} */
+function optionalSafeInteger(value, field) {
+  return value === null ? null : requiredSafeInteger(value, field);
+}
+
+/** @param {unknown} value @param {string} field @returns {ReadonlyArray<unknown>} */
+function requiredArray(value, field) {
+  if (!Array.isArray(value)) throw new TypeError(`Invalid server response: ${field} must be an array`);
+  return value;
+}
+
+/** @param {unknown} value @param {string} field @returns {Uint8Array} */
+function decodeBase64(value, field) {
+  return Uint8Array.from(atob(requiredString(value, field)), (character) => character.charCodeAt(0));
+}
+
+/** @param {string} value @returns {MemberId} */
+function asMemberId(value) {
+  return /** @type {MemberId} */ (value);
+}
+
+/** @param {string} value @returns {TreeUuid} */
+function asTreeUuid(value) {
+  return /** @type {TreeUuid} */ (value);
+}
+
+/** @param {string} value @returns {InviteId} */
+function asInviteId(value) {
+  return /** @type {InviteId} */ (value);
+}
+
+/** @param {string} value @returns {ProposalId} */
+function asProposalId(value) {
+  return /** @type {ProposalId} */ (value);
+}
+
+/** @param {number} value @returns {AccountGeneration} */
+function asGeneration(value) {
+  return /** @type {AccountGeneration} */ (value);
+}
+
+/** @param {number} value @returns {KeyringRevision} */
+function asKeyringRevision(value) {
+  return /** @type {KeyringRevision} */ (value);
+}
+
+/** @param {string} value @returns {AccountBackupEtag} */
+function asEtag(value) {
+  return /** @type {AccountBackupEtag} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {AccountKeystoreBytes} */
+function asKeystoreBytes(value) {
+  return /** @type {AccountKeystoreBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {KeyringUpdateBytes} */
+function asKeyringUpdateBytes(value) {
+  return /** @type {KeyringUpdateBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {ProposalEnvelopeBytes} */
+function asProposalEnvelopeBytes(value) {
+  return /** @type {ProposalEnvelopeBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {TreeObjectBytes} */
+function asTreeObjectBytes(value) {
+  return /** @type {TreeObjectBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {InvitePinBytes} */
+function asInvitePinBytes(value) {
+  return /** @type {InvitePinBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {InviteMacBytes} */
+function asInviteMacBytes(value) {
+  return /** @type {InviteMacBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {AuthorPublicKeyBytes} */
+function asAuthorPublicKeyBytes(value) {
+  return /** @type {AuthorPublicKeyBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {HpkePublicKeyBytes} */
+function asHpkePublicKeyBytes(value) {
+  return /** @type {HpkePublicKeyBytes} */ (value);
+}
+
+/** @param {Uint8Array} value @returns {ProposalCiphertextHashBytes} */
+function asProposalCiphertextHashBytes(value) {
+  if (value.byteLength !== 32) throw new TypeError('Invalid server response: proposal ciphertext hash must be 32 bytes');
+  return /** @type {ProposalCiphertextHashBytes} */ (value);
+}
+
+/** @param {string} value @returns {ReplicaHex} */
+function asReplicaHex(value) {
+  if (!/^[0-9a-f]{32}$/.test(value)) throw new TypeError('Invalid server response: replica must be 32 lowercase hexadecimal characters');
+  return /** @type {ReplicaHex} */ (value);
+}
+
+/** @param {unknown} value @returns {MemberRole} */
+function memberRole(value) {
+  if (value === 'owner' || value === 'co-owner' || value === 'maintainer' || value === 'editor' || value === 'viewer') return value;
+  throw new TypeError('Invalid server response: role is not a member role');
+}
+
+/** @param {unknown} value @returns {KeyringEngine} */
+function keyringEngine(value) {
+  if (value === 'chain' || value === 'dag') return value;
+  throw new TypeError('Invalid server response: engine is not supported');
+}
+
+/** @param {Uint8Array} bytes @returns {string} */
+const b64encode = (bytes) => btoa(String.fromCharCode(...bytes)); // STANDARD base64, matching the server's decoder
 
 // Per-request deadline: a hung Lambda cold-start / half-open socket must fail, not hang the sync driver
 // forever (design C2). #send aborts the fetch after this; the abort surfaces as the `timeout` code.
@@ -22,6 +203,7 @@ const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 // Lowercase-hex SHA-256 of a request body, sent as `x-amz-content-sha256`. A Lambda Function URL behind
 // CloudFront OAC (AWS_IAM) validates the body against this and rejects unsigned payloads; CloudFront
 // won't compute it, so the client must. Harmless off-CloudFront (the origin just ignores the header).
+/** @param {BodyInit | null | undefined} body @returns {Promise<string>} */
 async function bodyContentHash(body) {
   let bytes;
   if (body == null || body === '') return EMPTY_SHA256;
@@ -30,7 +212,9 @@ async function bodyContentHash(body) {
   else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
   else if (ArrayBuffer.isView(body)) bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
   else return EMPTY_SHA256; // unknown body kind (Blob/stream) — not produced on this seam
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const digestInput = new Uint8Array(bytes.byteLength);
+  digestInput.set(bytes);
+  const digest = await crypto.subtle.digest('SHA-256', digestInput);
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -40,27 +224,45 @@ async function bodyContentHash(body) {
 // bodyless/infra failure synthesizes one from the status or the network condition.
 
 /** An HTTP error RESPONSE (`!res.ok`) → AppError, reading the 9457 `code`/`args`/`detail` when present. */
+/** @param {Response} res @returns {Promise<ReturnType<typeof makeError>>} */
 async function httpAppError(res) {
+  /** @type {unknown} */
   let body = null;
   try { body = await res.json(); } catch { /* not a JSON/problem+json body (infra error) */ }
   const retryAfter = Number(res.headers.get('retry-after')) || undefined;
-  const code = body?.code;
-  if (code && Object.prototype.hasOwnProperty.call(ERROR_CODES, code)) {
-    return makeError(code, { args: body.args, retryAfter, httpStatus: res.status, cause: body.detail });
+  if (isRecord(body)) {
+    const code = body.code;
+    if (typeof code === 'string' && Object.prototype.hasOwnProperty.call(ERROR_CODES, code)) {
+      return makeError(/** @type {keyof typeof ERROR_CODES} */ (code), {
+        ...(isRecord(body.args) ? { args: body.args } : {}),
+        ...(retryAfter === undefined ? {} : { retryAfter }),
+        httpStatus: res.status,
+        ...(typeof body.detail === 'string' ? { cause: body.detail } : {}),
+      });
+    }
   }
-  return makeError(statusFallbackCode(res.status), { retryAfter, httpStatus: res.status });
+  return makeError(statusFallbackCode(res.status), {
+    ...(retryAfter === undefined ? {} : { retryAfter }),
+    httpStatus: res.status,
+  });
 }
 
 /** A fetch REJECTION (network throw / timeout / a bubbled AuthError) → AppError. */
+/** @param {unknown} e @returns {ReturnType<typeof makeError>} */
 function netAppError(e) {
   if (isAppError(e)) return e; // already normalized
   if (e instanceof AuthError) return makeError('auth_required', { httpStatus: 401 });
-  if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return makeError('timeout', { cause: 'request timed out' });
+  const errorName = isRecord(e) ? e.name : undefined;
+  if (errorName === 'AbortError' || errorName === 'TimeoutError') {
+    return makeError('timeout', { cause: 'request timed out' });
+  }
   const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
-  return makeError(offline ? 'offline' : 'request_failed', { cause: String(e?.message ?? e) });
+  const cause = String(isRecord(e) && e.message != null ? e.message : e);
+  return makeError(offline ? 'offline' : 'request_failed', { cause });
 }
 
 /** A code for a status with no usable 9457 body (an infra 5xx, a gateway error, etc.). */
+/** @param {number} status @returns {keyof typeof ERROR_CODES} */
 function statusFallbackCode(status) {
   if (status === 401) return 'auth_required';
   if (status === 403) return 'access_denied';
@@ -73,22 +275,24 @@ function statusFallbackCode(status) {
   return 'invalid_request';
 }
 
+/** @param {Response} response @returns {AccountBackupEtag} */
 function requiredEtag(response) {
   const etag = response.headers.get('etag');
   if (!etag) throw makeError('unavailable', { cause: 'account backup response omitted its ETag' });
-  return etag;
+  return asEtag(etag);
 }
 
 export class RemoteStore {
+  /** @type {string} */
   #baseUrl;
+  /** @type {typeof fetch} */
   #fetch;
+  /** @type {AccessTokenProvider | null} */
   #getAccessToken;
 
   /**
-   * @param {object} opts
-   * @param {string} opts.baseUrl   e.g. "http://localhost:6060"
-   * @param {typeof fetch} [opts.fetch]  injectable for tests
-   * @param {object|Function|null} [opts.auth]  the AuthSession seam (an object with
+   * @param {{ readonly baseUrl: string, readonly fetch?: typeof fetch | null, readonly auth?: RemoteAuth }} opts
+   * The auth seam may be an object with
    *   `getAccessToken({forceRefresh})`) or a bare `getAccessToken` fn. Omit → no bearer (a
    *   server running fake-auth). The token is fetched PER REQUEST (never captured at
    *   construction) so the long-lived publishKeyring / summary closures that hold this store
@@ -102,18 +306,23 @@ export class RemoteStore {
     this.#fetch = fetch ?? globalThis.fetch.bind(globalThis);
     // Normalize the seam to a `getAccessToken(opts) => Promise<string>` (or null for no-auth).
     if (typeof auth === 'function') this.#getAccessToken = auth;
-    else if (auth && typeof auth.getAccessToken === 'function') this.#getAccessToken = (o) => auth.getAccessToken(o);
+    else if (auth) this.#getAccessToken = (options = {}) => auth.getAccessToken(options);
     else this.#getAccessToken = null;
   }
 
+  /** @returns {{ remote: true, conditionalWrites: true, durable: true }} */
   caps() {
     return { remote: true, conditionalWrites: true, durable: true };
   }
 
+  /** @param {Record<string, string>} [extra] @param {HeaderOptions} [options] @returns {Promise<Record<string, string>>} */
   async #headers(extra = {}, { forceRefresh = false, accessToken } = {}) {
     const h = { ...extra };
-    if (accessToken !== undefined || this.#getAccessToken) {
-      const token = accessToken !== undefined ? accessToken : await this.#getAccessToken({ forceRefresh });
+    const getAccessToken = this.#getAccessToken;
+    if (accessToken !== undefined) {
+      if (accessToken) h['openom-auth'] = `Bearer ${accessToken}`;
+    } else if (getAccessToken) {
+      const token = await getAccessToken({ forceRefresh });
       // `Openom-Auth`, not `Authorization`: behind CloudFront OAC the origin signature claims the
       // `Authorization` header, so the JWT rides here instead (the server reads `Openom-Auth`, and
       // still accepts `Authorization` off-CloudFront). Same `Bearer <jwt>` value either way.
@@ -122,6 +331,7 @@ export class RemoteStore {
     return h;
   }
 
+  /** @param {string} id @returns {string} */
   #tree(id) {
     return `${this.#baseUrl}/v1/trees/${encodeURIComponent(id)}`;
   }
@@ -130,18 +340,28 @@ export class RemoteStore {
   // forced-refresh retry (the token may just be stale). If the retry still 401s, surface an
   // AuthError so the composition root re-gates / signs out. Never loops. Non-401 statuses are
   // handed back untouched for each method to interpret (404/409/410/etc.).
-  async #send(url, { method, extraHeaders = {}, body, authRetry = true, accessToken } = {}) {
+  /** @param {string} url @param {SendOptions} [options] @returns {Promise<Response>} */
+  async #send(url, { method = 'GET', extraHeaders = {}, body, authRetry = true, accessToken } = {}) {
     // Stable across the 401 forced-refresh retry (the body doesn't change), so compute it once.
     const withHash = { ...extraHeaders, 'x-amz-content-sha256': await bodyContentHash(body) };
+    /** @param {boolean} forceRefresh @returns {Promise<Response>} */
     const attempt = async (forceRefresh) => {
-      const headers = await this.#headers(withHash, { forceRefresh, accessToken });
+      const headers = await this.#headers(withHash, {
+        forceRefresh,
+        ...(accessToken === undefined ? {} : { accessToken }),
+      });
       // Per-request deadline (C2): abort the fetch if it hasn't resolved in time, so a hung backend surfaces
       // as an error (blob channel → the `timeout` code) instead of hanging the driver. The abort reason is a
       // TimeoutError; the only abort source on this path is this timer, so netAppError reads any abort as a timeout.
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(new DOMException('request timed out', 'TimeoutError')), REQUEST_TIMEOUT_MS);
       try {
-        return await this.#fetch(url, { method, headers, body, signal: ctl.signal });
+        return await this.#fetch(url, {
+          method,
+          headers,
+          ...(body === undefined ? {} : { body }),
+          signal: ctl.signal,
+        });
       } finally {
         clearTimeout(timer);
       }
@@ -154,7 +374,7 @@ export class RemoteStore {
       if (this.#getAccessToken && accessToken === undefined) res = await attempt(true); // one forced-refresh retry
       if (res.status === 401) {
         let detail = '';
-        try { detail = (await res.text?.()) ?? ''; } catch { detail = ''; }
+        try { detail = await res.text(); } catch { detail = ''; }
         throw new AuthError(detail);
       }
     }
@@ -168,6 +388,7 @@ export class RemoteStore {
    * gets `2xx`, not an error); a tree owned by someone else is refused (`403`, surfaced as an AppError so
    * `runTick` can tell a permanent refusal from offline). `id` is the tree UUID (the same id `#tree` routes on).
    */
+  /** @param {TreeUuid} id @returns {Promise<void>} */
   async createTree(id) {
     let res;
     try {
@@ -184,6 +405,7 @@ export class RemoteStore {
   // `{treeKey}/log/{replica}/{counter}` (immutable) | `{treeKey}/heads/{replica}` | `{treeKey}/snapshot`
   // (pointers). The tree (for routing + authz) is the key's leading segment; the rest is the object path.
 
+  /** @param {TreeObjectKey} key @returns {string} */
   #blobUrl(key) {
     const slash = key.indexOf('/');
     const tree = key.slice(0, slash);
@@ -192,6 +414,7 @@ export class RemoteStore {
   }
 
   /** The keys under `prefix` (a `{treeKey}/` prefix) as `[{ key, etag }]`, re-prefixed to the caller's namespace. */
+  /** @param {RemoteTreeKey} prefix @returns {Promise<ReadonlyArray<{ readonly key: TreeObjectKey, readonly etag: string }>>} */
   async blobList(prefix) {
     const slash = prefix.indexOf('/');
     const tree = slash === -1 ? prefix : prefix.slice(0, slash);
@@ -208,11 +431,18 @@ export class RemoteStore {
     }
     if (res.status === 404) return [];
     if (!res.ok) throw await httpAppError(res);
-    const j = await res.json();
-    return (j.keys ?? []).map((k) => ({ key: `${tree}/${k.key}`, etag: k.etag }));
+    const payload = record(await res.json(), 'blob list');
+    const keys = requiredArray(payload.keys ?? [], 'blob list keys');
+    return keys.map((entry) => {
+      const item = record(entry, 'blob list item');
+      const key = requiredString(item.key, 'blob key');
+      const etag = requiredString(item.etag, 'blob etag');
+      return { key: /** @type {TreeObjectKey} */ (`${tree}/${key}`), etag };
+    });
   }
 
   /** Fetch one object's bytes, or `null` if absent. */
+  /** @param {TreeObjectKey} key @returns {Promise<TreeObjectBytes | null>} */
   async blobGet(key) {
     let res;
     try {
@@ -222,19 +452,21 @@ export class RemoteStore {
     }
     if (res.status === 404) return null;
     if (!res.ok) throw await httpAppError(res);
-    return new Uint8Array(await res.arrayBuffer());
+    return asTreeObjectBytes(new Uint8Array(await res.arrayBuffer()));
   }
 
   /** Write one object. A `pointer` overwrites; an immutable object writes `If-None-Match: *` (a 412 = the
    *  object already exists → idempotent success, since immutable objects are content-stable). `covered` (the
    *  snapshot PUT only) is the SUBSUMED covered frontier as a JSON `{replica:counter}` string — sent base64 as
    *  the mandatory `x-openom-covered` header so the server's GC gate 1 can trust + etag-bind it (OPE-409). */
+  /** @param {TreeObjectKey} key @param {TreeObjectBytes} bytes @param {boolean} pointer @param {CoveredFrontierJson} [covered] @returns {Promise<void>} */
   async blobPut(key, bytes, pointer, covered) {
+    /** @type {Record<string, string>} */
     const extraHeaders = { 'content-type': 'application/octet-stream', ...(pointer ? {} : { 'if-none-match': '*' }) };
     if (covered) extraHeaders['x-openom-covered'] = btoa(covered); // ASCII JSON (hex keys + numbers) → btoa is safe
     let res;
     try {
-      res = await this.#send(this.#blobUrl(key), { method: 'PUT', extraHeaders, body: bytes });
+      res = await this.#send(this.#blobUrl(key), { method: 'PUT', extraHeaders, body: new Uint8Array(bytes) });
     } catch (e) {
       throw netAppError(e);
     }
@@ -249,6 +481,7 @@ export class RemoteStore {
    * is the tree UUID (the same id `#tree` routes on); rows are keyed by `(member, replica)` from the auth
    * identity. PUT /v1/trees/{id}/frontier. A failure is non-fatal to sync — the worker swallows it.
    */
+  /** @param {TreeUuid} id @param {Readonly<Record<string, number>>} frontier @returns {Promise<void>} */
   async putFrontier(id, frontier) {
     let res;
     try {
@@ -271,19 +504,27 @@ export class RemoteStore {
    * `revisions` is `[{ revision, bytes }]` ascending (bytes = the opaque signed keyring). A 404 (no
    * keyring yet) → empty.
    */
-  async readKeyring(id, from = 1) {
+  /** @param {TreeUuid} id @param {KeyringRevision} [from] @returns {Promise<{ readonly revisions: ReadonlyArray<{ readonly revision: KeyringRevision, readonly bytes: KeyringUpdateBytes }>, readonly head: KeyringRevision }>} */
+  async readKeyring(id, from = asKeyringRevision(1)) {
     let res;
     try {
       res = await this.#send(`${this.#tree(id)}/keyring?from=${from}`, { method: 'GET' });
     } catch (e) {
       throw netAppError(e);
     }
-    if (res.status === 404) return { revisions: [], head: 0 };
+    if (res.status === 404) return { revisions: [], head: asKeyringRevision(0) };
     if (!res.ok) throw await httpAppError(res);
-    const body = await res.json();
+    const body = record(await res.json(), 'keyring');
+    const revisions = requiredArray(body.revisions ?? [], 'keyring revisions');
     return {
-      revisions: (body.revisions ?? []).map((r) => ({ revision: r.revision, bytes: b64decode(r.payload) })),
-      head: body.head ?? 0,
+      revisions: revisions.map((entry) => {
+        const item = record(entry, 'keyring revision');
+        return {
+          revision: asKeyringRevision(requiredSafeInteger(item.revision, 'keyring revision')),
+          bytes: asKeyringUpdateBytes(decodeBase64(item.payload, 'keyring payload')),
+        };
+      }),
+      head: asKeyringRevision(requiredSafeInteger(body.head ?? 0, 'keyring head')),
     };
   }
 
@@ -296,13 +537,14 @@ export class RemoteStore {
    * the newer head, re-produces, retries). Returns the server's
    * accepted `{ revision }`.
    */
+  /** @param {TreeUuid} id @param {KeyringUpdateBytes} updateBytes @returns {Promise<{ readonly revision: number | null }>} */
   async putKeyring(id, updateBytes) {
     let res;
     try {
       res = await this.#send(`${this.#tree(id)}/keyring`, {
         method: 'PUT',
         extraHeaders: { 'content-type': 'application/octet-stream' },
-        body: updateBytes,
+        body: new Uint8Array(updateBytes),
       });
     } catch (e) {
       throw netAppError(e);
@@ -312,8 +554,11 @@ export class RemoteStore {
     // AppError so an offline/5xx/timeout keyring publish surfaces properly through the driver.
     if (res.status === 409) throw new ConflictError(null, null);
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json().catch(() => ({}));
-    return { revision: b.revision ?? null };
+    /** @type {unknown} */
+    let responseBody = {};
+    try { responseBody = await res.json(); } catch { /* preserve the prior null fallback for an empty success body */ }
+    const body = record(responseBody, 'keyring write');
+    return { revision: body.revision == null ? null : requiredSafeInteger(body.revision, 'keyring revision') };
   }
 
   // ---- advisory membership summary surface (GET/PUT /trees/{id}/access) ----
@@ -324,6 +569,7 @@ export class RemoteStore {
    * where `generation` is `null` (and `basis` empty) for a tree whose ACL was derived in-tx by the chain
    * keyring PUT and never summary-pushed.
    */
+  /** @param {TreeUuid} id @returns {Promise<StoredMembershipSummary | null>} */
   async getAccess(id) {
     let res;
     try {
@@ -333,11 +579,19 @@ export class RemoteStore {
     }
     if (res.status === 404) return null;
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
+    const b = record(await res.json(), 'membership summary');
+    const members = requiredArray(b.members ?? [], 'membership summary members');
+    const basis = requiredArray(b.basis ?? [], 'membership summary basis');
     return {
-      members: (b.members ?? []).map((m) => ({ memberId: m.member_id, role: m.role })),
-      generation: b.generation ?? null,
-      basis: b.basis ?? [],
+      members: members.map((entry) => {
+        const member = record(entry, 'membership summary member');
+        return {
+          memberId: asMemberId(requiredString(member.member_id, 'member id')),
+          role: requiredSafeInteger(member.role, 'member role'),
+        };
+      }),
+      generation: optionalSafeInteger(b.generation ?? null, 'membership generation'),
+      basis: basis.map((value) => requiredString(value, 'membership basis item')),
     };
   }
 
@@ -347,8 +601,9 @@ export class RemoteStore {
    * no summary yet). Throws ConflictError on 409 (stale generation — re-GET + retry). Returns
    * `{ generation, unchanged }` (`unchanged` = an identical re-assert the server did not bump).
    */
+  /** @param {TreeUuid} id @param {MembershipSummaryUpdate} update @returns {Promise<MembershipSummaryPutResult>} */
   async putAccess(id, { basis, expectedGeneration = null, members }) {
-    const body = {
+    const requestBody = {
       basis,
       expected_generation: expectedGeneration,
       members: members.map((m) => ({ member_id: m.memberId, role: m.role })),
@@ -358,17 +613,23 @@ export class RemoteStore {
       res = await this.#send(`${this.#tree(id)}/access`, {
         method: 'PUT',
         extraHeaders: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBody),
       });
     } catch (e) {
       throw netAppError(e);
     }
     // 409 stays a ConflictError — stale-generation retry control-flow (membershipSummary branches on
     // `.name`); other failures are AppErrors for the display path.
-    if (res.status === 409) throw new ConflictError(expectedGeneration, null);
+    if (res.status === 409) throw new ConflictError(expectedGeneration === null ? null : String(expectedGeneration), null);
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
-    return { generation: b.generation ?? null, unchanged: !!b.unchanged };
+    const b = record(await res.json(), 'membership summary write');
+    if (b.unchanged !== undefined && typeof b.unchanged !== 'boolean') {
+      throw new TypeError('Invalid server response: unchanged must be a boolean');
+    }
+    return {
+      generation: optionalSafeInteger(b.generation ?? null, 'membership generation'),
+      unchanged: b.unchanged === true,
+    };
   }
 
   // ---- Mode A share-invite surface (POST/GET /trees/{id}/invites, PUT/DELETE /invites/{invite_id}) ----
@@ -380,6 +641,7 @@ export class RemoteStore {
   // its LOCAL mint record (the server never holds the link secret `s`). Keys/tag cross the wire base64 (STANDARD,
   // matching the server's `base64::STANDARD`).
 
+  /** @param {InviteId} inviteId @returns {string} */
   #invite(inviteId) {
     return `${this.#baseUrl}/v1/invites/${encodeURIComponent(inviteId)}`;
   }
@@ -390,8 +652,9 @@ export class RemoteStore {
    * the authenticated metadata (sent base64); NO secret (`s`/`s_mac` stay in the owner's local record + the
    * link). `id` is the tree UUID (`realDoc`). Returns the server-echoed `{ inviteId }`.
    */
+  /** @param {TreeUuid} id @param {PendingInvite} pending @returns {Promise<{ readonly inviteId: InviteId }>} */
   async createInvite(id, pending) {
-    const body = {
+    const requestBody = {
       invite_id: pending.inviteId,
       role: pending.role,
       engine: pending.engine,
@@ -405,14 +668,17 @@ export class RemoteStore {
       res = await this.#send(`${this.#tree(id)}/invites`, {
         method: 'POST',
         extraHeaders: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBody),
       });
     } catch (e) {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json().catch(() => ({}));
-    return { inviteId: b.invite_id ?? pending.inviteId };
+    /** @type {unknown} */
+    let responseBody = {};
+    try { responseBody = await res.json(); } catch { /* preserve fallback to the locally minted invite id */ }
+    const body = record(responseBody, 'invite creation');
+    return { inviteId: body.invite_id == null ? pending.inviteId : asInviteId(requiredString(body.invite_id, 'invite id')) };
   }
 
   /**
@@ -420,6 +686,7 @@ export class RemoteStore {
    * `{ uuid, role, engine, pin(bytes), metaMac(bytes), expiry, status }`, or `null` if the invite is missing or
    * expired (the server returns an identical 404 for both — no existence oracle).
    */
+  /** @param {InviteId} inviteId @returns {Promise<{ readonly uuid: TreeUuid, readonly role: MemberRole, readonly engine: KeyringEngine, readonly pin: InvitePinBytes, readonly metaMac: InviteMacBytes, readonly expiry: number, readonly status: string } | null>} */
   async getInviteMeta(inviteId) {
     let res;
     try {
@@ -429,20 +696,21 @@ export class RemoteStore {
     }
     if (res.status === 404) return null;
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
+    const b = record(await res.json(), 'invite metadata');
     return {
-      uuid: b.uuid,
-      role: b.role,
-      engine: b.engine,
-      pin: b64decode(b.pin),
-      metaMac: b64decode(b.meta_mac),
-      expiry: b.expiry,
-      status: b.status,
+      uuid: asTreeUuid(requiredString(b.uuid, 'invite tree uuid')),
+      role: memberRole(b.role),
+      engine: keyringEngine(b.engine),
+      pin: asInvitePinBytes(decodeBase64(b.pin, 'invite pin')),
+      metaMac: asInviteMacBytes(decodeBase64(b.meta_mac, 'invite metadata mac')),
+      expiry: requiredSafeInteger(b.expiry, 'invite expiry'),
+      status: requiredString(b.status, 'invite status'),
     };
   }
 
   /** Owner: mark a claimed invite ADMITTED after landing the member in the keyring (does NOT delete — the joiner
    *  still needs the metadata to finish joining). Idempotent. */
+  /** @param {InviteId} inviteId @returns {Promise<void>} */
   async admitInvite(inviteId) {
     let res;
     try {
@@ -454,6 +722,7 @@ export class RemoteStore {
   }
 
   /** Owner: reset a `claimed` invite back to `open` (a garbage claim burned the slot) — keeps the same link. */
+  /** @param {InviteId} inviteId @returns {Promise<void>} */
   async reopenInvite(inviteId) {
     let res;
     try {
@@ -469,6 +738,7 @@ export class RemoteStore {
    * `[{ inviteId, role, recipientPin, expiry, status, claim }]` where `claim` (when present) is
    * `{ memberId, hpkePublicKey, authorPublicKey, tag }` with the keys/tag decoded to bytes for `verifyClaim`.
    */
+  /** @param {TreeUuid} id @returns {Promise<ReadonlyArray<{ readonly inviteId: InviteId, readonly role: MemberRole, readonly recipientPin: string | null, readonly expiry: number, readonly status: string, readonly claim: Omit<InviteClaim, 'inviteId'> | null }>>} */
   async listInvites(id) {
     let res;
     try {
@@ -478,22 +748,25 @@ export class RemoteStore {
     }
     if (res.status === 404) return [];
     if (!res.ok) throw await httpAppError(res);
-    const rows = await res.json();
-    return (rows ?? []).map((r) => ({
-      inviteId: r.invite_id,
-      role: r.role,
-      recipientPin: r.recipient_pin ?? null,
-      expiry: r.expiry,
-      status: r.status,
-      claim: r.claim
-        ? {
-          memberId: r.claim.member_id,
-          hpkePublicKey: b64decode(r.claim.hpke_public),
-          authorPublicKey: b64decode(r.claim.author_public),
-          tag: b64decode(r.claim.tag),
-        }
-        : null,
-    }));
+    const rows = requiredArray(await res.json(), 'invite list');
+    return rows.map((entry) => {
+      const invite = record(entry, 'invite');
+      const claim = invite.claim == null ? null : record(invite.claim, 'invite claim');
+      const recipientPin = invite.recipient_pin == null ? null : requiredString(invite.recipient_pin, 'recipient pin');
+      return {
+        inviteId: asInviteId(requiredString(invite.invite_id, 'invite id')),
+        role: memberRole(invite.role),
+        recipientPin,
+        expiry: requiredSafeInteger(invite.expiry, 'invite expiry'),
+        status: requiredString(invite.status, 'invite status'),
+        claim: claim === null ? null : {
+          memberId: asMemberId(requiredString(claim.member_id, 'claim member id')),
+          hpkePublicKey: asHpkePublicKeyBytes(decodeBase64(claim.hpke_public, 'claim HPKE public key')),
+          authorPublicKey: asAuthorPublicKeyBytes(decodeBase64(claim.author_public, 'claim author public key')),
+          tag: asInviteMacBytes(decodeBase64(claim.tag, 'claim tag')),
+        },
+      };
+    });
   }
 
   /**
@@ -502,6 +775,7 @@ export class RemoteStore {
    * member_id == the identity resolved from the authenticated subject, the recipient pin, OPEN + unexpired, and
    * one live claim; it does NOT verify the MAC.
    */
+  /** @param {InviteClaim} claim @returns {Promise<void>} */
   async claimInvite(claim) {
     const body = {
       member_id: claim.memberId,
@@ -523,6 +797,7 @@ export class RemoteStore {
   }
 
   /** Owner: consume/cancel an invite after admitting it. Idempotent (the server 204s a missing invite). */
+  /** @param {InviteId} inviteId @returns {Promise<void>} */
   async deleteInvite(inviteId) {
     let res;
     try {
@@ -544,26 +819,31 @@ export class RemoteStore {
    * Editor: submit a sealed KIND_PROPOSAL bundle (opaque bytes). Returns `{ id, expiresAt }`. `id` is the tree
    * UUID (`realDoc`).
    */
+  /** @param {TreeUuid} id @param {ProposalEnvelopeBytes} sealedBytes @returns {Promise<{ readonly id: ProposalId, readonly expiresAt: string }>} */
   async createProposal(id, sealedBytes) {
     let res;
     try {
       res = await this.#send(`${this.#tree(id)}/proposals`, {
         method: 'POST',
         extraHeaders: { 'content-type': 'application/octet-stream' },
-        body: sealedBytes,
+      body: new Uint8Array(sealedBytes),
       });
     } catch (e) {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
-    return { id: b.id, expiresAt: b.expires_at };
+    const b = record(await res.json(), 'proposal creation');
+    return {
+      id: asProposalId(requiredString(b.id, 'proposal id')),
+      expiresAt: requiredString(b.expires_at, 'proposal expiry'),
+    };
   }
 
   /**
    * Maintainer: list the tree's open proposals (payloads inline, for verify + re-author). Returns
    * `[{ id, proposer, sizeBytes, createdAt, expiresAt, ciphertextHash(bytes), payload(bytes) }]`.
    */
+  /** @param {TreeUuid} id @param {{ readonly includeExpired?: boolean }} [options] @returns {Promise<ReadonlyArray<RemoteProposal>>} */
   async listProposals(id, { includeExpired = false } = {}) {
     const qs = includeExpired ? '?include_expired=true' : '';
     let res;
@@ -574,16 +854,20 @@ export class RemoteStore {
     }
     if (res.status === 404) return [];
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
-    return (b.proposals ?? []).map((p) => ({
-      id: p.id,
-      proposer: p.proposer,
-      sizeBytes: p.size_bytes,
-      createdAt: p.created_at,
-      expiresAt: p.expires_at,
-      ciphertextHash: b64decode(p.ciphertext_hash),
-      payload: b64decode(p.payload),
-    }));
+    const b = record(await res.json(), 'proposal list');
+    const proposals = requiredArray(b.proposals ?? [], 'proposals');
+    return proposals.map((entry) => {
+      const proposal = record(entry, 'proposal');
+      return {
+        id: asProposalId(requiredString(proposal.id, 'proposal id')),
+        proposer: asMemberId(requiredString(proposal.proposer, 'proposal member id')),
+        sizeBytes: requiredSafeInteger(proposal.size_bytes, 'proposal size'),
+        createdAt: requiredString(proposal.created_at, 'proposal creation time'),
+        expiresAt: requiredString(proposal.expires_at, 'proposal expiry'),
+        ciphertextHash: asProposalCiphertextHashBytes(decodeBase64(proposal.ciphertext_hash, 'proposal ciphertext hash')),
+        payload: asProposalEnvelopeBytes(decodeBase64(proposal.payload, 'proposal payload')),
+      };
+    });
   }
 
   /**
@@ -592,6 +876,7 @@ export class RemoteStore {
    * sealed delta bytes are fetched separately via `blobGet` and opened by the core — the server sees only
    * metadata.
    */
+  /** @param {TreeUuid} id @param {{ readonly since?: number, readonly limit?: number | null }} [options] @returns {Promise<RemoteHistoryPage>} */
   async getHistory(id, { since = 0, limit = null } = {}) {
     const qs = new URLSearchParams();
     if (since) qs.set('since', String(since));
@@ -604,21 +889,26 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
+    const b = record(await res.json(), 'history page');
+    const entries = requiredArray(b.entries ?? [], 'history entries');
     return {
-      entries: (b.entries ?? []).map((e) => ({
-        memberId: e.member_id,
-        replica: e.replica,
-        counter: e.counter,
-        size: e.size,
-        createdAt: e.created_at,
-        seq: e.seq,
-      })),
-      nextCursor: b.next_cursor ?? null,
+      entries: entries.map((entry) => {
+        const history = record(entry, 'history entry');
+        return {
+          memberId: asMemberId(requiredString(history.member_id, 'history member id')),
+          replica: asReplicaHex(requiredString(history.replica, 'history replica')),
+          counter: requiredSafeInteger(history.counter, 'history counter'),
+          size: requiredSafeInteger(history.size, 'history size'),
+          createdAt: requiredString(history.created_at, 'history creation time'),
+          seq: requiredSafeInteger(history.seq, 'history sequence'),
+        };
+      }),
+      nextCursor: b.next_cursor == null ? null : requiredSafeInteger(b.next_cursor, 'history cursor'),
     };
   }
 
   /** Maintainer (any proposal) or the proposer (own): resolve/withdraw a proposal. Idempotent. */
+  /** @param {TreeUuid} id @param {ProposalId} proposalId @returns {Promise<void>} */
   async deleteProposal(id, proposalId) {
     let res;
     try {
@@ -645,6 +935,7 @@ export class RemoteStore {
    * (`identity_conflict`, `member_id_mismatch`, `bad_signature`, `stale_timestamp`, `invalid_request`). Skips the
    * 401 auth-retry: the PoP-failure 401s are not token problems (see `#send`).
    */
+  /** @param {RegistrationProof} proof @param {PinnedTokenOptions} options @returns {Promise<{ readonly memberId: MemberId }>} */
   async register({ memberId, authorPublicKey, signature, ts }, { accessToken }) {
     let res;
     try {
@@ -664,8 +955,11 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json().catch(() => ({}));
-    return { memberId: b.member_id ?? memberId };
+    /** @type {unknown} */
+    let responseBody = {};
+    try { responseBody = await res.json(); } catch { /* retain the requested identity when the success body is empty */ }
+    const body = record(responseBody, 'registration');
+    return { memberId: body.member_id == null ? memberId : asMemberId(requiredString(body.member_id, 'registered member id')) };
   }
 
   /**
@@ -673,6 +967,7 @@ export class RemoteStore {
    * backup blob, null when none has been pushed (dev auth, or before the first backup). A cheap post-sign-in
    * probe of whether the subject is registered (`unregistered` 403 if not) and whether a backup exists to restore.
    */
+  /** @param {OptionalTokenOptions} [options] @returns {Promise<{ readonly memberId: MemberId, readonly keystore: AccountKeystoreBytes | null, readonly generation: AccountGeneration, readonly etag: AccountBackupEtag }>} */
   async me({ accessToken } = {}) {
     let res;
     try {
@@ -683,17 +978,19 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
+    const b = record(await res.json(), 'account view');
+    const encodedKeystore = b.keystore == null || b.keystore === '' ? null : requiredString(b.keystore, 'account keystore');
     return {
-      memberId: b.member_id,
-      keystore: b.keystore ? b64decode(b.keystore) : null,
-      generation: b.generation ?? 0,
+      memberId: asMemberId(requiredString(b.member_id, 'account member id')),
+      keystore: encodedKeystore === null ? null : asKeystoreBytes(decodeBase64(encodedKeystore, 'account keystore')),
+      generation: asGeneration(requiredSafeInteger(b.generation ?? 0, 'account generation')),
       etag: requiredEtag(res),
     };
   }
 
   /** The stored E2E keystore backup: `{ keystore(bytes|null), generation, etag }`. Throws `unregistered` (403) when the
    *  subject has no identities row. The client enforces its own generation floor on the returned blob before use. */
+  /** @param {OptionalTokenOptions} [options] @returns {Promise<{ readonly keystore: AccountKeystoreBytes | null, readonly generation: AccountGeneration, readonly etag: AccountBackupEtag }>} */
   async getKeystore({ accessToken } = {}) {
     let res;
     try {
@@ -704,10 +1001,11 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json();
+    const b = record(await res.json(), 'account keystore');
+    const encodedKeystore = b.keystore == null || b.keystore === '' ? null : requiredString(b.keystore, 'account keystore');
     return {
-      keystore: b.keystore ? b64decode(b.keystore) : null,
-      generation: b.generation ?? 0,
+      keystore: encodedKeystore === null ? null : asKeystoreBytes(decodeBase64(encodedKeystore, 'account keystore')),
+      generation: asGeneration(requiredSafeInteger(b.generation ?? 0, 'account generation')),
       etag: requiredEtag(res),
     };
   }
@@ -717,15 +1015,17 @@ export class RemoteStore {
    * server's stored generation is refused as `generation_rollback` (409); equal generation is idempotent (a
    * same-gen re-wrap such as change-passphrase). Returns the accepted `{ generation, etag }`.
    */
+  /** @param {AccountKeystoreBytes} bytes @param {AccountGeneration} generation @param {BackupWriteOptions} [options] @returns {Promise<{ readonly generation: AccountGeneration, readonly etag: AccountBackupEtag }>} */
   async putKeystore(bytes, generation, { etag, accessToken } = {}) {
     if (typeof etag !== 'string' || etag.length === 0) {
       throw makeError('invalid_request', { cause: 'account backup requires an ETag checkpoint' });
     }
+    const checkpoint = asEtag(etag);
     let res;
     try {
       res = await this.#send(`${this.#baseUrl}/v1/account/keystore`, {
         method: 'PUT',
-        extraHeaders: { 'content-type': 'application/json', 'if-match': etag },
+        extraHeaders: { 'content-type': 'application/json', 'if-match': checkpoint },
         body: JSON.stringify({ keystore: b64encode(bytes), generation }),
         accessToken,
         authRetry: accessToken === undefined,
@@ -734,13 +1034,21 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
-    const b = await res.json().catch(() => ({}));
-    return { generation: b.generation ?? generation, etag: requiredEtag(res) };
+    /** @type {unknown} */
+    let responseBody = {};
+    try { responseBody = await res.json(); } catch { /* preserve the accepted request generation for an empty success body */ }
+    const body = record(responseBody, 'account backup write');
+    return {
+      generation: asGeneration(requiredSafeInteger(body.generation ?? generation, 'account generation')),
+      etag: requiredEtag(res),
+    };
   }
 
+  /** @returns {Promise<never>} */
   async list() {
     throw new Error('remote list is not supported');
   }
+  /** @returns {Promise<never>} */
   async delete() {
     throw new Error('remote tree delete is not supported yet');
   }

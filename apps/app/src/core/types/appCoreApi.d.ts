@@ -29,6 +29,7 @@ import type {
   Passphrase,
   PredicateUri,
   ProjectionJson,
+  ProposalCiphertextHashBytes,
   ProposalEnvelopeBytes,
   ProposalId,
   RecoveryCode,
@@ -222,6 +223,7 @@ export interface RemoteKeyringWalk {
 }
 
 export interface RemoteProposal extends PendingProposal {
+  readonly ciphertextHash: ProposalCiphertextHashBytes;
   readonly payload: ProposalEnvelopeBytes;
 }
 
@@ -481,3 +483,4 @@ export interface WebAppCoreService extends AppCoreService {
 
 export type AppCoreClient = Remote<AppCoreService>;
 export type WebAppCoreClient = Remote<WebAppCoreService>;
+export type AppCoreFacade = AppCoreService | AppCoreClient;

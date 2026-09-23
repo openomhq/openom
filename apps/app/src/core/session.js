@@ -25,24 +25,43 @@
  */
 import { makeError } from './errorModel.js';
 
+/** @typedef {import('./types/domain.js').AuthIssuer} AuthIssuer */
+/** @typedef {import('./types/domain.js').AuthSubject} AuthSubject */
+/** @typedef {import('./types/session.js').AccountIdentitySource} AccountIdentitySource */
+/** @typedef {import('./types/session.js').AuthSession} AuthSession */
+/** @typedef {import('./types/session.js').SupabaseClientLike} SupabaseClientLike */
+/** @typedef {import('./types/session.js').SupabaseSessionLike} SupabaseSessionLike */
+
+/** @param {string} accessToken @returns {{ issuer: AuthIssuer, subject: AuthSubject }} */
 function jwtClaims(accessToken) {
   const payload = accessToken.split('.')[1];
   if (!payload) throw makeError('auth_required', { cause: 'auth token has no JWT payload' });
   try {
     const base64 = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '=');
-    const claims = JSON.parse(atob(base64));
+    /** @type {unknown} */
+    const decoded = JSON.parse(atob(base64));
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) throw new Error('invalid claims');
+    const claims = /** @type {Record<string, unknown>} */ (decoded);
     if (typeof claims.sub !== 'string' || claims.sub.length === 0) throw new Error('missing sub');
-    return { issuer: typeof claims.iss === 'string' ? claims.iss : '', subject: claims.sub };
+    return {
+      issuer: /** @type {AuthIssuer} */ (typeof claims.iss === 'string' ? claims.iss : ''),
+      subject: /** @type {AuthSubject} */ (claims.sub),
+    };
   } catch (error) {
     throw makeError('auth_required', { cause: `auth token claims are unavailable: ${error}` });
   }
 }
 
+/** @implements {AuthSession} */
 export class DevAuth {
+  /** @type {AccountIdentitySource} */
   #account;
+  /** @type {Set<() => void>} */
   #subs = new Set();
-  #unsubscribeAccount;
+  /** @type {(() => void) | null} */
+  #unsubscribeAccount = null;
 
+  /** @param {AccountIdentitySource} accountSession */
   constructor(accountSession) {
     if (typeof accountSession?.memberId !== 'function' || typeof accountSession?.onChange !== 'function') {
       throw new Error('DevAuth needs an AccountSession');
@@ -54,7 +73,9 @@ export class DevAuth {
   // ---- the AuthSession seam ----
 
   subject() {
-    return this.#account.memberId();
+    const memberId = this.#account.memberId();
+    // Dev convenience only: the provider subject deliberately coincides with the durable member ID.
+    return memberId === null ? null : /** @type {AuthSubject} */ (/** @type {unknown} */ (memberId));
   }
 
   // eslint-disable-next-line no-unused-vars -- forceRefresh is a no-op for option (A); the seam for option (B).
@@ -64,8 +85,8 @@ export class DevAuth {
     return this.#tokenFor(id, { forceRefresh });
   }
 
+  /** @param {AuthSubject} memberId @param {{ readonly forceRefresh?: boolean }} [_opts] */
   async #tokenFor(memberId, _opts = {}) {
-    // Dev convenience only: mint the auth subject (`sub`) as the durable account member ID.
     return memberId;
   }
 
@@ -73,9 +94,11 @@ export class DevAuth {
     const subject = this.subject();
     if (!subject) throw makeError('auth_required', { cause: 'DevAuth: profile account is locked' });
     const accessToken = await this.#tokenFor(subject, { forceRefresh });
-    return { accessToken, issuer: '', subject };
+    return { accessToken, issuer: /** @type {AuthIssuer} */ (''), subject };
   }
 
+  /** @param {() => void} cb */
+  /** @param {() => void} cb */
   onChange(cb) {
     this.#subs.add(cb);
     return () => this.#subs.delete(cb);
@@ -114,11 +137,16 @@ export class DevAuth {
  *   signIn/out       → client.auth.signInWithPassword / signOut
  *   onChange         → client.auth.onAuthStateChange
  */
+/** @implements {AuthSession} */
 export class SupabaseAuth {
+  /** @type {SupabaseClientLike} */
   #client;
+  /** @type {SupabaseSessionLike | null} */
   #session = null;
+  /** @type {Set<() => void>} */
   #subs = new Set();
 
+  /** @param {SupabaseClientLike} client */
   constructor(client) {
     this.#client = client;
     // client.auth.onAuthStateChange((_event, session) => { this.#session = session; this.#notify(); });
@@ -143,6 +171,7 @@ export class SupabaseAuth {
     return this.#session?.user?.id ?? null;
   }
 
+  /** @param {unknown} credentials */
   async signIn(credentials) {
     return this.#client.auth.signInWithPassword(credentials);
   }
@@ -151,6 +180,7 @@ export class SupabaseAuth {
     return this.#client.auth.signOut();
   }
 
+  /** @param {() => void} cb */
   onChange(cb) {
     this.#subs.add(cb);
     return () => this.#subs.delete(cb);
@@ -167,22 +197,30 @@ export class SupabaseAuth {
  * logged in" truth, while the provider under it is chosen once at composition (the swap point).
  */
 export class SessionController {
+  /** @type {AuthSession} */
   #auth;
 
+  /** @param {AuthSession} auth */
   constructor(auth) {
     if (!auth) throw new Error('SessionController needs an AuthSession backend');
     this.#auth = auth;
   }
 
+  /** @param {{ readonly forceRefresh?: boolean }} [opts] */
   getAccessToken(opts) {
     return this.#auth.getAccessToken(opts);
   }
+  /** @param {{ readonly forceRefresh?: boolean }} [opts] */
   registrationAttempt(opts) {
     return this.#auth.registrationAttempt(opts);
   }
   subject() {
     return this.#auth.subject();
   }
+  /** @param {() => void} cb */
+  /** @param {() => void} cb */
+  /** @param {() => void} cb */
+  /** @param {() => void} cb */
   onChange(cb) {
     return this.#auth.onChange(cb);
   }

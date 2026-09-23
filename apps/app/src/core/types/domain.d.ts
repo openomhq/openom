@@ -44,6 +44,7 @@ export type ResetAuthorityBytes = DomainValue<Uint8Array, 'ResetAuthorityBytes'>
 export type AppSecretPlaintextBytes = DomainValue<Uint8Array, 'AppSecretPlaintextBytes'>;
 export type AppSecretEnvelopeBytes = DomainValue<Uint8Array, 'AppSecretEnvelopeBytes'>;
 export type ProposalEnvelopeBytes = DomainValue<Uint8Array, 'ProposalEnvelopeBytes'>;
+export type ProposalCiphertextHashBytes = DomainValue<Uint8Array, 'ProposalCiphertextHashBytes'>;
 export type HistoryDeltaEnvelopeBytes = DomainValue<Uint8Array, 'HistoryDeltaEnvelopeBytes'>;
 export type TreeObjectBytes = DomainValue<Uint8Array, 'TreeObjectBytes'>;
 export type InvitePinBytes = DomainValue<Uint8Array, 'InvitePinBytes'>;
