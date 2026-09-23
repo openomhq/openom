@@ -68,7 +68,12 @@ use IndexedDB's separate opaque CAS token as a fail-safe, and verify an exact re
 live handle. Committed revisions cross tabs through `BroadcastChannel`; a peer drops resident account and tree
 handles when their exact source blob is stale. Persistent-browser-storage requests are best-effort; only a
 confirmed remote backup supplies a redundant identity copy. Backup/revoke intent is committed before network I/O
-and compare-cleared only for the exact acknowledged blob version. Owned and joined trees both borrow that account handle;
+and compare-cleared only for the exact acknowledged blob version. `AccountSession` composes with provider auth and
+the account transport only after all three exist; its observable auth, custody, and binding axes remain independent.
+It probes `/me` before every binding decision, signs the exact pinned token claims for registration, and resumes an
+interrupted register-then-backup flow from durable binding/pending state. Account backup writes use the server's strong
+`ETag` with `If-Match`; reconciliation stays machine-readable in facade state and never silently adopts remote custody.
+Owned and joined trees both borrow that account handle;
 joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
 from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle
 and exposes its durable member ID only as the raw development bearer; it does not own accounts.
@@ -93,7 +98,7 @@ src/core/              orchestration — no UI, no rendering.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
   accountRecord.js        validates/codecs the portable identity-scoped account record and its three counters.
   accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.
-  accountSession.js       account-backed identity/custody facade; the sole app-level crypto identity source.
+  accountSession.js       observable local/auth/binding facade; probes, registers, and CAS-backs up account custody.
   membership.js, sharing.js   resumable invite/claim orchestration and verified chain/DAG join bootstrap.
   store.js               DocStore contract: opaque-bytes persistence (memory / IndexedDB / Tauri).
   indexedDbStore.js       the browser DocStore implementation.
@@ -118,8 +123,8 @@ src/core/              orchestration — no UI, no rendering.
                            date parsing.
   library.js, seed.js, seedKhaldun.js, schema.js   the bundled demo datasets + custom-field defs.
   identity.js              device id + logical clock, persisted across restarts.
-  session.js               provider-auth seam; singleton DevAuth derives only a dev bearer subject
-                           from the unlocked AccountSession (no local account list or switcher).
+  session.js               provider-auth seam; supplies atomic token+issuer+subject registration attempts.
+                           Singleton DevAuth derives only a dev bearer from the unlocked AccountSession.
   lockPolicy.js            decides WHEN to auto-lock; platform-agnostic (calls back into the app).
   watermarks.js            anti-rollback: refuses a keyring/snapshot older than one already seen.
   blobs.js                 content-addressed file storage, alongside the document not inside it.

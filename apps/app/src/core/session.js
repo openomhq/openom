@@ -9,6 +9,7 @@
 //
 //   interface AuthSession {
 //     getAccessToken({ forceRefresh } = {}): Promise<string>  // the Bearer value; refresh behind the seam
+//     registrationAttempt({ forceRefresh } = {}): Promise<{ accessToken, issuer, subject }>
 //     subject(): string | null                                // opaque provider subject (`sub`)
 //     onChange(cb): () => void                                // cb() on identity change; returns an unsubscribe
 //     capabilities(): { canRegister, canLogin, sync }
@@ -23,6 +24,19 @@
  * as a raw bearer. Production providers retain their own opaque subjects and are bound in Phase 2.
  */
 import { makeError } from './errorModel.js';
+
+function jwtClaims(accessToken) {
+  const payload = accessToken.split('.')[1];
+  if (!payload) throw makeError('auth_required', { cause: 'auth token has no JWT payload' });
+  try {
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '=');
+    const claims = JSON.parse(atob(base64));
+    if (typeof claims.sub !== 'string' || claims.sub.length === 0) throw new Error('missing sub');
+    return { issuer: typeof claims.iss === 'string' ? claims.iss : '', subject: claims.sub };
+  } catch (error) {
+    throw makeError('auth_required', { cause: `auth token claims are unavailable: ${error}` });
+  }
+}
 
 export class DevAuth {
   #account;
@@ -53,6 +67,13 @@ export class DevAuth {
   async #tokenFor(memberId, _opts = {}) {
     // Dev convenience only: mint the auth subject (`sub`) as the durable account member ID.
     return memberId;
+  }
+
+  async registrationAttempt({ forceRefresh = false } = {}) {
+    const subject = this.subject();
+    if (!subject) throw makeError('auth_required', { cause: 'DevAuth: profile account is locked' });
+    const accessToken = await this.#tokenFor(subject, { forceRefresh });
+    return { accessToken, issuer: '', subject };
   }
 
   onChange(cb) {
@@ -113,6 +134,11 @@ export class SupabaseAuth {
     return token;
   }
 
+  async registrationAttempt({ forceRefresh = false } = {}) {
+    const accessToken = await this.getAccessToken({ forceRefresh });
+    return { accessToken, ...jwtClaims(accessToken) };
+  }
+
   subject() {
     return this.#session?.user?.id ?? null;
   }
@@ -150,6 +176,9 @@ export class SessionController {
 
   getAccessToken(opts) {
     return this.#auth.getAccessToken(opts);
+  }
+  registrationAttempt(opts) {
+    return this.#auth.registrationAttempt(opts);
   }
   subject() {
     return this.#auth.subject();

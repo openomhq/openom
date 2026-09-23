@@ -109,6 +109,7 @@ class App {
   // The managed backend URL (null ⇒ local-only) and the active tree's owned SyncSession (null unless
   // synced). syncStatus mirrors the driver's last status for a future sync indicator.
   serverUrl = null;
+  remote = null;
   sync = null;
   syncStatus = null;
   // The active real (lockable) sealer session, or null at the gate / in the demo. Auto-lock
@@ -131,9 +132,12 @@ class App {
 
   async bindAccountSession() {
     this.auth?.dispose?.();
+    this.account?.dispose?.();
     this.account = new AccountSession(this.worker);
     await this.account.initialize();
     this.auth = new SessionController(new DevAuth(this.account));
+    this.remote = this.serverUrl ? new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth }) : null;
+    this.account.attachSync({ auth: this.auth, remote: this.remote });
     this.auth.onChange(() => this.onAuthChange());
   }
 
@@ -451,7 +455,7 @@ class App {
   // auth), exactly like startSync's.
   #membershipRemote() {
     if (!this.serverUrl || !this.auth.subject()) return null;
-    return new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth });
+    return this.remote;
   }
 
   // The worker's network transport for `docId`, wrapped for Comlink — the join needs it attached before it can
@@ -557,7 +561,7 @@ class App {
     if (!this.lockable || !this.tree || !this.realDoc) return; // only the real, lockable tree syncs
     if (!this.serverUrl || !this.auth.subject()) return; // no backend / no provider session → local-only
     try {
-      const remote = new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth });
+      const remote = this.remote;
       // The worker calls the transport across Comlink; auth + serverUrl stay on the main thread.
       this.worker.attachTransport(this.realDoc, Comlink.proxy(remoteTransport(remote)));
       this.syncDriver = startSyncDriver(this.worker, this.realDoc, {

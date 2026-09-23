@@ -46,6 +46,9 @@ describe('DevAuth — account-backed development provider', () => {
     account.setMemberId('member-durable-2');
     expect(auth.subject()).toBe('member-durable-2');
     expect(await auth.getAccessToken()).toBe('member-durable-2');
+    expect(await auth.registrationAttempt()).toEqual({
+      accessToken: 'member-durable-2', issuer: '', subject: 'member-durable-2',
+    });
   });
 
   it('advertises account-backed development capabilities', () => {
@@ -79,11 +82,14 @@ describe('DevAuth — account-backed development provider', () => {
 });
 
 describe('SessionController — delegates the provider-auth seam', () => {
-  it('forwards subject, token, capabilities, and changes without exposing account identity accessors', async () => {
+  it('forwards subject, token, registration claims, capabilities, and changes without identity accessors', async () => {
     const { auth, account } = mk('member-controller');
     const controller = new SessionController(auth);
     expect(controller.subject()).toBe('member-controller');
     expect(await controller.getAccessToken()).toBe('member-controller');
+    expect(await controller.registrationAttempt()).toEqual({
+      accessToken: 'member-controller', issuer: '', subject: 'member-controller',
+    });
     expect(controller.capabilities()).toEqual({ canRegister: false, canLogin: false, sync: true });
     expect(controller.memberId).toBeUndefined();
     expect(controller.signIn).toBeUndefined();

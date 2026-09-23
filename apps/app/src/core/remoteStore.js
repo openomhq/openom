@@ -67,9 +67,16 @@ function statusFallbackCode(status) {
   if (status === 404) return 'not_found';
   if (status === 409) return 'version_conflict';
   if (status === 410) return 'below_gc_floor';
+  if (status === 412) return 'account_backup_precondition_failed';
   if (status === 429) return 'rate_limited';
   if (status >= 500) return 'unavailable';
   return 'invalid_request';
+}
+
+function requiredEtag(response) {
+  const etag = response.headers.get('etag');
+  if (!etag) throw makeError('unavailable', { cause: 'account backup response omitted its ETag' });
+  return etag;
 }
 
 export class RemoteStore {
@@ -101,10 +108,10 @@ export class RemoteStore {
     return { remote: true, conditionalWrites: true, durable: true };
   }
 
-  async #headers(extra = {}, { forceRefresh = false } = {}) {
+  async #headers(extra = {}, { forceRefresh = false, accessToken } = {}) {
     const h = { ...extra };
-    if (this.#getAccessToken) {
-      const token = await this.#getAccessToken({ forceRefresh });
+    if (accessToken !== undefined || this.#getAccessToken) {
+      const token = accessToken !== undefined ? accessToken : await this.#getAccessToken({ forceRefresh });
       // `Openom-Auth`, not `Authorization`: behind CloudFront OAC the origin signature claims the
       // `Authorization` header, so the JWT rides here instead (the server reads `Openom-Auth`, and
       // still accepts `Authorization` off-CloudFront). Same `Bearer <jwt>` value either way.
@@ -121,11 +128,11 @@ export class RemoteStore {
   // forced-refresh retry (the token may just be stale). If the retry still 401s, surface an
   // AuthError so the composition root re-gates / signs out. Never loops. Non-401 statuses are
   // handed back untouched for each method to interpret (404/409/410/etc.).
-  async #send(url, { method, extraHeaders = {}, body, authRetry = true } = {}) {
+  async #send(url, { method, extraHeaders = {}, body, authRetry = true, accessToken } = {}) {
     // Stable across the 401 forced-refresh retry (the body doesn't change), so compute it once.
     const withHash = { ...extraHeaders, 'x-amz-content-sha256': await bodyContentHash(body) };
     const attempt = async (forceRefresh) => {
-      const headers = await this.#headers(withHash, { forceRefresh });
+      const headers = await this.#headers(withHash, { forceRefresh, accessToken });
       // Per-request deadline (C2): abort the fetch if it hasn't resolved in time, so a hung backend surfaces
       // as an error (blob channel → the `timeout` code) instead of hanging the driver. The abort reason is a
       // TimeoutError; the only abort source on this path is this timer, so netAppError reads any abort as a timeout.
@@ -142,7 +149,7 @@ export class RemoteStore {
     // (POST /register returns 401 for a PoP failure — stale_timestamp/bad_signature — which a token refresh
     // can't fix; the caller's error mapper must see that body code instead of an AuthError).
     if (authRetry && res.status === 401) {
-      if (this.#getAccessToken) res = await attempt(true); // one forced-refresh retry
+      if (this.#getAccessToken && accessToken === undefined) res = await attempt(true); // one forced-refresh retry
       if (res.status === 401) {
         let detail = '';
         try { detail = (await res.text?.()) ?? ''; } catch { detail = ''; }
@@ -630,11 +637,12 @@ export class RemoteStore {
    * Bind this session's JWT subject to the account's self-certifying member_id (the sole binder). `proof` is the
    * core-produced proof-of-possession: `{ memberId, authorPublicKey(bytes), signature(bytes), ts }`, where
    * `signature` is Ed25519 over the domain-tagged (iss, sub, member_id, ts). Idempotent — a re-register of the
-   * same binding is a 200. Returns the server-echoed `{ memberId }`; throws an AppError otherwise
+   * same binding is a 200. The second argument pins the exact bearer whose claims were signed; this request
+   * never asks the auth seam for a replacement token. Returns the server-echoed `{ memberId }`; throws otherwise
    * (`identity_conflict`, `member_id_mismatch`, `bad_signature`, `stale_timestamp`, `invalid_request`). Skips the
    * 401 auth-retry: the PoP-failure 401s are not token problems (see `#send`).
    */
-  async register({ memberId, authorPublicKey, signature, ts }) {
+  async register({ memberId, authorPublicKey, signature, ts }, { accessToken }) {
     let res;
     try {
       res = await this.#send(`${this.#baseUrl}/v1/register`, {
@@ -647,6 +655,7 @@ export class RemoteStore {
           ts,
         }),
         authRetry: false,
+        accessToken,
       });
     } catch (e) {
       throw netAppError(e);
@@ -657,14 +666,16 @@ export class RemoteStore {
   }
 
   /**
-   * This session's account view: `{ memberId, keystore(bytes|null), generation }`. `keystore` is the stored E2E
+   * This session's account view: `{ memberId, keystore(bytes|null), generation, etag }`. `keystore` is the stored E2E
    * backup blob, null when none has been pushed (dev auth, or before the first backup). A cheap post-sign-in
    * probe of whether the subject is registered (`unregistered` 403 if not) and whether a backup exists to restore.
    */
-  async me() {
+  async me({ accessToken } = {}) {
     let res;
     try {
-      res = await this.#send(`${this.#baseUrl}/v1/me`, { method: 'GET' });
+      res = await this.#send(`${this.#baseUrl}/v1/me`, {
+        method: 'GET', accessToken, authRetry: accessToken === undefined,
+      });
     } catch (e) {
       throw netAppError(e);
     }
@@ -674,42 +685,54 @@ export class RemoteStore {
       memberId: b.member_id,
       keystore: b.keystore ? b64decode(b.keystore) : null,
       generation: b.generation ?? 0,
+      etag: requiredEtag(res),
     };
   }
 
-  /** The stored E2E keystore backup: `{ keystore(bytes|null), generation }`. Throws `unregistered` (403) when the
+  /** The stored E2E keystore backup: `{ keystore(bytes|null), generation, etag }`. Throws `unregistered` (403) when the
    *  subject has no identities row. The client enforces its own generation floor on the returned blob before use. */
-  async getKeystore() {
+  async getKeystore({ accessToken } = {}) {
     let res;
     try {
-      res = await this.#send(`${this.#baseUrl}/v1/account/keystore`, { method: 'GET' });
+      res = await this.#send(`${this.#baseUrl}/v1/account/keystore`, {
+        method: 'GET', accessToken, authRetry: accessToken === undefined,
+      });
     } catch (e) {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
     const b = await res.json();
-    return { keystore: b.keystore ? b64decode(b.keystore) : null, generation: b.generation ?? 0 };
+    return {
+      keystore: b.keystore ? b64decode(b.keystore) : null,
+      generation: b.generation ?? 0,
+      etag: requiredEtag(res),
+    };
   }
 
   /**
-   * Back up the E2E-wrapped keystore `bytes` at `generation` (its monotonic anti-rollback floor). A PUT below the
+   * CAS the E2E-wrapped keystore `bytes` at `generation` from the supplied `etag` checkpoint. A PUT below the
    * server's stored generation is refused as `generation_rollback` (409); equal generation is idempotent (a
-   * same-gen re-wrap such as change-passphrase). Returns the accepted `{ generation }`.
+   * same-gen re-wrap such as change-passphrase). Returns the accepted `{ generation, etag }`.
    */
-  async putKeystore(bytes, generation) {
+  async putKeystore(bytes, generation, { etag, accessToken } = {}) {
+    if (typeof etag !== 'string' || etag.length === 0) {
+      throw makeError('invalid_request', { cause: 'account backup requires an ETag checkpoint' });
+    }
     let res;
     try {
       res = await this.#send(`${this.#baseUrl}/v1/account/keystore`, {
         method: 'PUT',
-        extraHeaders: { 'content-type': 'application/json' },
+        extraHeaders: { 'content-type': 'application/json', 'if-match': etag },
         body: JSON.stringify({ keystore: b64encode(bytes), generation }),
+        accessToken,
+        authRetry: accessToken === undefined,
       });
     } catch (e) {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
     const b = await res.json().catch(() => ({}));
-    return { generation: b.generation ?? generation };
+    return { generation: b.generation ?? generation, etag: requiredEtag(res) };
   }
 
   async list() {

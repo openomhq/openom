@@ -175,10 +175,10 @@ describe('RemoteStore membership summary (/access)', () => {
 });
 
 describe('RemoteStore account surface (/register, /me, /account/keystore)', () => {
-  const jres = ({ status = 200, json = {} as any } = {}) => ({
+  const jres = ({ status = 200, json = {} as any, etag = '"account-v1"' } = {}) => ({
     status,
     ok: status >= 200 && status < 300,
-    headers: { get: () => null },
+    headers: { get: (name: string) => (name.toLowerCase() === 'etag' ? etag : null) },
     json: async () => json,
     text: async () => JSON.stringify(json),
   });
@@ -199,11 +199,12 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
       authorPublicKey: new Uint8Array([1, 2, 3]),
       signature: new Uint8Array([4, 5]),
       ts: 1000,
-    });
+    }, { accessToken: 'pinned-jwt' });
     expect(out).toEqual({ memberId: 'mid-1' });
     expect(fetch.mock.calls[0][0]).toBe('http://x/v1/register');
     const init = fetch.mock.calls[0][1] as any;
     expect(init.method).toBe('POST');
+    expect(init.headers['openom-auth']).toBe('Bearer pinned-jwt');
     expect(JSON.parse(init.body)).toEqual({
       member_id: 'mid-1',
       author_pubkey: 'AQID', // base64([1,2,3])
@@ -220,11 +221,15 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
     const auth = { getAccessToken: vi.fn(async () => 'jwt') };
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth });
     const err = await store
-      .register({ memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 })
+      .register(
+        { memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 },
+        { accessToken: 'pinned-jwt' },
+      )
       .catch((e: any) => e);
     expect(err.code).toBe('stale_timestamp');
     expect(err.args).toEqual({ server_time: 1_700_000_000 });
     expect(fetch).toHaveBeenCalledTimes(1); // NO forced-refresh retry, despite the seam being present
+    expect(auth.getAccessToken).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -239,7 +244,10 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
       auth: async () => 'jwt',
     });
     const error = await store
-      .register({ memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 })
+      .register(
+        { memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 },
+        { accessToken: 'pinned-jwt' },
+      )
       .catch((caught: any) => caught);
     expect(error.code).toBe(code);
   });
@@ -251,7 +259,10 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
       auth: async () => 'jwt',
     });
     const err = await store
-      .register({ memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 })
+      .register(
+        { memberId: 'm', authorPublicKey: new Uint8Array([1]), signature: new Uint8Array([2]), ts: 1 },
+        { accessToken: 'pinned-jwt' },
+      )
       .catch((e: any) => e);
     expect(err.code).toBe('identity_conflict');
   });
@@ -266,6 +277,7 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
     expect(out.memberId).toBe('m');
     expect(Array.from(out.keystore!)).toEqual([9, 9]);
     expect(out.generation).toBe(2);
+    expect(out.etag).toBe('"account-v1"');
   });
 
   it('me returns a null keystore when the server has no backup', async () => {
@@ -274,7 +286,9 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
       fetch: async () => jres({ json: { member_id: 'm', keystore: null, generation: 0 } }),
       auth: async () => 'jwt',
     });
-    expect(await store.me()).toEqual({ memberId: 'm', keystore: null, generation: 0 });
+    expect(await store.me()).toEqual({
+      memberId: 'm', keystore: null, generation: 0, etag: '"account-v1"',
+    });
   });
 
   it('getKeystore decodes the blob, and throws unregistered on a 403', async () => {
@@ -286,6 +300,7 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
     const got = await ok.getKeystore();
     expect(Array.from(got.keystore!)).toEqual([9, 9]);
     expect(got.generation).toBe(3);
+    expect(got.etag).toBe('"account-v1"');
 
     const unreg = new RemoteStore({
       baseUrl: 'http://x',
@@ -299,11 +314,15 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
   it('putKeystore sends { keystore, generation } and returns the accepted generation', async () => {
     const fetch = vi.fn(async () => jres({ json: { generation: 5 } }));
     const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth: async () => 'jwt' });
-    const out = await store.putKeystore(new Uint8Array([9, 9]), 5);
-    expect(out).toEqual({ generation: 5 });
+    const out = await store.putKeystore(new Uint8Array([9, 9]), 5, {
+      etag: '"account-v0"', accessToken: 'pinned-jwt',
+    });
+    expect(out).toEqual({ generation: 5, etag: '"account-v1"' });
     expect(fetch.mock.calls[0][0]).toBe('http://x/v1/account/keystore');
     const init = fetch.mock.calls[0][1] as any;
     expect(init.method).toBe('PUT');
+    expect(init.headers['if-match']).toBe('"account-v0"');
+    expect(init.headers['openom-auth']).toBe('Bearer pinned-jwt');
     expect(JSON.parse(init.body)).toEqual({ keystore: 'CQk=', generation: 5 });
   });
 
@@ -313,7 +332,24 @@ describe('RemoteStore account surface (/register, /me, /account/keystore)', () =
       fetch: async () => jres({ status: 409, json: problem(409, 'generation_rollback') }),
       auth: async () => 'jwt',
     });
-    const err = await store.putKeystore(new Uint8Array([1]), 1).catch((e: any) => e);
+    const err = await store
+      .putKeystore(new Uint8Array([1]), 1, { etag: '"account-v0"' })
+      .catch((e: any) => e);
     expect(err.code).toBe('generation_rollback');
+  });
+
+  it('putKeystore preserves the account-specific 412 reconciliation code', async () => {
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({
+        status: 412, json: problem(412, 'account_backup_precondition_failed'),
+      }),
+      auth: async () => 'jwt',
+    });
+    const error = await store
+      .putKeystore(new Uint8Array([1]), 1, { etag: '"stale"' })
+      .catch((caught: any) => caught);
+    expect(error.code).toBe('account_backup_precondition_failed');
+    expect(error.httpStatus).toBe(412);
   });
 });
