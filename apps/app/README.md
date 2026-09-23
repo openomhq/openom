@@ -38,7 +38,10 @@ root with `node scripts/build-app-core.mjs` when the runner reports that it is m
 under `src/core/types/` restore domain distinctions erased by wasm-bindgen; compile-only fixtures under
 `apps/typecheck/` prove that same-representation swaps remain checker errors. The shared app-core RPC
 contract models the production surface once for both the Comlink worker and native host; browser-only extensions
-live separately rather than becoming accidental native requirements.
+live separately rather than becoming accidental native requirements. Files enter checking through the explicit,
+fail-closed roots in `tsconfig.main.json`, `tsconfig.native.json`, and `tsconfig.worker.json`; do not rely on
+per-file `// @ts-check` pragmas. The blocking `web` CI workflow regenerates the gitignored app-core declarations
+before running the same Docker-backed checker.
 
 Two things this app *depends on* but does not itself build:
 

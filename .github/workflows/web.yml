@@ -9,6 +9,23 @@ on:
   pull_request:
 
 jobs:
+  # The buildless runtime still has a strict author-time type gate. Build the gitignored wasm-bindgen
+  # declarations first, then check the main-thread, native-host, and Web Worker graphs without emitting files.
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate app-core wasm declarations
+        run: node scripts/build-app-core.mjs
+
+      - name: Type-check JavaScript boundaries
+        run: node scripts/typecheck.mjs
+
   check:
     runs-on: ubuntu-latest
     steps:
