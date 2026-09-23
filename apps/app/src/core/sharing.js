@@ -129,10 +129,10 @@ export class JoinError extends Error {
 }
 
 // The revision encoded in the first 4 bytes of a chain watermark (revision‖key_id‖H(DEK), big-endian).
-/** @param {KeyringWatermarkBytes | null | undefined} watermark */
+/** @param {KeyringWatermarkBytes | null | undefined} watermark @returns {KeyringRevision} */
 export function chainRevision(watermark) {
-  if (!watermark || watermark.length < 4) return 0;
-  return new DataView(watermark.buffer, watermark.byteOffset, 4).getUint32(0, false);
+  if (!watermark || watermark.length < 4) return keyringRevision(0);
+  return keyringRevision(new DataView(watermark.buffer, watermark.byteOffset, 4).getUint32(0, false));
 }
 
 /**

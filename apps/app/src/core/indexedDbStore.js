@@ -10,6 +10,10 @@
 
 import { ConflictError } from './store.js';
 
+/** @typedef {{ doc: string, bytes: number[], version: string, counter: number }} SnapshotRow */
+/** @typedef {{ doc: string, update: Uint8Array, seq: number }} UpdateRow */
+/** @typedef {{ doc: string, key: string, bytes: number[] }} BlobRow */
+
 const DB = 'openom';
 const VERSION = 2;
 const SNAPSHOTS = 'snapshots';
@@ -18,6 +22,7 @@ const UPDATES = 'updates';
 // the keyspace; this just persists whatever `export()` hands it and replays it into `import()` on reload.
 const BLOBS = 'blobs';
 
+/** @returns {Promise<IDBDatabase>} */
 function open() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB, VERSION);
@@ -40,18 +45,21 @@ function open() {
   });
 }
 
+/** @param {IDBTransaction} tx @returns {Promise<void>} */
 const done = (tx) => new Promise((resolve, reject) => {
   tx.oncomplete = () => resolve();
   tx.onerror = () => reject(tx.error);
   tx.onabort = () => reject(tx.error);
 });
 
+/** @template Value @param {IDBRequest<Value>} req @returns {Promise<Value>} */
 const ask = (req) => new Promise((resolve, reject) => {
   req.onsuccess = () => resolve(req.result);
   req.onerror = () => reject(req.error);
 });
 
 export class IndexedDbStore {
+  /** @type {IDBDatabase|null} */
   #db = null;
 
   caps() {
@@ -63,33 +71,47 @@ export class IndexedDbStore {
     return this.#db;
   }
 
+  /** @param {string[]} names @param {IDBTransactionMode} mode @returns {Promise<IDBTransaction>} */
   async #tx(names, mode) {
     const db = await this.#handle();
     return db.transaction(names, mode);
   }
 
+  /** @returns {Promise<string[]>} */
   async list() {
     const tx = await this.#tx([SNAPSHOTS, UPDATES], 'readonly');
-    const docs = new Set(await ask(tx.objectStore(SNAPSHOTS).getAllKeys()));
-    for (const row of await ask(tx.objectStore(UPDATES).getAll())) docs.add(row.doc);
+    const snapshotKeys = await ask(tx.objectStore(SNAPSHOTS).getAllKeys());
+    const docs = new Set(snapshotKeys.filter((key) => typeof key === 'string'));
+    /** @type {unknown[]} */
+    const rows = await ask(tx.objectStore(UPDATES).getAll());
+    for (const value of rows) {
+      if (isUpdateRow(value)) docs.add(value.doc);
+    }
     return [...docs];
   }
 
+  /** @param {string} doc @returns {Promise<{bytes: Uint8Array, version: string}|null>} */
   async readSnapshot(doc) {
     const tx = await this.#tx([SNAPSHOTS], 'readonly');
     const row = await ask(tx.objectStore(SNAPSHOTS).get(doc));
+    if (row != null && !isSnapshotRow(row)) throw new TypeError('invalid IndexedDB snapshot row');
     return row ? { bytes: new Uint8Array(row.bytes), version: row.version } : null;
   }
 
+  /** @param {string} doc @param {number|null|undefined} [since] @returns {Promise<{updates: Uint8Array[], cursor: number}>} */
   async readUpdates(doc, since) {
     const tx = await this.#tx([UPDATES], 'readonly');
-    const rows = await ask(tx.objectStore(UPDATES).index('doc').getAll(doc));
+    /** @type {unknown[]} */
+    const values = await ask(tx.objectStore(UPDATES).index('doc').getAll(doc));
+    if (!values.every(isUpdateRow)) throw new TypeError('invalid IndexedDB update row');
+    const rows = /** @type {UpdateRow[]} */ (values);
     // Nach seq sortiert: der Index gibt die Reihenfolge nicht zu.
     rows.sort((a, b) => a.seq - b.seq);
     const from = since ?? 0;
     return { updates: rows.slice(from).map((r) => r.update), cursor: rows.length };
   }
 
+  /** @param {string} doc @param {Uint8Array[]} updates @returns {Promise<number>} */
   async append(doc, updates) {
     const tx = await this.#tx([UPDATES], 'readwrite');
     const store = tx.objectStore(UPDATES);
@@ -99,6 +121,7 @@ export class IndexedDbStore {
     return cursor;
   }
 
+  /** @param {string} doc @param {Uint8Array} bytes @param {string|null} [expected] @returns {Promise<string>} */
   async putSnapshot(doc, bytes, expected = null) {
     const tx = await this.#tx([SNAPSHOTS], 'readwrite');
     const store = tx.objectStore(SNAPSHOTS);
@@ -114,15 +137,20 @@ export class IndexedDbStore {
   }
 
   // Load every persisted object for a doc as [{ key, bytes }] — fed straight into the core's `import`.
+  /** @param {string} doc @returns {Promise<{key: string, bytes: Uint8Array}[]>} */
   async readBlobs(doc) {
     const tx = await this.#tx([BLOBS], 'readonly');
-    const rows = await ask(tx.objectStore(BLOBS).index('doc').getAll(doc));
+    /** @type {unknown[]} */
+    const values = await ask(tx.objectStore(BLOBS).index('doc').getAll(doc));
+    if (!values.every(isBlobRow)) throw new TypeError('invalid IndexedDB blob row');
+    const rows = /** @type {BlobRow[]} */ (values);
     return rows.map((r) => ({ key: r.key, bytes: new Uint8Array(r.bytes) }));
   }
 
   // Persist a batch of the core's objects (from `export()`). Idempotent: immutable log objects re-put
   // identically; pointer objects (heads/snapshot) overwrite. `objects` is [{ key, bytes }] (a `pointer` flag,
   // if present, is ignored here — durability keeps every object regardless).
+  /** @param {string} doc @param {{key: string, bytes: Uint8Array}[]} objects @returns {Promise<void>} */
   async putBlobs(doc, objects) {
     if (!objects.length) return;
     const tx = await this.#tx([BLOBS], 'readwrite');
@@ -131,6 +159,7 @@ export class IndexedDbStore {
     await done(tx);
   }
 
+  /** @param {string} doc @returns {Promise<void>} */
   async delete(doc) {
     const tx = await this.#tx([SNAPSHOTS, UPDATES, BLOBS], 'readwrite');
     tx.objectStore(SNAPSHOTS).delete(doc);
@@ -140,6 +169,36 @@ export class IndexedDbStore {
     for (const key of await ask(blobIndex.getAllKeys(doc))) tx.objectStore(BLOBS).delete(key);
     await done(tx);
   }
+}
+
+/** @param {unknown} value @returns {value is SnapshotRow} */
+function isSnapshotRow(value) {
+  if (typeof value !== 'object' || value === null) return false;
+  const row = /** @type {Record<string, unknown>} */ (value);
+  return typeof row.doc === 'string' && Array.isArray(row.bytes) &&
+    row.bytes.every(isByte) && typeof row.version === 'string' &&
+    typeof row.counter === 'number' && Number.isSafeInteger(row.counter);
+}
+
+/** @param {unknown} value @returns {value is UpdateRow} */
+function isUpdateRow(value) {
+  if (typeof value !== 'object' || value === null) return false;
+  const row = /** @type {Record<string, unknown>} */ (value);
+  return typeof row.doc === 'string' && row.update instanceof Uint8Array &&
+    typeof row.seq === 'number' && Number.isSafeInteger(row.seq);
+}
+
+/** @param {unknown} value @returns {value is BlobRow} */
+function isBlobRow(value) {
+  if (typeof value !== 'object' || value === null) return false;
+  const row = /** @type {Record<string, unknown>} */ (value);
+  return typeof row.doc === 'string' && typeof row.key === 'string' &&
+    Array.isArray(row.bytes) && row.bytes.every(isByte);
+}
+
+/** @param {unknown} value @returns {value is number} */
+function isByte(value) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255;
 }
 
 /** Steht IndexedDB zur Verfuegung? Im privaten Modus mancher Browser nicht. */

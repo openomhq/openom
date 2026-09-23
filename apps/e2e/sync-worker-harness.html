@@ -99,12 +99,14 @@
         // The change-history feed (OPE-461): derived from the stored log objects. The fake has no member auth,
         // so it stamps a placeholder author (the real server records the authenticated uploader); the WORKER
         // half under test is the fetch + DECRYPT of each delta, not the server-side attribution.
-        async getHistory(tree, { since = 0, limit = null } = {}) {
+        async getHistory(_treeUuid, { since = 0, limit = null } = {}) {
           // Return the CLIENT shape (like RemoteStore.getHistory), since this fake stands in for the whole transport.
+          // Route identity is a UUID; retained blob keys use the separate hex tree prefix. This one-tree fake
+          // scans its own blob map rather than incorrectly treating the route UUID as that storage prefix.
           const entries = [];
           let seq = 0;
           for (const [key, bytes] of blobs) {
-            const m = key.match(new RegExp(`^${tree}/log/([^/]+)/(\\d+)$`));
+            const m = key.match(/^[^/]+\/log\/([^/]+)\/(\d+)$/);
             if (!m) continue;
             seq += 1;
             if (seq <= since) continue;

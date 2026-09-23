@@ -9,6 +9,7 @@
     "app/src/core/types/appCoreApi.d.ts",
     "app/src/core/types/wasm.d.ts",
     "app/src/core/wasmAppCore.js",
+    "app/src/core/appCore.worker.js",
     "app/src/vendor/comlink.d.ts",
     "app/src/vendor/app-core/openom_app_core.d.ts",
     "typecheck/wasm-boundary.check.js"

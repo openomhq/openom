@@ -8,19 +8,40 @@ import {
 const ACCOUNT_KEY_PREFIX = 'profile::account::';
 const ACCOUNT_LOCK_PREFIX = 'openom.account.record.';
 
+/** @typedef {import('./types/contracts.js').AccountRecord} AccountRecord */
+/** @typedef {import('./types/domain.js').AccountRecordRevision} AccountRecordRevision */
+/** @typedef {{ bytes: Uint8Array, version: string|null }} StoredSnapshot */
+/** @typedef {{
+ *   readSnapshot: (key: string) => Promise<StoredSnapshot|null>,
+ *   putSnapshot: (key: string, bytes: Uint8Array, expected?: string|null) => Promise<string>,
+ * }} ConditionalSnapshotStore */
+/** @typedef {{
+ *   request: <Result>(name: string, options: { mode: 'exclusive' }, operation: () => Result|PromiseLike<Result>) => Promise<Result>,
+ * }} LockManagerLike */
+/** @typedef {{ persisted?: () => Promise<boolean>, persist?: () => Promise<boolean> }} StorageManagerLike */
+/** @typedef {new(name: string) => BroadcastChannel} BroadcastChannelFactory */
+
+/** @param {Uint8Array} left @param {Uint8Array} right */
 function sameBytes(left, right) {
   if (left.length !== right.length) return false;
   return left.every((byte, index) => byte === right[index]);
 }
 
-class AccountRecordTransaction {
-  #store;
-  #key;
-  #snapshot;
-  #record;
+export class AccountRecordTransaction {
+  /** @type {ConditionalSnapshotStore} */ #store;
+  /** @type {string} */ #key;
+  /** @type {StoredSnapshot|null} */ #snapshot;
+  /** @type {AccountRecord|null} */ #record;
   #committed = false;
-  #onCommit;
+  /** @type {(revision: AccountRecordRevision) => void} */ #onCommit;
 
+  /**
+   * @param {ConditionalSnapshotStore} store
+   * @param {string} key
+   * @param {StoredSnapshot|null} snapshot
+   * @param {AccountRecord|null} record
+   * @param {(revision: AccountRecordRevision) => void} onCommit
+   */
   constructor(store, key, snapshot, record, onCommit) {
     this.#store = store;
     this.#key = key;
@@ -33,6 +54,7 @@ class AccountRecordTransaction {
     return this.#record;
   }
 
+  /** @param {AccountRecord} next @returns {Promise<AccountRecord>} */
   async commit(next) {
     if (this.#committed) throw new Error('account record transaction already committed');
     await validateAccountRecord(next);
@@ -70,15 +92,25 @@ class AccountRecordTransaction {
  * the encoded value; the snapshot version remains an opaque storage-only CAS token.
  */
 export class AccountRecordCoordinator {
-  #store;
-  #key;
-  #lockName;
-  #locks;
-  #storageManager;
-  #channel;
-  #revisionSubscribers = new Set();
+  /** @type {ConditionalSnapshotStore} */ #store;
+  /** @type {string} */ #key;
+  /** @type {string} */ #lockName;
+  /** @type {LockManagerLike|null} */ #locks;
+  /** @type {StorageManagerLike|null} */ #storageManager;
+  /** @type {BroadcastChannel|null} */ #channel = null;
+  /** @type {Set<(revision: AccountRecordRevision) => void>} */ #revisionSubscribers = new Set();
+  /** @type {Promise<void>} */
   #tail = Promise.resolve();
 
+  /**
+   * @param {ConditionalSnapshotStore} store
+   * @param {{
+   *   profile?: string,
+   *   locks?: LockManagerLike|null,
+   *   storageManager?: StorageManagerLike|null,
+   *   broadcastFactory?: BroadcastChannelFactory|null,
+   * }} [options]
+   */
   constructor(store, {
     profile = 'default',
     locks = globalThis.navigator?.locks ?? null,
@@ -108,6 +140,11 @@ export class AccountRecordCoordinator {
     return snapshot ? decodeAccountRecord(snapshot.bytes) : null;
   }
 
+  /**
+   * @template Result
+   * @param {(transaction: AccountRecordTransaction) => Result|PromiseLike<Result>} operation
+   * @returns {Promise<Awaited<Result>>}
+   */
   runExclusive(operation) {
     if (typeof operation !== 'function') throw new Error('account record operation must be a function');
     const run = () => this.#withCrossContextLock(async () => {
@@ -123,7 +160,7 @@ export class AccountRecordCoordinator {
     });
     const result = this.#tail.then(run, run);
     this.#tail = result.then(() => undefined, () => undefined);
-    return result;
+    return /** @type {Promise<Awaited<Result>>} */ (result);
   }
 
   async requestPersistentStorage() {
@@ -144,6 +181,7 @@ export class AccountRecordCoordinator {
     }
   }
 
+  /** @param {(revision: AccountRecordRevision) => void} callback */
   onRevision(callback) {
     if (typeof callback !== 'function') throw new Error('revision subscriber must be a function');
     this.#revisionSubscribers.add(callback);
@@ -156,13 +194,19 @@ export class AccountRecordCoordinator {
     this.#channel = null;
   }
 
+  /**
+   * @template Result
+   * @param {() => Result|PromiseLike<Result>} operation
+   * @returns {Promise<Result>}
+   */
   #withCrossContextLock(operation) {
     if (typeof this.#locks?.request === 'function') {
       return this.#locks.request(this.#lockName, { mode: 'exclusive' }, operation);
     }
-    return operation();
+    return Promise.resolve(operation());
   }
 
+  /** @param {AccountRecordRevision} revision */
   #publishRevision(revision) {
     try {
       this.#channel?.postMessage({ revision });
@@ -171,12 +215,15 @@ export class AccountRecordCoordinator {
     }
   }
 
+  /** @param {unknown} message */
   #receiveRevision(message) {
-    const revision = message?.revision;
-    if (!Number.isSafeInteger(revision) || revision <= 0) return;
+    const revision = message && typeof message === 'object' && 'revision' in message
+      ? message.revision
+      : null;
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision <= 0) return;
     for (const callback of this.#revisionSubscribers) {
       try {
-        callback(revision);
+        callback(/** @type {AccountRecordRevision} */ (revision));
       } catch {
         // A subscriber cannot break invalidation for the remaining contexts.
       }

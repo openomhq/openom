@@ -17,12 +17,31 @@
 // that governed a landed entry. Kept in its own IndexedDB database so it never entangles with the
 // snapshot/update store's versioning.
 
+/** @typedef {import('../types/domain.js').DocId} DocId */
+/** @typedef {import('../types/domain.js').KeyringBytes} KeyringBytes */
+/** @typedef {import('../types/domain.js').KeyringEngine} KeyringEngine */
+/** @typedef {import('../types/domain.js').KeyringRevision} KeyringRevision */
+/** @typedef {{ engine: KeyringEngine, bytes: KeyringBytes }} KeyringHead */
+/** @typedef {{ revision: KeyringRevision, bytes: KeyringBytes }} RetainedKeyring */
+/** @typedef {{
+ * saveHead: (treeKey: DocId, engine: KeyringEngine, bytes: KeyringBytes) => Promise<void>,
+ * loadHead: (treeKey: DocId) => Promise<KeyringHead|null>,
+ * load: (treeKey: DocId) => Promise<KeyringBytes|null>,
+ * save: (treeKey: DocId, revision: KeyringRevision, bytes: KeyringBytes) => Promise<void>,
+ * at: (treeKey: DocId, revision: KeyringRevision) => Promise<KeyringBytes|null>,
+ * head: (treeKey: DocId) => Promise<RetainedKeyring|null>,
+ * }} KeyringStore */
+
 const DB = 'openom-keyrings';
 const STORE = 'keyrings';
+/** @param {DocId} treeKey */
 const HEAD = (treeKey) => `${treeKey}::head`; // pointer record: the max retained revision (chain retention)
+/** @param {DocId} treeKey */
 const HEADREC = (treeKey) => `${treeKey}::headrec`; // the current head record: { engine, bytes }
+/** @param {DocId} treeKey @param {KeyringRevision} revision */
 const REV = (treeKey, revision) => `${treeKey}::r${revision}`;
 
+/** @returns {Promise<IDBDatabase>} */
 function openDb() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB, 1);
@@ -35,10 +54,12 @@ function openDb() {
   });
 }
 
+/** @param {IDBDatabase} db @param {IDBTransactionMode} mode @returns {IDBObjectStore} */
 function tx(db, mode) {
   return db.transaction(STORE, mode).objectStore(STORE);
 }
 
+/** @template Value @param {IDBObjectStore} store @param {IDBValidKey} key @returns {Promise<Value|undefined>} */
 function get(store, key) {
   return new Promise((res, rej) => {
     const r = store.get(key);
@@ -46,6 +67,7 @@ function get(store, key) {
     r.onerror = () => rej(r.error);
   });
 }
+/** @param {IDBObjectStore} store @param {unknown} value @param {IDBValidKey} key @returns {Promise<void>} */
 function put(store, value, key) {
   return new Promise((res, rej) => {
     const r = store.put(value, key);
@@ -56,73 +78,113 @@ function put(store, value, key) {
 
 /** The durable browser keyring store (IndexedDB), retaining every revision. */
 export function indexedDbKeyringStore() {
+  /** @type {Promise<IDBDatabase>|null} */
   let dbPromise = null;
   const db = () => (dbPromise ??= openDb());
   return {
+    /** @param {DocId} treeKey @param {KeyringEngine} engine @param {KeyringBytes} bytes */
     async saveHead(treeKey, engine, bytes) {
       await put(tx(await db(), 'readwrite'), { engine, bytes: Array.from(bytes) }, HEADREC(treeKey));
     },
+    /** @param {DocId} treeKey @returns {Promise<KeyringHead|null>} */
     async loadHead(treeKey) {
-      const rec = await get(tx(await db(), 'readonly'), HEADREC(treeKey));
-      return rec ? { engine: rec.engine, bytes: new Uint8Array(rec.bytes) } : null;
+      const rec = await get(/** @type {IDBObjectStore} */ (tx(await db(), 'readonly')), HEADREC(treeKey));
+      if (rec == null) return null;
+      if (typeof rec !== 'object' || rec === null) throw new TypeError('invalid keyring head record');
+      const value = /** @type {Record<string, unknown>} */ (rec);
+      if ((value.engine !== 'chain' && value.engine !== 'dag') || !isByteArray(value.bytes)) {
+        throw new TypeError('invalid keyring head record');
+      }
+      return { engine: value.engine, bytes: /** @type {KeyringBytes} */ (new Uint8Array(value.bytes)) };
     },
+    /** @param {DocId} treeKey @returns {Promise<KeyringBytes|null>} */
     async load(treeKey) {
       return (await this.loadHead(treeKey))?.bytes ?? null;
     },
+    /** @param {DocId} treeKey @param {KeyringRevision} revision @param {KeyringBytes} bytes */
     async save(treeKey, revision, bytes) {
       const store = tx(await db(), 'readwrite');
       await put(store, Array.from(bytes), REV(treeKey, revision));
-      const curHead = await get(store, HEAD(treeKey));
+      const curHead = await get(/** @type {IDBObjectStore} */ (store), HEAD(treeKey));
+      if (curHead != null && (typeof curHead !== 'number' || !Number.isSafeInteger(curHead) || curHead < 0)) {
+        throw new TypeError('invalid keyring revision pointer');
+      }
       if (curHead == null || revision > curHead) await put(store, revision, HEAD(treeKey));
     },
+    /** @param {DocId} treeKey @param {KeyringRevision} revision @returns {Promise<KeyringBytes|null>} */
     async at(treeKey, revision) {
       const row = await get(tx(await db(), 'readonly'), REV(treeKey, revision));
-      return row ? new Uint8Array(row) : null;
+      if (row == null) return null;
+      if (!isByteArray(row)) throw new TypeError('invalid retained keyring bytes');
+      return /** @type {KeyringBytes} */ (new Uint8Array(row));
     },
+    /** @param {DocId} treeKey @returns {Promise<RetainedKeyring|null>} */
     async head(treeKey) {
       const store = tx(await db(), 'readonly');
       const rev = await get(store, HEAD(treeKey));
       if (rev == null) return null;
-      const row = await get(store, REV(treeKey, rev));
-      return row ? { revision: rev, bytes: new Uint8Array(row) } : null;
+      if (typeof rev !== 'number' || !Number.isSafeInteger(rev) || rev < 0) throw new TypeError('invalid keyring revision pointer');
+      const revision = /** @type {KeyringRevision} */ (rev);
+      const row = await get(store, REV(treeKey, revision));
+      if (row == null) return null;
+      if (!isByteArray(row)) throw new TypeError('invalid retained keyring bytes');
+      return { revision, bytes: /** @type {KeyringBytes} */ (new Uint8Array(row)) };
     },
   };
 }
 
 /** In-memory keyring store (tests, or environments without IndexedDB), retaining every revision. */
 export function memoryKeyringStore() {
+  /** @type {Map<DocId, Map<KeyringRevision, KeyringBytes>>} */
   const trees = new Map(); // treeKey -> Map(revision -> bytes)   (chain retention)
+  /** @type {Map<DocId, KeyringHead>} */
   const heads = new Map(); // treeKey -> { engine, bytes }        (the unlock head record)
+  /** @param {DocId} k */
   const forTree = (k) => {
     let t = trees.get(k);
     if (!t) trees.set(k, (t = new Map()));
     return t;
   };
+  /** @param {DocId} treeKey @returns {RetainedKeyring|null} */
   const headOf = (treeKey) => {
     const t = trees.get(treeKey);
     if (!t || t.size === 0) return null;
     let max = -1;
     for (const r of t.keys()) if (r > max) max = r;
-    return { revision: max, bytes: t.get(max) };
+    const revision = /** @type {KeyringRevision} */ (max);
+    const bytes = t.get(revision);
+    return bytes ? { revision, bytes } : null;
   };
   return {
+    /** @param {DocId} treeKey @param {KeyringEngine} engine @param {KeyringBytes} bytes */
     async saveHead(treeKey, engine, bytes) {
       heads.set(treeKey, { engine, bytes });
     },
+    /** @param {DocId} treeKey @returns {Promise<KeyringHead|null>} */
     async loadHead(treeKey) {
       return heads.get(treeKey) ?? null;
     },
+    /** @param {DocId} treeKey @returns {Promise<KeyringBytes|null>} */
     async load(treeKey) {
       return heads.get(treeKey)?.bytes ?? null;
     },
+    /** @param {DocId} treeKey @param {KeyringRevision} revision @param {KeyringBytes} bytes */
     async save(treeKey, revision, bytes) {
       forTree(treeKey).set(revision, bytes);
     },
+    /** @param {DocId} treeKey @param {KeyringRevision} revision @returns {Promise<KeyringBytes|null>} */
     async at(treeKey, revision) {
       return trees.get(treeKey)?.get(revision) ?? null;
     },
+    /** @param {DocId} treeKey @returns {Promise<RetainedKeyring|null>} */
     async head(treeKey) {
       return headOf(treeKey);
     },
   };
+}
+
+/** @param {unknown} value @returns {value is number[]} */
+function isByteArray(value) {
+  return Array.isArray(value) && value.every((byte) => typeof byte === 'number' &&
+    Number.isInteger(byte) && byte >= 0 && byte <= 255);
 }

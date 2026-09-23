@@ -74,11 +74,63 @@ import { mint as mintInvite, verifyClaim as verifyInviteClaim, signerIds, signer
 import { pushMembershipSummary } from './membershipSummary.js';
 import { MembershipAsserts } from './membershipAsserts.js';
 
+/** @typedef {import('./types/domain.js').AccountGeneration} AccountGeneration */
+/** @typedef {import('./types/domain.js').AppSecretPlaintextBytes} AppSecretPlaintextBytes */
+/** @typedef {import('./types/domain.js').DocId} DocId */
+/** @typedef {import('./types/domain.js').DagAnchorPinBytes} DagAnchorPinBytes */
+/** @typedef {import('./types/domain.js').InviteId} InviteId */
+/** @typedef {import('./types/domain.js').InviteMacBytes} InviteMacBytes */
+/** @typedef {import('./types/domain.js').InvitePinBytes} InvitePinBytes */
+/** @typedef {import('./types/domain.js').HistoryDeltaEnvelopeBytes} HistoryDeltaEnvelopeBytes */
+/** @typedef {import('./types/domain.js').KeyringBytes} KeyringBytes */
+/** @typedef {import('./types/domain.js').KeyringEngine} KeyringEngine */
+/** @typedef {import('./types/domain.js').KeyringHashBytes} KeyringHashBytes */
+/** @typedef {import('./types/domain.js').KeyringRevision} KeyringRevision */
+/** @typedef {import('./types/domain.js').KeyringWatermarkBytes} KeyringWatermarkBytes */
+/** @typedef {import('./types/domain.js').MemberId} MemberId */
+/** @typedef {import('./types/domain.js').MemberRole} MemberRole */
+/** @typedef {import('./types/domain.js').Passphrase} Passphrase */
+/** @typedef {import('./types/domain.js').RemoteTreeKey} RemoteTreeKey */
+/** @typedef {import('./types/domain.js').RecoveryCode} RecoveryCode */
+/** @typedef {import('./types/domain.js').ReplicaCounter} ReplicaCounter */
+/** @typedef {import('./types/domain.js').ReplicaId} ReplicaId */
+/** @typedef {import('./types/domain.js').TreeId} TreeId */
+/** @typedef {import('./types/domain.js').TreeObjectBytes} TreeObjectBytes */
+/** @typedef {import('./types/domain.js').TreeObjectKey} TreeObjectKey */
+/** @typedef {import('./types/domain.js').TreeUuid} TreeUuid */
+/** @typedef {import('./types/domain.js').TrustedSignersBytes} TrustedSignersBytes */
+/** @typedef {import('./types/contracts.js').AccountRecord} AccountRecord */
+/** @typedef {import('./types/contracts.js').AccountVersion} AccountVersion */
+/** @typedef {import('./types/appCoreApi.js').AccountCandidateCredential} AccountCandidateCredential */
+/** @typedef {import('./types/appCoreApi.js').AppCoreTransport} AppCoreTransport */
+/** @typedef {import('./types/appCoreApi.js').MembershipSummaryMember} MembershipSummaryMember */
+/** @typedef {import('./types/appCoreApi.js').StoragePersistence} StoragePersistence */
+/** @typedef {import('./types/wasm.js').AccountHandle} AccountHandle */
+/** @typedef {import('./types/wasm.js').AccountOpenResult} AccountOpenResult */
+/** @typedef {import('./types/wasm.js').AccountSnapshot} WasmAccountSnapshot */
+/** @typedef {import('./types/wasm.js').AppCoreHandle} AppCoreHandle */
+/** @typedef {import('./types/wasm.js').OpenResult} OpenResult */
+/** @typedef {import('./types/sharing.js').KeyringStore} KeyringStore */
+/** @typedef {import('./types/sharing.js').KeyringTransport} KeyringTransport */
+/** @typedef {{
+ *   inviteId: InviteId,
+ *   uuid: TreeUuid,
+ *   role: MemberRole,
+ *   engine: KeyringEngine,
+ *   sMacClaim: Uint8Array,
+ *   expiry: number,
+ *   recipientPin: string|null,
+ *   signerIds: MemberId[],
+ * }} WorkerMintRecord */
+/** @typedef {{ view: ReadonlyArray<MembershipSummaryMember>, basis: ReadonlyArray<string> }} MembershipSummary */
+
+/** @type {Promise<unknown>|null} */
 let ready = null;
 const ensureInit = () => (ready ??= initAppCore());
 
 // The keyring engine this build provisions with. Runtime-selectable later (Tauri seam); the web app is
 // chain today.
+/** @type {KeyringEngine} */
 const KEYRING_ENGINE = 'chain';
 
 // Compaction cadence (OPE-409): the data channel compacts once this many log objects have accrued since the
@@ -88,35 +140,42 @@ let compactK = 64;
 
 // Durable keyring store (IndexedDB; works in a Worker) — persists the genesis keyring on provision so a
 // later unlock can load it. The fuller keyring-sync/reconcile is OPE-382.
+/** @type {KeyringStore|null} */
 let keyring = null;
 const keyringStore = () => (keyring ??= indexedDbKeyringStore());
 
 // A FRESH replica id per open (invariant that keeps a device's own server history recoverable after a
 // lost local store — see review finding C9). 16 random bytes.
+/** @returns {ReplicaId} */
 function freshReplica() {
   const r = new Uint8Array(16);
   crypto.getRandomValues(r);
-  return r;
+  return /** @type {ReplicaId} */ (r);
 }
 
 // The engine-opaque anti-rollback watermark, persisted per doc (recover / change-passphrase pass it back
 // as the `floor`). Stored in the IndexedDbStore snapshot slot under a meta key — no localStorage in a
 // Worker. Overwrite-with-CAS on the current version.
+/** @param {DocId} docId */
 const WM_KEY = (docId) => `${docId}::watermark`;
+/** @param {DocId} docId @param {KeyringWatermarkBytes} wm */
 async function saveWatermark(docId, wm) {
   const prev = await store().readSnapshot(WM_KEY(docId));
   await store().putSnapshot(WM_KEY(docId), wm, prev?.version ?? null);
 }
+/** @param {DocId} docId @returns {Promise<KeyringWatermarkBytes>} */
 async function loadWatermark(docId) {
   const s = await store().readSnapshot(WM_KEY(docId));
-  return s ? s.bytes : new Uint8Array(0);
+  return /** @type {KeyringWatermarkBytes} */ (s ? s.bytes : new Uint8Array(0));
 }
 
 // One account record per browser profile. Tree keyrings, watermarks, and logs remain per document. The
 // complete identity-scoped custody/sync record is committed under one portable revision while IndexedDB's
 // snapshot version remains an opaque CAS token.
 const accountProfile = new URL(globalThis.location?.href ?? 'http://localhost/').searchParams.get('accountProfile') ?? 'default';
+/** @type {AccountRecordCoordinator|null} */
 let accountRecords = null;
+/** @returns {AccountRecordCoordinator} */
 function accountRecordStore() {
   if (accountRecords) return accountRecords;
   const records = new AccountRecordCoordinator(store(), {
@@ -134,15 +193,19 @@ function accountRecordStore() {
 // an offline provision that later RESTARTS before it ever synced still mints the tree on its first online
 // tick, rather than 404ing forever. A JOINing member never sets it: it adopts a tree the owner created.
 // Stored in the same per-doc meta slot as the watermark (no localStorage in a Worker); `[1]` = pending.
+/** @param {DocId} docId */
 const NEEDS_TREE_KEY = (docId) => `${docId}::needs-create-tree`;
+/** @param {DocId} docId */
 async function markNeedsCreateTree(docId) {
   const prev = await store().readSnapshot(NEEDS_TREE_KEY(docId));
   await store().putSnapshot(NEEDS_TREE_KEY(docId), new Uint8Array([1]), prev?.version ?? null);
 }
+/** @param {DocId} docId */
 async function needsCreateTree(docId) {
   const s = await store().readSnapshot(NEEDS_TREE_KEY(docId));
   return !!s && s.bytes[0] === 1;
 }
+/** @param {DocId} docId */
 async function clearNeedsCreateTree(docId) {
   try {
     const prev = await store().readSnapshot(NEEDS_TREE_KEY(docId));
@@ -158,30 +221,62 @@ async function clearNeedsCreateTree(docId) {
 // The durable mirror: a dumb async blob store (IndexedDB on web — also works in the Tauri webview).
 // The Rust core owns ALL persistence logic; this just executes the append/readUpdates verbs it dictates
 // over already-sealed bytes. Lazily created; shared across cores in this worker (keyed by docId inside).
+/** @type {IndexedDbStore|null} */
 let idb = null;
+/** @returns {IndexedDbStore} */
 const store = () => (idb ??= new IndexedDbStore());
 
 /** docId -> Core. Two replicas of the SAME tree run in SEPARATE workers (same docId, distinct core). */
+/** @type {Map<DocId, Core>} */
 const cores = new Map();
 
 /** The profile's one unlocked account. Every owned and joined tree borrows this wasm handle. */
+/** @type {AccountHandle|null} */
 let account = null;
 /** Exact persisted blob version from which the resident account was opened. */
+/** @type {AccountVersion|null} */
 let accountSourceVersion = null;
 let accountRefresh = Promise.resolve();
 
 /** docId -> network transport. Keyed here (not on the Core) so a member JOIN can fetch the keyring history
  * BEFORE its core exists. Set by `attachTransport`, read by the sync tick + join. */
+/** @type {Map<DocId, AppCoreTransport>} */
 const transports = new Map();
+/** @param {DocId} docId @returns {AppCoreTransport|null} */
 const transportFor = (docId) => transports.get(docId) ?? null;
+
+/** @param {DocId} docId @returns {KeyringTransport|null} */
+function keyringTransportFor(docId) {
+  const transport = transportFor(docId);
+  if (!transport) return null;
+  return {
+    readKeyring: (_localDocId, from) => transport.readKeyring(treeUuid(docId), from),
+    putKeyring: (_localDocId, update) => transport.putKeyring(treeUuid(docId), update),
+  };
+}
 
 // The shared REMOTE keyspace is per-TREE (every device of one tree meets there), while the core's LOCAL
 // keyspace + the durable store are per-DEVICE (`docId`, so two devices in one page/origin stay isolated). The
 // worker maps between them at the transport boundary — the only place it touches a key, and only its leading
 // doc segment (never the internal `log/{replica}/{counter}` structure the core owns).
-const treeKeyOf = (treeId) => [...new Uint8Array(treeId)].map((b) => b.toString(16).padStart(2, '0')).join('');
+/** @param {TreeId} treeId @returns {RemoteTreeKey} */
+const treeKeyOf = (treeId) => /** @type {RemoteTreeKey} */ (
+  [...treeId].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+);
+
+/** @param {DocId} docId @returns {TreeUuid} */
+const treeUuid = (docId) => /** @type {TreeUuid} */ (/** @type {unknown} */ (docId));
+/** @param {number} revision @returns {KeyringRevision} */
+const keyringRevision = (revision) => /** @type {KeyringRevision} */ (revision);
+/** @param {string} key @returns {TreeObjectKey} */
+const treeObjectKey = (key) => /** @type {TreeObjectKey} */ (key);
+/** @param {Uint8Array} bytes @returns {TreeObjectBytes} */
+const treeObjectBytes = (bytes) => /** @type {TreeObjectBytes} */ (bytes);
+/** @param {Uint8Array} pin @returns {InvitePinBytes} */
+const invitePin = (pin) => /** @type {InvitePinBytes} */ (/** @type {unknown} */ (pin));
 
 class Core {
+  /** @param {AppCoreHandle} handle @param {DocId} docId @param {boolean} persist @param {TreeId|null} [treeId] @param {KeyringEngine|null} [engine] */
   constructor(handle, docId, persist, treeId = null, engine = null) {
     this.handle = handle;
     this.docId = docId;
@@ -196,15 +291,20 @@ class Core {
     this.dirty = false; // an edit/commit arrived mid-tick — re-run before returning
     this.aborted = false;
     this.treeEnsured = false; // OPE-407: skip the durable needs-create-tree check once satisfied this session
+    /** @type {string|null} */
     this.reportedFrontier = null; // OPE-409 gate 2: the last pull frontier reported to the server (change-guard)
   }
 }
 
 // Load the durably-persisted objects into a fresh handle's local store, then let the engine rebuild from it.
 // `import` picks each object's write precondition (immutable vs pointer), so replaying is idempotent.
+/** @param {Core} core */
 async function hydrate(core) {
   if (core.persist) {
-    const objects = await store().readBlobs(core.docId);
+    const objects = (await store().readBlobs(core.docId)).map(({ key, bytes }) => ({
+      key: treeObjectKey(key),
+      bytes: treeObjectBytes(bytes),
+    }));
     if (objects.length) core.handle.import(objects);
   }
   core.handle.bootstrap(); // fold the local store into the engine (a no-op on an empty store)
@@ -213,6 +313,7 @@ async function hydrate(core) {
 // Mirror the core's whole local store to durable storage. `export()` is idempotent to re-persist (immutable
 // log objects are content-stable; pointer objects overwrite), so we simply write the current object set.
 // Serialized on the core's persistLock so a commit and a running tick can't interleave their writes.
+/** @param {Core} core */
 function persistBlobs(core) {
   if (!core.persist) return Promise.resolve();
   core.persistLock = core.persistLock.then(async () => {
@@ -225,6 +326,7 @@ function persistBlobs(core) {
   return core.persistLock;
 }
 
+/** @param {DocId} docId @returns {Core} */
 function core(docId) {
   const c = cores.get(docId);
   if (!c) throw new Error(`no app-core for doc ${docId}`);
@@ -238,45 +340,132 @@ function core(docId) {
 // The whole serialized record is DEK-SEALED at rest under the tree DEK (OPE-453, sealAppSecret) — `s_mac_claim`
 // is a secret (it forges that invite's claim MAC), so the ciphertext, not the plaintext, lands in IndexedDB.
 // NEVER sent to the server; the joiner never holds a mint record.
+/** @param {InviteId} inviteId */
 const MINT_KEY = (inviteId) => `invite-mint::${inviteId}`;
-const encJson = (o) => new TextEncoder().encode(JSON.stringify(o));
-const decJson = (u8) => JSON.parse(new TextDecoder().decode(u8));
+/** @param {unknown} value @returns {AppSecretPlaintextBytes} */
+const encJson = (value) => /** @type {AppSecretPlaintextBytes} */ (
+  new TextEncoder().encode(JSON.stringify(value))
+);
+/** @param {AppSecretPlaintextBytes} bytes @returns {unknown} */
+const decJson = (bytes) => /** @type {unknown} */ (JSON.parse(new TextDecoder().decode(bytes)));
 
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** @param {unknown} value @returns {Uint8Array} */
+function decodedBytes(value) {
+  if (
+    !Array.isArray(value)
+    || !value.every((item) => typeof item === 'number' && Number.isInteger(item) && item >= 0 && item <= 255)
+  ) {
+    throw new Error('stored invite mint record has malformed bytes');
+  }
+  return Uint8Array.from(value);
+}
+
+/** @param {unknown} value @returns {WorkerMintRecord} */
+function parseMintRecord(value) {
+  if (!isRecord(value)) throw new Error('stored invite mint record is malformed');
+  const role = value.role;
+  const engine = value.engine;
+  if (
+    typeof value.inviteId !== 'string'
+    || typeof value.uuid !== 'string'
+    || (role !== 'owner' && role !== 'co-owner' && role !== 'maintainer' && role !== 'editor' && role !== 'viewer')
+    || (engine !== 'chain' && engine !== 'dag')
+    || !Number.isSafeInteger(value.expiry)
+    || (value.recipientPin !== null && typeof value.recipientPin !== 'string')
+    || !Array.isArray(value.signerIds)
+    || !value.signerIds.every((memberId) => typeof memberId === 'string')
+  ) {
+    throw new Error('stored invite mint record is malformed');
+  }
+  return {
+    inviteId: /** @type {InviteId} */ (value.inviteId),
+    uuid: /** @type {TreeUuid} */ (value.uuid),
+    role,
+    engine,
+    sMacClaim: decodedBytes(value.sMacClaim),
+    expiry: Number(value.expiry),
+    recipientPin: value.recipientPin,
+    signerIds: /** @type {MemberId[]} */ (value.signerIds),
+  };
+}
+
+/** @param {string} raw @returns {MembershipSummary} */
+function parseMembershipSummary(raw) {
+  const value = /** @type {unknown} */ (JSON.parse(raw));
+  if (!isRecord(value) || !Array.isArray(value.members) || !Array.isArray(value.basis)) {
+    throw new Error('membership summary is malformed');
+  }
+  const members = value.members.map((member) => {
+    if (!isRecord(member) || typeof member.memberId !== 'string' || !Number.isSafeInteger(member.role)) {
+      throw new Error('membership summary is malformed');
+    }
+    return { memberId: /** @type {MemberId} */ (member.memberId), role: Number(member.role) };
+  });
+  if (!value.basis.every((entry) => typeof entry === 'string')) {
+    throw new Error('membership summary is malformed');
+  }
+  return { view: members, basis: /** @type {string[]} */ (value.basis) };
+}
+
+/** @param {string} raw @returns {Readonly<Record<string, number>>} */
+function parseFrontier(raw) {
+  const value = /** @type {unknown} */ (JSON.parse(raw));
+  if (!isRecord(value) || !Object.values(value).every((counter) => (
+    typeof counter === 'number' && Number.isSafeInteger(counter) && counter >= 0
+  ))) {
+    throw new Error('pull frontier is malformed');
+  }
+  return /** @type {Readonly<Record<string, number>>} */ (value);
+}
+
+/** @param {AppCoreHandle} handle @param {WorkerMintRecord} rec */
 async function saveMintRecord(handle, rec) {
   const wire = { ...rec, sMacClaim: Array.from(rec.sMacClaim) }; // Uint8Array → array for JSON
   const sealed = handle.sealAppSecret(encJson(wire)); // OPE-453: seal the record bytes under the tree DEK
   const prev = await store().readSnapshot(MINT_KEY(rec.inviteId));
   await store().putSnapshot(MINT_KEY(rec.inviteId), sealed, prev?.version ?? null);
 }
+/** @param {AppCoreHandle} handle @param {InviteId} inviteId @returns {Promise<WorkerMintRecord|null>} */
 async function loadMintRecord(handle, inviteId) {
   const s = await store().readSnapshot(MINT_KEY(inviteId));
   if (!s) return null;
-  const r = decJson(handle.openAppSecret(s.bytes)); // OPE-453: unseal under the tree DEK
-  return { ...r, sMacClaim: Uint8Array.from(r.sMacClaim) };
+  return parseMintRecord(decJson(handle.openAppSecret(
+    /** @type {import('./types/domain.js').AppSecretEnvelopeBytes} */ (s.bytes),
+  ))); // OPE-453: unseal under the tree DEK
 }
+/** @param {InviteId} inviteId */
 async function deleteMintRecord(inviteId) {
   try { await store().delete(MINT_KEY(inviteId)); } catch { /* already gone — idempotent */ }
 }
 
 // Pack a chain invite pin: rev(u32 BE) ‖ kh(32) = 36 opaque bytes the joiner's verify_keyring_walk checks (fp is
 // NOT in the pin — kh over the full keyring body is strictly stronger, and the admit gate keeps fp locally).
+/** @param {KeyringRevision} revision @param {KeyringHashBytes} khBytes @returns {InvitePinBytes} */
 function packChainPin(revision, khBytes) {
   const out = new Uint8Array(4 + khBytes.length);
   new DataView(out.buffer).setUint32(0, revision >>> 0, false);
   out.set(khBytes, 4);
-  return out;
+  return /** @type {InvitePinBytes} */ (out);
 }
 
 // Gather a chain tree's retained per-revision keyrings as `[revision, Uint8Array][]` for the §B3 resolver.
 // The dag resolves membership from its single anchor, so it retains nothing (returns []).
+/** @param {DocId} docId @param {KeyringEngine} engine @returns {Promise<Array<[KeyringRevision, KeyringBytes]>>} */
 async function retainedKeyrings(docId, engine) {
   if (engine !== 'chain') return [];
   const head = await keyringStore().head(docId);
   if (!head) return [];
+  /** @type {Array<[KeyringRevision, KeyringBytes]>} */
   const pairs = [];
   for (let r = 1; r <= head.revision; r += 1) {
-    const bytes = await keyringStore().at(docId, r);
-    if (bytes) pairs.push([r, bytes]);
+    const revision = keyringRevision(r);
+    const bytes = await keyringStore().at(docId, revision);
+    if (bytes) pairs.push([revision, bytes]);
   }
   return pairs;
 }
@@ -285,6 +474,7 @@ async function retainedKeyrings(docId, engine) {
 // retained revisions) and feed the current moderators to the claim fold. A solo/never-shared tree needs
 // neither (only the DEK holder can write), so this is a no-op there. Called on unlock and after each keyring
 // change, so ingest verifies peer entries against the current membership.
+/** @param {Core} core @param {DocId} docId @param {KeyringEngine} engine @param {KeyringBytes} head */
 async function installMembership(core, docId, engine, head) {
   if (!head || !wasmHasBeenShared(engine, head)) return;
   core.handle.setMembership(engine, head, await retainedKeyrings(docId, engine));
@@ -295,11 +485,13 @@ async function installMembership(core, docId, engine, head) {
 // Publish this device's current membership so peers can fetch + verify it (owner action, after an add/remove).
 // Chain PUTs the missing revision tail; the dag PUTs the full self-contained anchor as the next slot. A no-op
 // with no transport attached — the local state stands and publishes on the next call.
+/** @param {DocId} docId @param {KeyringEngine} engine @param {TreeId} treeId */
 async function publishMembership(docId, engine, treeId) {
-  if (!transportFor(docId)) return;
+  const transport = keyringTransportFor(docId);
+  if (!transport) return;
   if (engine === 'chain') {
     await publishKeyring(
-      { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
+      { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport, keyringStore: keyringStore() },
       { docId },
     );
   } else if (engine === 'dag') {
@@ -309,7 +501,7 @@ async function publishMembership(docId, engine, treeId) {
           wrapDagKeyringUpdate: wasmWrapDagKeyringUpdate,
           unwrapDagKeyring: wasmUnwrapDagKeyring,
         },
-        transport: transportFor(docId),
+        transport,
         keyringStore: keyringStore(),
       },
       { docId, treeId },
@@ -320,22 +512,27 @@ async function publishMembership(docId, engine, treeId) {
 // Adopt any newer keyring/membership before a data pull (keyring-before-data), refreshing the resolver +
 // moderators. A no-op unless the tree is shared and has a treeId. Chain walks the per-revision successors; the
 // dag adopts the latest self-contained anchor against its pin + the persisted anti-rollback floor.
+/** @param {Core} c */
 async function syncKeyringForTick(c) {
   if (!c.shared || !c.treeId || c.aborted) return;
+  const transport = keyringTransportFor(c.docId);
+  if (!transport) return;
   if (c.engine === 'chain') {
     const r = await syncKeyringImpl(
-      { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport: transportFor(c.docId), keyringStore: keyringStore() },
+      { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport, keyringStore: keyringStore() },
       { docId: c.docId, treeId: c.treeId },
     );
-    if (r.changed) await refreshMembershipAndEpochs(c, 'chain', (await keyringStore().loadHead(c.docId)).bytes);
+    const head = r.changed ? await keyringStore().loadHead(c.docId) : null;
+    if (head) await refreshMembershipAndEpochs(c, 'chain', head.bytes);
   } else if (c.engine === 'dag') {
     const r = await syncDagAnchor(
-      { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, dagAnchorPin: wasmDagAnchorPin, acceptRemoteDagAnchor: wasmAcceptRemoteDagAnchor }, transport: transportFor(c.docId), keyringStore: keyringStore() },
+      { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, dagAnchorPin: wasmDagAnchorPin, acceptRemoteDagAnchor: wasmAcceptRemoteDagAnchor }, transport, keyringStore: keyringStore() },
       { docId: c.docId, treeId: c.treeId, floor: await loadWatermark(c.docId) },
     );
-    if (r.changed) {
+    if (r.changed && r.watermark) {
       await saveWatermark(c.docId, r.watermark);
-      await refreshMembershipAndEpochs(c, 'dag', (await keyringStore().loadHead(c.docId)).bytes);
+      const head = await keyringStore().loadHead(c.docId);
+      if (head) await refreshMembershipAndEpochs(c, 'dag', head.bytes);
     }
   }
 }
@@ -344,6 +541,7 @@ async function syncKeyringForTick(c) {
 // the write epoch (a removal) — splice the new epoch DEK into the running sealer so the member can decrypt
 // post-rotation content (incl. the self-heal cover). adoptEpochs is a no-op on an owner core (no retained
 // member secret) and idempotent when no epoch is new, so it is safe to call after any membership change.
+/** @param {Core} c @param {KeyringEngine} engine @param {KeyringBytes} head */
 async function refreshMembershipAndEpochs(c, engine, head) {
   await installMembership(c, c.docId, engine, head);
   c.handle.adoptEpochs(head);
@@ -366,8 +564,16 @@ async function refreshMembershipAndEpochs(c, engine, head) {
 // per tree — tiny). A write-through in-memory cache keeps `MembershipAsserts`' synchronous get/set interface
 // while persisting durably in a Worker (no localStorage here). Hydrated once, lazily.
 const MA_SLOT = 'membership-asserts';
+/** @typedef {{
+ *   ensureHydrated: () => Promise<void>,
+ *   getItem: (key: string) => string|null,
+ *   setItem: (key: string, value: string) => void,
+ * }} DurableAssertStore */
+/** @returns {DurableAssertStore} */
 function makeDurableAssertStore() {
+  /** @type {Map<string, string>} */
   const cache = new Map();
+  /** @type {Promise<void>|null} */
   let hydrated = null; // a once-promise
   let writing = Promise.resolve(); // serialize slot writes so their CAS never races itself
   return {
@@ -376,17 +582,21 @@ function makeDurableAssertStore() {
         try {
           const s = await store().readSnapshot(MA_SLOT);
           if (s?.bytes?.length) {
-            const obj = JSON.parse(new TextDecoder().decode(s.bytes));
-            for (const [k, v] of Object.entries(obj)) cache.set(k, v);
+            const value = /** @type {unknown} */ (JSON.parse(new TextDecoder().decode(s.bytes)));
+            if (isRecord(value)) {
+              for (const [key, item] of Object.entries(value)) {
+                if (typeof item === 'string') cache.set(key, item);
+              }
+            }
           }
         } catch {
           /* fresh / unreadable → start empty; the keyring recompute still self-heals */
         }
       })());
     },
-    getItem: (k) => (cache.has(k) ? cache.get(k) : null),
-    setItem: (k, v) => {
-      cache.set(k, v);
+    getItem: (key) => cache.get(key) ?? null,
+    setItem: (key, value) => {
+      cache.set(key, value);
       writing = writing.then(async () => {
         try {
           const prev = await store().readSnapshot(MA_SLOT);
@@ -405,14 +615,14 @@ const membershipAsserts = new MembershipAsserts(assertStore);
 // Assert this device's current resolved membership to the server's /access (managed-only). `docId` IS the
 // tree UUID string the access channel keys on. Best-effort + NEVER throws — the durable intent stays marked
 // for a later flush if the network (or a 404 before the tree row exists, a 403 for a non-signer) fails.
+/** @param {DocId} docId @param {KeyringEngine} engine */
 async function pushMembership(docId, engine) {
   try {
     await assertStore.ensureHydrated();
     const head = await keyringStore().loadHead(docId);
     if (!head) return;
     const eng = head.engine || engine;
-    const s = JSON.parse(wasmKeyringSummary(eng, head.bytes));
-    const current = { view: s.members, basis: s.basis };
+    const current = parseMembershipSummary(wasmKeyringSummary(eng, head.bytes));
     if (membershipAsserts.isConfirmed(docId, current)) return; // steady state: the server already has it
     // Record the intent DURABLY before any network — BEFORE the transport check too, so an OFFLINE signer
     // action still leaves a `desired` for the tick flush to push once a transport attaches. Only a signer's
@@ -420,15 +630,15 @@ async function pushMembership(docId, engine) {
     membershipAsserts.mark(docId, current);
     const transport = transportFor(docId);
     if (!transport) return; // managed-only + offline: nothing to push now; the tick flush retries
-    const pushed = await pushMembershipSummary(transport, docId, current, {
-      coversBasis: (storedBasis) => wasmKeyringCovers(eng, head.bytes, storedBasis),
+    const pushed = await pushMembershipSummary(transport, treeUuid(docId), current, {
+      coversBasis: (storedBasis) => wasmKeyringCovers(eng, head.bytes, [...storedBasis]),
       refresh: async () => {
         // We're behind the server's basis: pull the newer keyring, then recompute from the fresh head.
         const c = cores.get(docId);
         if (c) await syncKeyringForTick(c);
         const h = await keyringStore().loadHead(docId);
-        const s2 = JSON.parse(wasmKeyringSummary(h.engine || eng, h.bytes));
-        return { view: s2.members, basis: s2.basis };
+        if (!h) throw new Error('membership keyring disappeared during refresh');
+        return parseMembershipSummary(wasmKeyringSummary(h.engine || eng, h.bytes));
       },
     });
     if (pushed) membershipAsserts.confirm(docId, current); // server acked (changed or unchanged) → de-dup
@@ -441,8 +651,10 @@ async function pushMembership(docId, engine) {
 // keyring write and the server ack). Gated on a recorded `desired` — which ONLY a signer's own change writes
 // — so a plain member's tick never attempts a push it isn't authorized for (the server gates /access to
 // signers). Cheap: a no-op in the steady state.
+/** @param {Core|null|undefined} c */
 async function flushPendingMembership(c) {
   if (!c || !transportFor(c.docId)) return;
+  if (!c.engine) return;
   await assertStore.ensureHydrated();
   if (membershipAsserts.desired(c.docId) == null) return; // this device never asserted → not a signer here
   await pushMembership(c.docId, c.engine);
@@ -453,18 +665,24 @@ async function flushPendingMembership(c) {
 // STRUCTURED { code, message } — the typed Rust VaultError mapped to a registry code (OPE-420) — so we read
 // the code directly (wrong_passphrase / revision_rollback / recovery_code_invalid / keyring_verify_failed /
 // decrypt_failed), no fragile message-matching. The message is kept only as dev-log `cause`, never surfaced.
-function vaultError(e) {
-  if (e && typeof e === 'object' && typeof e.code === 'string') {
-    return makeError(e.code, { cause: e.message });
+/** @param {unknown} error */
+function vaultError(error) {
+  if (isRecord(error) && typeof error.code === 'string') {
+    return makeError(error.code, { cause: error.message });
   }
-  return normalizeUnknown(e);
+  return normalizeUnknown(error);
 }
 
 // Map an IndexedDB/OPFS failure (a DOMException from the durable store) to a storage AppError, so a full or
 // blocked local store surfaces meaningfully instead of as a generic internal error (C4 storage adapter).
-function storageError(e) {
-  if (e?.name === 'QuotaExceededError') return makeError('storage_quota', { cause: e.name });
-  return makeError('storage_blocked', { cause: String(e?.message ?? e) });
+/** @param {unknown} error */
+function storageError(error) {
+  if (isRecord(error) && error.name === 'QuotaExceededError') {
+    return makeError('storage_quota', { cause: error.name });
+  }
+  return makeError('storage_blocked', {
+    cause: isRecord(error) && typeof error.message === 'string' ? error.message : String(error),
+  });
 }
 
 function dropAccountHandle() {
@@ -475,6 +693,21 @@ function dropAccountHandle() {
   accountSourceVersion = null;
 }
 
+/** @param {AccountOpenResult} result @returns {AccountHandle} */
+function takeAccountHandle(result) {
+  const handle = result.takeHandle();
+  if (!handle) throw new Error('account result no longer owns its handle');
+  return handle;
+}
+
+/** @param {OpenResult} result @returns {AppCoreHandle} */
+function takeCoreHandle(result) {
+  const handle = result.takeHandle();
+  if (!handle) throw new Error('tree result no longer owns its handle');
+  return handle;
+}
+
+/** @param {AccountHandle} next @param {AccountVersion} sourceVersion */
 function replaceAccount(next, sourceVersion) {
   if (account && account !== next) {
     dropAccountHandle();
@@ -483,6 +716,7 @@ function replaceAccount(next, sourceVersion) {
   accountSourceVersion = sourceVersion;
 }
 
+/** @param {DocId} docId */
 async function closeCore(docId) {
   const c = cores.get(docId);
   if (!c) return;
@@ -502,6 +736,7 @@ async function closeCore(docId) {
   if (cores.size === 0) dropAccountHandle();
 }
 
+/** @param {AccountRecord|null} record */
 async function dropStaleResidentAccount(record) {
   if (!account) return false;
   if (record && accountSourceVersion && sameAccountVersion(accountSourceVersion, record.identity.version)) {
@@ -516,12 +751,19 @@ function scheduleAccountRecordRefresh() {
   const records = accountRecords;
   if (!records) return;
   accountRefresh = accountRefresh
-    .then(() => records.runExclusive((tx) => dropStaleResidentAccount(tx.record())))
+    .then(async () => {
+      await records.runExclusive((tx) => dropStaleResidentAccount(tx.record()));
+    })
     .catch((error) => {
       console.warn('[openom] account record refresh failed', error);
     });
 }
 
+/**
+ * @template Result
+ * @param {(transaction: import('./accountRecordStore.js').AccountRecordTransaction) => Result|PromiseLike<Result>} operation
+ * @returns {Promise<Awaited<Result>>}
+ */
 function runAccountOperation(operation) {
   return accountRecordStore().runExclusive(async (tx) => {
     await dropStaleResidentAccount(tx.record());
@@ -529,6 +771,7 @@ function runAccountOperation(operation) {
   });
 }
 
+/** @param {Passphrase} passphrase @param {boolean} [createIfMissing] */
 async function ensureAccount(passphrase, createIfMissing = false) {
   return runAccountOperation(async (tx) => {
     if (account) return { created: false, recoveryCode: '' };
@@ -555,7 +798,7 @@ async function ensureAccount(passphrase, createIfMissing = false) {
     let handle;
     try {
       created = wasmAccountCreate(passphrase);
-      handle = created.takeHandle();
+      handle = takeAccountHandle(created);
       const identity = publicAccountIdentityFor(handle);
       const record = await createAccountRecord(accountSnapshotInput(created, identity.memberId));
       const committed = await tx.commit(record);
@@ -572,11 +815,13 @@ async function ensureAccount(passphrase, createIfMissing = false) {
   });
 }
 
+/** @returns {AccountHandle} */
 function requireAccount() {
   if (!account) throw new Error('account is locked');
   return account;
 }
 
+/** @param {AccountHandle} handle @returns {import('./types/contracts.js').AccountPublicIdentity} */
 function publicAccountIdentityFor(handle) {
   const identity = wasmAccountPublicIdentity(handle);
   try {
@@ -594,6 +839,7 @@ function publicAccountIdentity() {
   return publicAccountIdentityFor(requireAccount());
 }
 
+/** @param {WasmAccountSnapshot|AccountOpenResult} snapshot @param {MemberId} memberId */
 function accountSnapshotInput(snapshot, memberId) {
   return {
     memberId,
@@ -603,6 +849,13 @@ function accountSnapshotInput(snapshot, memberId) {
   };
 }
 
+/**
+ * @param {import('./accountRecordStore.js').AccountRecordTransaction} tx
+ * @param {AccountRecord|null} current
+ * @param {AccountHandle} handle
+ * @param {WasmAccountSnapshot|AccountOpenResult} snapshot
+ * @param {import('./types/contracts.js').AccountBackupKind|null} [pendingKind]
+ */
 async function commitAccountSnapshot(tx, current, handle, snapshot, pendingKind = null) {
   const identity = publicAccountIdentityFor(handle);
   const input = accountSnapshotInput(snapshot, identity.memberId);
@@ -613,6 +866,7 @@ async function commitAccountSnapshot(tx, current, handle, snapshot, pendingKind 
   return { committed, identity };
 }
 
+/** @param {AccountRecord|null} record @param {StoragePersistence} storagePersistence @returns {import('./types/appCoreApi.js').AccountSyncState} */
 function accountSyncView(record, storagePersistence) {
   if (!record) return { record: null, storagePersistence };
   return {
@@ -628,7 +882,9 @@ function accountSyncView(record, storagePersistence) {
         memberId: identity.memberId,
         version: identity.version,
         floor: identity.floor,
-        effectiveFloor: Math.max(identity.floor, identity.version.generation),
+        effectiveFloor: /** @type {AccountGeneration} */ (
+          Math.max(identity.floor, identity.version.generation)
+        ),
       })),
       binding: record.binding,
       acknowledgedBackup: record.acknowledgedBackup,
@@ -638,6 +894,7 @@ function accountSyncView(record, storagePersistence) {
   };
 }
 
+/** @param {Passphrase} passphrase */
 async function verifyAccountPassphrase(passphrase) {
   return runAccountOperation(async (tx) => {
     const saved = tx.record();
@@ -657,6 +914,7 @@ async function verifyAccountPassphrase(passphrase) {
   });
 }
 
+/** @param {{ treeId: TreeId, docId: DocId, engine?: KeyringEngine }} options */
 async function openStoredTree({ treeId, docId, engine = KEYRING_ENGINE }) {
   const head = await keyringStore().loadHead(docId);
   if (!head) throw new Error(`no keyring stored for ${docId}`);
@@ -669,8 +927,12 @@ async function openStoredTree({ treeId, docId, engine = KEYRING_ENGINE }) {
     if (role === 'founder') {
       opened = wasmUnlockTree(requireAccount(), eng, treeId, replica, head.bytes, docId);
     } else {
-      const signers = eng === 'chain' ? wasmChainHeadSigners(head.bytes) : new Uint8Array(0);
-      const minRevision = eng === 'chain' ? chainRevision(await loadWatermark(docId)) : 0;
+      const signers = eng === 'chain'
+        ? wasmChainHeadSigners(head.bytes)
+        : /** @type {TrustedSignersBytes} */ (new Uint8Array(0));
+      const minRevision = eng === 'chain'
+        ? chainRevision(await loadWatermark(docId))
+        : keyringRevision(0);
       opened = wasmUnlockTreeAsMember(
         requireAccount(), eng, head.bytes, treeId, signers, replica, minRevision, docId,
       );
@@ -680,7 +942,7 @@ async function openStoredTree({ treeId, docId, engine = KEYRING_ENGINE }) {
   }
   try {
     await saveWatermark(docId, opened.watermark);
-    const openedCore = new Core(opened.takeHandle(), docId, true, treeId, eng);
+    const openedCore = new Core(takeCoreHandle(opened), docId, true, treeId, eng);
     await installMembership(openedCore, docId, eng, head.bytes);
     await hydrate(openedCore);
     cores.set(docId, openedCore);
@@ -696,6 +958,7 @@ async function openStoredTree({ treeId, docId, engine = KEYRING_ENGINE }) {
   }
 }
 
+/** @type {import('./types/appCoreApi.js').WebAppCoreService} */
 const api = {
   /** Liveness probe (C3): a trivial round-trip the main-thread heartbeat uses to detect a wedged/silent
    *  worker (one that stopped answering without firing an `error` event). Needs no core. */
@@ -717,7 +980,7 @@ const api = {
       let handle;
       try {
         created = wasmAccountCreate(passphrase);
-        handle = created.takeHandle();
+        handle = takeAccountHandle(created);
         const { committed, identity } = await commitAccountSnapshot(tx, null, handle, created);
         replaceAccount(handle, committed.identity.version);
         handle = null;
@@ -794,7 +1057,7 @@ const api = {
           saved.identity.keystore,
           effectiveAccountFloor(saved),
         );
-        handle = recovered.takeHandle();
+        handle = takeAccountHandle(recovered);
         const { committed, identity } = await commitAccountSnapshot(
           tx, saved, handle, recovered, 'revoke',
         );
@@ -892,13 +1155,9 @@ const api = {
       let candidate;
       let handle;
       try {
-        if (credential && typeof credential.passphrase === 'string') {
+        if ('passphrase' in credential) {
           candidate = wasmAccountOpenCandidate(credential.passphrase, keystore, generationFloor);
-        } else if (
-          credential
-          && typeof credential.recoveryCode === 'string'
-          && typeof credential.newPassphrase === 'string'
-        ) {
+        } else if ('recoveryCode' in credential) {
           candidate = wasmAccountRecoverCandidate(
             credential.recoveryCode,
             credential.newPassphrase,
@@ -908,7 +1167,7 @@ const api = {
         } else {
           throw new Error('invalid account candidate credential');
         }
-        handle = candidate.takeHandle();
+        handle = takeAccountHandle(candidate);
         const identity = publicAccountIdentityFor(handle);
         if (identity.memberId !== expectedMemberId) {
           throw makeError('identity_conflict', {
@@ -921,7 +1180,7 @@ const api = {
           {
             binding,
             checkpoint,
-            pendingKind: credential.recoveryCode === undefined ? null : 'revoke',
+            pendingKind: 'recoveryCode' in credential ? 'revoke' : null,
           },
         );
         let committed;
@@ -1048,7 +1307,7 @@ const api = {
       await keyringStore().saveHead(docId, engine, res.keyring); // persist genesis for later unlock
       // Retain the genesis under revision 1 (chain) so a later share can PUBLISH it — a joining member's
       // genesis-walk must fetch rev 1 from the server.
-      if (engine === 'chain') await keyringStore().save(docId, 1, res.keyring);
+      if (engine === 'chain') await keyringStore().save(docId, keyringRevision(1), res.keyring);
       await saveWatermark(docId, res.watermark);
       // OPE-407: this device provisioned a NEW tree, so it owns it and must mint the server `trees` row
       // before its first push (`put_blob` no longer mints — it 404s on a missing tree). Recorded DURABLY
@@ -1056,7 +1315,7 @@ const api = {
       // offline / no-backend device still provisions, and the tree is created on the first tick that
       // reaches the server. Cleared once that createTree succeeds.
       await markNeedsCreateTree(docId);
-      const core = new Core(res.takeHandle(), docId, true, treeId, engine);
+      const core = new Core(takeCoreHandle(res), docId, true, treeId, engine);
       await hydrate(core); // fresh store → a no-op bootstrap
       cores.set(docId, core);
       // The owner's SELF-CERTIFYING on-tree member id (OPE-543): provision derives it from the account key
@@ -1183,7 +1442,9 @@ const api = {
     await keyringStore().saveHead(docId, eng, change.keyring);
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
     if (eng === 'chain') {
-      const revision = new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0);
+      const revision = keyringRevision(
+        new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0),
+      );
       await keyringStore().save(docId, revision, change.keyring);
     }
     // A solo→shared transition: the running sealer (built while solo) does NOT sign, so its writes would be
@@ -1192,7 +1453,7 @@ const api = {
     const re = wasmUnlockTree(requireAccount(), eng, treeId, freshReplica(), change.keyring, docId);
     try {
       await saveWatermark(docId, re.watermark);
-      const nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
+      const nc = new Core(takeCoreHandle(re), docId, c.persist, c.treeId, eng);
       if (firstShare) {
         // First share (solo→shared): fold the owner's OWN pre-share history FIRST — it is trusted (their own
         // device log, authored solo), so it must not be dropped by the §B3 gate — THEN install the gate for
@@ -1264,7 +1525,9 @@ const api = {
     await keyringStore().saveHead(docId, eng, change.keyring);
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
     if (eng === 'chain') {
-      const revision = new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0);
+      const revision = keyringRevision(
+        new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0),
+      );
       await keyringStore().save(docId, revision, change.keyring);
     }
     // A removal ROTATES the write epoch, so the owner's running sealer is now stale — its writes would seal
@@ -1277,7 +1540,7 @@ const api = {
     let nc = null;
     try {
       await saveWatermark(docId, re.watermark);
-      nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
+      nc = new Core(takeCoreHandle(re), docId, c.persist, c.treeId, eng);
       // Install §B3 verify BEFORE hydrate (see openTree): the reopen re-fold under the rotated head must be
       // gated by the membership, or the removed member's forgeries in the mirror re-merge unverified.
       await installMembership(nc, docId, eng, change.keyring);
@@ -1339,7 +1602,9 @@ const api = {
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
     // The dag watermark is a concatenation of tip op-ids, not a revision — so this is chain-only.
     if (eng === 'chain') {
-      const revision = new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0);
+      const revision = keyringRevision(
+        new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0),
+      );
       await keyringStore().save(docId, revision, change.keyring);
     }
     await saveWatermark(docId, change.watermark); // advance the anti-rollback floor to the new revision
@@ -1367,7 +1632,7 @@ const api = {
   async keyringHash(docId) {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
-    const revision = (await keyringStore().head(docId))?.revision ?? 1;
+    const revision = (await keyringStore().head(docId))?.revision ?? keyringRevision(1);
     return { revision, hash: wasmKeyringHash(head.bytes) };
   },
 
@@ -1397,16 +1662,16 @@ const api = {
     const engine = head.engine || 'chain';
     let pin;
     if (engine === 'chain') {
-      const revision = (await keyringStore().head(docId))?.revision ?? 1;
+      const revision = (await keyringStore().head(docId))?.revision ?? keyringRevision(1);
       pin = packChainPin(revision, wasmKeyringHash(head.bytes)); // rev‖kh — the joiner's genesis-walk checks it
     } else if (engine === 'dag') {
-      pin = wasmDagAnchorPin(head.bytes);
+      pin = invitePin(wasmDagAnchorPin(head.bytes));
     } else {
       throw new Error(`unknown keyring engine: ${engine}`);
     }
-    const mintSigners = signerIds(JSON.parse(wasmKeyringSummary(engine, head.bytes)).members);
+    const mintSigners = signerIds(parseMembershipSummary(wasmKeyringSummary(engine, head.bytes)).view);
     const minted = await mintInvite({
-      uuid: docId, role, engine, pin, recipientPin,
+      uuid: treeUuid(docId), role, engine, pin, recipientPin,
       ...(ttlMs ? { ttlMs } : {}), ...(base ? { base } : {}),
     });
     await saveMintRecord(core(docId).handle, { ...minted.record, signerIds: mintSigners }); // durable + DEK-sealed
@@ -1429,7 +1694,7 @@ const api = {
     if (Date.now() > record.expiry) throw new Error('invite expired');
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
-    const currentMembers = JSON.parse(wasmKeyringSummary(record.engine, head.bytes)).members;
+    const currentMembers = parseMembershipSummary(wasmKeyringSummary(record.engine, head.bytes)).view;
     if (!signersRetained(record.signerIds, currentMembers)) {
       throw new Error('a signer was removed since mint — cancel and re-invite');
     }
@@ -1456,7 +1721,7 @@ const api = {
       memberId: identity.memberId,
       authorPublicKey: identity.authorPublicKey,
       hpkePublicKey: identity.hpkePublicKey,
-      recoveryCode: accountState.recoveryCode,
+      recoveryCode: /** @type {RecoveryCode} */ (accountState.recoveryCode),
     };
     identity.free();
     return publicIdentity;
@@ -1475,19 +1740,30 @@ const api = {
     // The v3 invite flow ALWAYS passes the VERIFIED engine; a bare `undefined` (a low-level direct caller) falls
     // back to the build's engine, but an UNKNOWN non-empty engine THROWS — never a lenient fall-through to chain.
     const engine = opts.engine ?? KEYRING_ENGINE;
-    if (!transportFor(docId)) throw new Error('attach a transport before joining');
+    const transport = keyringTransportFor(docId);
+    if (!transport) throw new Error('attach a transport before joining');
     // The opaque `pin` is interpreted here, the one place that knows the engine: chain unpacks rev‖kh; dag passes
     // the anchor pin straight through.
-    const deps = { transport: transportFor(docId), keyringStore: keyringStore() };
+    const deps = { transport, keyringStore: keyringStore() };
+    /**
+     * @param {KeyringEngine} eng
+     * @param {KeyringBytes} keyringBytes
+     * @param {TreeId} treeId
+     * @param {TrustedSignersBytes} trustedSigners
+     * @param {ReplicaId} replicaId
+     * @param {KeyringRevision} minRevision
+     * @param {DocId} joinedDocId
+     */
     const unlockAsMember = (eng, keyringBytes, treeId, trustedSigners, replicaId, minRevision, joinedDocId) =>
       wasmUnlockTreeAsMember(
         requireAccount(), eng, keyringBytes, treeId, trustedSigners, replicaId, minRevision, joinedDocId,
       );
     let res;
     if (engine === 'dag') {
+      if (!pin) throw new Error('dag invite pin is required');
       res = await joinDagAnchor(
         { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, verifyDagAnchor: wasmVerifyDagAnchor, unlockAsMember }, ...deps },
-        opts,
+        { ...opts, pin: /** @type {DagAnchorPinBytes} */ (/** @type {unknown} */ (pin)) },
       );
     } else if (engine === 'chain') {
       // The v3 invite flow passes the OPAQUE chain pin (rev(u32 BE)‖kh(32) = exactly 36 bytes) — unpack it into
@@ -1496,8 +1772,11 @@ const api = {
       let { pinnedRevision, pinnedHash } = opts;
       if (pin !== undefined) {
         if (!(pin instanceof Uint8Array) || pin.length !== 36) throw new Error('chain invite pin must be 36 bytes');
-        pinnedRevision = new DataView(pin.buffer, pin.byteOffset, 4).getUint32(0, false);
-        pinnedHash = pin.slice(4);
+        pinnedRevision = keyringRevision(new DataView(pin.buffer, pin.byteOffset, 4).getUint32(0, false));
+        pinnedHash = /** @type {KeyringHashBytes} */ (pin.slice(4));
+      }
+      if (pinnedRevision === undefined || pinnedHash === undefined) {
+        throw new Error('chain invite pin is required');
       }
       res = await joinAsMember(
         { wasm: { verifyKeyringWalk: wasmVerifyKeyringWalk, unlockAsMember }, ...deps },
@@ -1508,9 +1787,11 @@ const api = {
     }
     try {
       await saveWatermark(docId, res.watermark);
-      const c = new Core(res.takeHandle(), docId, true, opts.treeId, engine);
+      const c = new Core(takeCoreHandle(res), docId, true, opts.treeId, engine);
       // Install §B3 verify BEFORE hydrate (see openTree): the reopen re-fold must be gated by the membership.
-      await installMembership(c, docId, engine, (await keyringStore().loadHead(docId)).bytes);
+      const head = await keyringStore().loadHead(docId);
+      if (!head) throw new Error('joined keyring was not persisted');
+      await installMembership(c, docId, engine, head.bytes);
       await hydrate(c);
       cores.set(docId, c);
       return { didKey: res.didKey };
@@ -1528,18 +1809,21 @@ const api = {
   async syncKeyring(docId, treeId) {
     const c = core(docId);
     const head = await keyringStore().loadHead(docId);
-    if (!head || (head.engine || KEYRING_ENGINE) !== 'chain' || !transportFor(docId)) {
+    const transport = keyringTransportFor(docId);
+    if (!head || (head.engine || KEYRING_ENGINE) !== 'chain' || !transport) {
       return { changed: false };
     }
     const r = await syncKeyringImpl(
-      { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport: transportFor(docId), keyringStore: keyringStore() },
+      { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport, keyringStore: keyringStore() },
       { docId, treeId },
     );
     if (r.changed) {
       // Refresh the resolver AND adopt any rotated epoch (OPE-393) — the same as the sync tick. Using plain
       // installMembership here would leave a remaining member unable to read post-rotation content, silently
       // reintroducing the bug OPE-393 fixes if this standalone method is ever wired to a UI action.
-      await refreshMembershipAndEpochs(c, 'chain', (await keyringStore().loadHead(docId)).bytes);
+      const updatedHead = await keyringStore().loadHead(docId);
+      if (!updatedHead) throw new Error('synced keyring was not persisted');
+      await refreshMembershipAndEpochs(c, 'chain', updatedHead.bytes);
     }
     return { changed: r.changed };
   },
@@ -1597,7 +1881,7 @@ const api = {
     const c = core(docId);
     const bytes = c.handle.propose(); // Uint8Array | undefined
     if (!bytes) return null; // nothing minted since the last commit/propose
-    return transport.createProposal(docId, bytes);
+    return transport.createProposal(treeUuid(docId), bytes);
   },
 
   /** Maintainer path: the open proposals to review, as `[{ id, proposer, sizeBytes, createdAt, expiresAt }]`
@@ -1605,7 +1889,7 @@ const api = {
   async pendingProposals(docId) {
     const transport = transportFor(docId);
     if (!transport) return [];
-    const list = await transport.listProposals(docId);
+    const list = await transport.listProposals(treeUuid(docId));
     return list.map(({ id, proposer, sizeBytes, createdAt, expiresAt }) => ({
       id, proposer, sizeBytes, createdAt, expiresAt,
     }));
@@ -1618,11 +1902,12 @@ const api = {
     const transport = transportFor(docId);
     if (!transport) throw new Error('attach a transport before approving');
     const c = core(docId);
-    const p = (await transport.listProposals(docId)).find((x) => x.id === proposalId);
+    const tree = treeUuid(docId);
+    const p = (await transport.listProposals(tree)).find((proposal) => proposal.id === proposalId);
     if (!p) throw new Error('proposal not found');
     const committed = c.handle.approveProposal(p.payload); // throws on a forged / misattributed proposal → no delete
     await persistBlobs(c);
-    await transport.deleteProposal(docId, proposalId); // committed → resolve the proposal
+    await transport.deleteProposal(tree, proposalId); // committed → resolve the proposal
     await syncData(c);
     return committed;
   },
@@ -1631,7 +1916,7 @@ const api = {
   async rejectProposal(docId, proposalId) {
     const transport = transportFor(docId);
     if (!transport) throw new Error('attach a transport before rejecting');
-    await transport.deleteProposal(docId, proposalId);
+    await transport.deleteProposal(treeUuid(docId), proposalId);
   },
 
   /** The change-history activity feed: per-change records the UI renders directly — `{ author, createdAt,
@@ -1642,15 +1927,19 @@ const api = {
     const transport = transportFor(docId);
     if (!transport) return { entries: [], nextCursor: null };
     const c = core(docId);
-    const feed = await transport.getHistory(docId, opts);
+    const feed = await transport.getHistory(treeUuid(docId), opts);
     const entries = [];
     for (const e of feed.entries) {
       let ops = null;
       let viewable = false;
       try {
-        const sealed = await transport.blobGet(`${c.treeKey}/log/${e.replica}/${e.counter}`);
+        const sealed = await transport.blobGet(
+          treeObjectKey(`${c.treeKey}/log/${e.replica}/${e.counter}`),
+        );
         if (sealed) {
-          ops = JSON.parse(c.handle.openHistoryDelta(sealed)); // decrypt + decode the op-batch
+          ops = JSON.parse(c.handle.openHistoryDelta(
+            /** @type {HistoryDeltaEnvelopeBytes} */ (/** @type {unknown} */ (sealed)),
+          )); // decrypt + decode the op-batch
           viewable = true;
         }
       } catch {
@@ -1684,7 +1973,7 @@ const api = {
    *  then compacted + synced so the pin propagates and every replica recovers it. Returns whether approved. */
   async approvePending(docId, { replica, counter }) {
     const c = core(docId);
-    const approved = c.handle.approvePending(replica, BigInt(counter));
+    const approved = c.handle.approvePending(replica, /** @type {ReplicaCounter} */ (BigInt(counter)));
     if (approved) {
       await persistBlobs(c);
       if (transportFor(docId)) await syncData(c, 1); // pin the vouched delta + push it so peers recover it
@@ -1695,7 +1984,7 @@ const api = {
   /** Discard a pending trailing edit (it stays suppressed). Returns whether it was present in the queue. */
   async discardPending(docId, { replica, counter }) {
     const c = core(docId);
-    const discarded = c.handle.discardPending(replica, BigInt(counter));
+    const discarded = c.handle.discardPending(replica, /** @type {ReplicaCounter} */ (BigInt(counter)));
     if (discarded) await persistBlobs(c);
     return discarded;
   },
@@ -1747,7 +2036,7 @@ const api = {
   /** Verify and restore a founder-owned tree's remote keyring onto a fresh device, then open it. */
   async restoreTree({ treeId, docId, engine = KEYRING_ENGINE }) {
     await ensureInit();
-    const transport = transportFor(docId);
+    const transport = keyringTransportFor(docId);
     if (!transport) throw new Error('tree restore needs an attached transport');
     let restored;
     try {
@@ -1771,8 +2060,10 @@ const api = {
     const opened = restored.opened;
     let openedCore = null;
     try {
-      openedCore = new Core(opened.takeHandle(), docId, true, treeId, engine);
-      await installMembership(openedCore, docId, engine, (await keyringStore().loadHead(docId)).bytes);
+      openedCore = new Core(takeCoreHandle(opened), docId, true, treeId, engine);
+      const head = await keyringStore().loadHead(docId);
+      if (!head) throw new Error('restored keyring was not persisted');
+      await installMembership(openedCore, docId, engine, head.bytes);
       await hydrate(openedCore);
       cores.set(docId, openedCore);
       return {
@@ -1791,6 +2082,7 @@ const api = {
   },
 };
 
+/** @param {Core} c @returns {Promise<import('./types/appCoreApi.js').SyncResult>} */
 async function runTick(c) {
   const transport = transportFor(c.docId);
   if (!transport) return { state: 'no-transport' };
@@ -1808,10 +2100,11 @@ async function runTick(c) {
     // retries. A joining member never set the marker, so this is a no-op read for it.
     if (!c.treeEnsured) {
       if (await needsCreateTree(c.docId)) {
+        if (!c.treeId || !c.engine) throw new Error('new tree is missing its keyring context');
         // `docId` is the tree UUID and `treeKey` (used for blob/keyring keys) is the same 16 bytes in
         // hex — both parse to one Postgres UUID (main.js derives docId = treeIdToUuid(treeId bytes)). So
         // createTree(docId) mints the SAME server tree the blob pushes target.
-        await transport.createTree(c.docId);
+        await transport.createTree(treeUuid(c.docId));
         // The account backup alone cannot reopen a tree on a fresh device: its DEK lives in this signed,
         // account-addressed keyring. Publish genesis before clearing the durable create marker so a crash
         // retries both steps; chain and DAG publication are idempotent.
@@ -1847,6 +2140,7 @@ async function runTick(c) {
 // core's `sync` (which mirrors it in, folds, and returns what the remote is missing), upload that diff, then
 // mirror the updated local store to durable storage. The core owns the entire keyspace + head-monotonicity
 // decision — this is a dumb ferry that never parses, builds, or compares a key.
+/** @param {Core} c @param {number} [compactKOverride] */
 async function syncData(c, compactKOverride) {
   const transport = transportFor(c.docId);
   if (!transport) return;
@@ -1854,18 +2148,19 @@ async function syncData(c, compactKOverride) {
   // BEFORE rotating so the departing member's folded history is pinned into an owner-authored snapshot.
   const k = compactKOverride === undefined ? compactK : compactKOverride;
   const localPrefix = c.docId + '/'; // the core's own (per-device) keyspace
-  const remotePrefix = c.treeKey + '/'; // the shared (per-tree) keyspace on the remote
+  const remotePrefix = /** @type {RemoteTreeKey} */ (`${c.treeKey}/`); // the shared (per-tree) keyspace on the remote
   // List the remote, re-keyed into the core's local namespace. The core decides which objects we still need to
   // FETCH (OPE-464): immutable log objects we already pulled are skipped, so a device doesn't re-download the
   // whole retained log every tick. `present` = the full LIST (a superset of what we fetch) so the core's
   // upload-diff never re-pushes a log object the remote already holds but we chose not to re-download.
   const listed = await transport.blobList(remotePrefix);
-  const present = listed.map(({ key }) => localPrefix + key.slice(remotePrefix.length));
+  const present = listed.map(({ key }) => treeObjectKey(localPrefix + key.slice(remotePrefix.length)));
   const toFetch = new Set(c.handle.planFetch(present));
+  /** @type {Array<{ key: TreeObjectKey, bytes: TreeObjectBytes }>} */
   const remote = [];
   for (const { key } of listed) {
     if (c.aborted) return;
-    const localKey = localPrefix + key.slice(remotePrefix.length);
+    const localKey = treeObjectKey(localPrefix + key.slice(remotePrefix.length));
     if (!toFetch.has(localKey)) continue;
     const bytes = await transport.blobGet(key);
     if (bytes) remote.push({ key: localKey, bytes });
@@ -1879,7 +2174,12 @@ async function syncData(c, compactKOverride) {
     if (c.aborted) return;
     // Re-key the core's object back into the shared tree namespace for upload; the snapshot carries the header.
     const coveredHeader = o.key.endsWith('/snapshot') ? covered : undefined;
-    await transport.blobPut(remotePrefix + o.key.slice(localPrefix.length), o.bytes, o.pointer, coveredHeader);
+    await transport.blobPut(
+      treeObjectKey(remotePrefix + o.key.slice(localPrefix.length)),
+      o.bytes,
+      o.pointer,
+      coveredHeader,
+    );
   }
   if (c.aborted) return;
   await persistBlobs(c);
@@ -1891,7 +2191,7 @@ async function syncData(c, compactKOverride) {
   const pull = c.handle.pullFrontier(); // JSON `{replica_hex: counter}`
   if (pull && pull !== '{}' && pull !== c.reportedFrontier) {
     try {
-      await transport.putFrontier(c.docId, JSON.parse(pull));
+      await transport.putFrontier(treeUuid(c.docId), parseFrontier(pull));
       c.reportedFrontier = pull;
     } catch {
       /* advisory telemetry — swallow; gate 2 stays conservative without this report */
@@ -1905,21 +2205,25 @@ async function syncData(c, compactKOverride) {
 // method that already threw an AppError passes through unchanged (normalizeUnknown is idempotent); anything
 // else becomes `{ code:'internal', domain:'app', cause:<string> }` with NO stack. The main thread catches a
 // plain object (not an Error subclass), so its custom fields survive the structured clone.
+/** @param {import('./types/appCoreApi.js').WebAppCoreService} surface @returns {import('./types/appCoreApi.js').WebAppCoreService} */
 function guardApi(surface) {
+  /** @type {Record<string, unknown>} */
   const guarded = {};
   for (const [name, value] of Object.entries(surface)) {
     guarded[name] =
       typeof value === 'function'
-        ? async (...args) => {
+        ? /** @param {...unknown} args */ async (...args) => {
             try {
-              return await value.apply(surface, args);
+              return await /** @type {(...values: unknown[]) => unknown} */ (value).apply(surface, args);
             } catch (e) {
               throw normalizeUnknown(e);
             }
           }
         : value;
   }
-  return guarded;
+  return /** @type {import('./types/appCoreApi.js').WebAppCoreService} */ (
+    /** @type {unknown} */ (guarded)
+  );
 }
 
 Comlink.expose(guardApi(api));
