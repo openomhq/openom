@@ -3271,7 +3271,18 @@ fn get_jwt(uri: &str, token: &str) -> Request<Body> {
         .body(Body::empty())
         .unwrap()
 }
-fn put_json_jwt(uri: &str, token: &str, body: &Value) -> Request<Body> {
+fn put_json_jwt(uri: &str, token: &str, etag: &str, body: &Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .header("if-match", etag)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn put_json_jwt_without_etag(uri: &str, token: &str, body: &Value) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(uri)
@@ -3525,13 +3536,35 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
         StatusCode::OK,
     );
 
+    let (status, headers, _) = send(&app, get_jwt("/v1/me", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let initial_etag = headers.get("etag").unwrap().to_str().unwrap().to_owned();
+
+    let (status, headers, body) = send(
+        &app,
+        put_json_jwt_without_etag(
+            "/v1/account/keystore",
+            &token,
+            &serde_json::json!({ "keystore": b64(b"missing-etag"), "generation": 1 }),
+        ),
+    )
+    .await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::BAD_REQUEST,
+        openom::error_codes::INVALID_REQUEST,
+    );
+
     // PUT gen 1 (blob A) -> 200; GET reflects it.
     let blob_a = b64(b"encrypted-keystore-A");
     assert_eq!(
-        send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await.0,
+        send(&app, put_json_jwt("/v1/account/keystore", &token, &initial_etag, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await.0,
         StatusCode::OK,
     );
-    let (_, _, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
+    let (_, headers, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
+    let blob_a_etag = headers.get("etag").unwrap().to_str().unwrap().to_owned();
     let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["keystore"], serde_json::json!(blob_a));
     assert_eq!(v["generation"], serde_json::json!(1));
@@ -3539,13 +3572,13 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
     // PUT gen 2 (blob B) -> 200 (advances the floor).
     let blob_b = b64(b"encrypted-keystore-B");
     assert_eq!(
-        send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
+        send(&app, put_json_jwt("/v1/account/keystore", &token, &blob_a_etag, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
         StatusCode::OK,
     );
 
     // A rollback PUT (gen 1, below the stored 2) is refused - the load-bearing anti-rollback (a stale blob
     // can't re-arm a revoked recovery code).
-    let (status, headers, body) = send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await;
+    let (status, headers, body) = send(&app, put_json_jwt("/v1/account/keystore", &token, &blob_a_etag, &serde_json::json!({ "keystore": blob_a, "generation": 1 }))).await;
     assert_problem(
         status,
         &headers,
@@ -3554,19 +3587,40 @@ async fn keystore_put_get_and_generation_rollback_is_refused() {
         openom::error_codes::GENERATION_ROLLBACK,
     );
 
-    // The stored blob is unchanged (still B @ gen 2); an equal-generation re-PUT is allowed (idempotent).
-    let (_, _, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
+    // The stored blob is unchanged (still B @ gen 2); an exact re-PUT is allowed even with the stale ETag.
+    let (_, headers, body) = send(&app, get_jwt("/v1/account/keystore", &token)).await;
+    let blob_b_etag = headers.get("etag").unwrap().to_str().unwrap().to_owned();
     let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["keystore"], serde_json::json!(blob_b), "rollback did not overwrite");
     assert_eq!(v["generation"], serde_json::json!(2));
     assert_eq!(
-        send(&app, put_json_jwt("/v1/account/keystore", &token, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
+        send(&app, put_json_jwt("/v1/account/keystore", &token, &blob_a_etag, &serde_json::json!({ "keystore": blob_b, "generation": 2 }))).await.0,
         StatusCode::OK,
-        "equal generation is an allowed re-PUT",
+        "an exact replay is idempotent after a lost success response",
+    );
+
+    let changed_same_generation = b64(b"changed-keystore-at-generation-2");
+    let (status, headers, body) = send(
+        &app,
+        put_json_jwt(
+            "/v1/account/keystore",
+            &token,
+            &blob_a_etag,
+            &serde_json::json!({ "keystore": changed_same_generation, "generation": 2 }),
+        ),
+    )
+    .await;
+    assert_problem(
+        status,
+        &headers,
+        &body,
+        StatusCode::PRECONDITION_FAILED,
+        openom::error_codes::ACCOUNT_BACKUP_PRECONDITION_FAILED,
     );
 
     // GET /me carries the same backup + generation for device restore.
-    let (_, _, body) = send(&app, get_jwt("/v1/me", &token)).await;
+    let (_, headers, body) = send(&app, get_jwt("/v1/me", &token)).await;
+    assert_eq!(headers.get("etag").unwrap(), blob_b_etag.as_str());
     let me: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(me["keystore"], serde_json::json!(blob_b));
     assert_eq!(me["generation"], serde_json::json!(2));

@@ -7,9 +7,10 @@
 //!   over a signed timestamp (no challenge/nonce endpoint — Lambda is stateless), checks the id is
 //!   self-certifying (`member_id == derive_member_id(author_pubkey)`), and inserts `(auth_sub → member_id)`
 //!   idempotently.
-//! - `GET /me` — the caller's `member_id` + their stored E2E keystore backup + its generation (device restore).
-//! - `PUT/GET /account/keystore` — store / fetch the E2E-wrapped keystore blob, enforcing the monotonic
-//!   generation floor (a rollback PUT is refused — the load-bearing anti-rollback for the durable identity).
+//! - `GET /me` — the caller's `member_id` + their stored E2E keystore backup + its generation (device restore),
+//!   with a strong `ETag` for conditional backup writes.
+//! - `PUT/GET /account/keystore` — store / fetch the E2E-wrapped keystore blob, enforcing both the monotonic
+//!   generation floor and `If-Match` compare-and-swap.
 //!
 //! The server is zero-knowledge about the keystore: it stores and returns opaque ciphertext.
 
@@ -17,13 +18,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::header::{ETAG, IF_MATCH};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine as _;
 use openom_keyring_api::derive_member_id;
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::api_error::ApiError;
@@ -80,6 +83,34 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 }
 fn b64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn account_etag(keystore: Option<&[u8]>, generation: i64) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"openom:account-backup:v1");
+    digest.update(generation.to_be_bytes());
+    match keystore {
+        Some(bytes) => {
+            digest.update([1]);
+            digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(bytes);
+        }
+        None => digest.update([0]),
+    }
+    let hex = digest.finalize().iter().fold(String::new(), |mut out, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+        out
+    });
+    format!("\"{hex}\"")
+}
+
+fn json_with_etag(body: serde_json::Value, etag: &str) -> Response {
+    let mut response = Json(body).into_response();
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        response.headers_mut().insert(ETAG, value);
+    }
+    response
 }
 
 /// `POST /register` body: the self-certifying `member_id`, the Ed25519 author public key + the
@@ -247,10 +278,11 @@ async fn bind_identity(
     })
 }
 
-/// `GET /me` — the caller's `member_id`, their stored E2E keystore backup (if any), and its generation.
+/// `GET /me` — the caller's `member_id`, their stored E2E keystore backup (if any), its generation, and a
+/// strong `ETag` for conditional backup writes.
 ///
 /// # Errors
-/// `500 unavailable` on a DB failure.
+/// `403 unregistered` (no `identities` row), `500 unavailable` on a DB failure.
 pub async fn me(State(state): State<AppState>, id: Identity) -> Result<Response, ApiError> {
     let row: Option<(Option<Vec<u8>>, i64)> =
         sqlx::query_as("SELECT keystore, generation FROM identities WHERE member_id = $1")
@@ -258,15 +290,18 @@ pub async fn me(State(state): State<AppState>, id: Identity) -> Result<Response,
             .fetch_optional(&state.db)
             .await
             .map_err(internal)?;
-    // A dev-auth caller (or a jwt caller resolved via a mapping but with no backup yet) has no keystore row:
-    // report member_id with a null backup + generation 0.
-    let (keystore, generation) = row.unwrap_or((None, 0));
-    Ok(Json(json!({
+    let Some((keystore, generation)) = row else {
+        return Err(ApiError::forbidden(
+            ec::UNREGISTERED,
+            "account identity is not registered",
+        ));
+    };
+    let etag = account_etag(keystore.as_deref(), generation);
+    Ok(json_with_etag(json!({
         "member_id": id.member_id,
         "keystore": keystore.as_deref().map(b64_encode),
         "generation": generation,
-    }))
-    .into_response())
+    }), &etag))
 }
 
 /// `PUT /account/keystore` body: the E2E-wrapped keystore blob (base64) + its monotonic generation.
@@ -279,19 +314,21 @@ pub struct KeystoreBody {
     pub generation: i64,
 }
 
-/// `PUT /account/keystore` — store the E2E keystore backup, enforcing the generation floor.
+/// `PUT /account/keystore` — store the E2E keystore backup, enforcing generation and `If-Match` floors.
 ///
 /// A PUT whose `generation` is below the stored one is a rollback and is refused (`409`) — the load-bearing
 /// anti-rollback the review flagged (a party who unwrapped an old keystore can't push the stale blob back to
-/// re-arm a revoked recovery code). Equal generation is allowed (an idempotent re-PUT / a same-gen re-wrap
-/// such as change-passphrase).
+/// re-arm a revoked recovery code). A changed write must also match the current strong `ETag`; an exact replay
+/// succeeds even with a stale tag so a lost success response can be retried safely.
 ///
 /// # Errors
 /// `400 invalid_request`, `403 unregistered` (no `identities` row — dev auth, or a `member_id` that never
-/// registered a backup target), `409 generation_rollback`, `500 unavailable`.
+/// registered a backup target), `409 generation_rollback`, `412 account_backup_precondition_failed`,
+/// `500 unavailable`.
 pub async fn put_keystore(
     State(state): State<AppState>,
     id: Identity,
+    headers: HeaderMap,
     body: Result<Json<KeystoreBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(body) = body.map_err(|rejection| invalid_json(&rejection))?;
@@ -302,40 +339,80 @@ pub async fn put_keystore(
             "keystore is not valid base64",
         ));
     };
-    // Conditional on the floor: only advance when the incoming generation is >= the stored one.
-    let updated = sqlx::query(
+    if body.generation < 0 {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            ec::INVALID_REQUEST,
+            "keystore generation must be non-negative",
+        ));
+    }
+    let if_match = headers
+        .get(IF_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                ec::INVALID_REQUEST,
+                "If-Match is required",
+            )
+        })?;
+
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    let stored: Option<(Option<Vec<u8>>, i64)> = sqlx::query_as(
+        "SELECT keystore, generation FROM identities WHERE member_id = $1 FOR UPDATE",
+    )
+        .bind(id.member_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
+    let Some((stored_blob, stored_generation)) = stored else {
+        return Err(ApiError::forbidden(
+            ec::UNREGISTERED,
+            "account identity is not registered",
+        ));
+    };
+    if body.generation < stored_generation {
+        return Err(ApiError::conflict(
+            ec::GENERATION_ROLLBACK,
+            "keystore generation is below the server floor",
+        ));
+    }
+
+    let current_etag = account_etag(stored_blob.as_deref(), stored_generation);
+    if stored_generation == body.generation && stored_blob.as_deref() == Some(blob.as_slice()) {
+        return Ok(json_with_etag(
+            json!({ "generation": stored_generation }),
+            &current_etag,
+        ));
+    }
+    if if_match != current_etag {
+        return Err(ApiError::coded(
+            StatusCode::PRECONDITION_FAILED,
+            ec::ACCOUNT_BACKUP_PRECONDITION_FAILED,
+            "account backup changed since it was read",
+        ));
+    }
+
+    sqlx::query(
         "UPDATE identities SET keystore = $1, generation = $2, updated_at = now()
-         WHERE member_id = $3 AND generation <= $2",
+         WHERE member_id = $3",
     )
     .bind(&blob)
     .bind(body.generation)
     .bind(id.member_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(internal)?
-    .rows_affected();
-    if updated == 1 {
-        return Ok(Json(json!({ "generation": body.generation })).into_response());
-    }
-    // 0 rows: either no identities row (unregistered) or the floor rejected a rollback. Disambiguate.
-    let stored: Option<i64> = sqlx::query_scalar("SELECT generation FROM identities WHERE member_id = $1")
-        .bind(id.member_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    match stored {
-        Some(_) => Err(ApiError::conflict(
-            ec::GENERATION_ROLLBACK,
-            "keystore generation is below the server floor",
-        )),
-        None => Err(ApiError::forbidden(
-            ec::UNREGISTERED,
-            "account identity is not registered",
-        )),
-    }
+    .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+
+    let new_etag = account_etag(Some(&blob), body.generation);
+    Ok(json_with_etag(
+        json!({ "generation": body.generation }),
+        &new_etag,
+    ))
 }
 
-/// `GET /account/keystore` — the stored E2E keystore backup + its generation.
+/// `GET /account/keystore` — the stored E2E keystore backup + its generation and strong `ETag`.
 ///
 /// # Errors
 /// `403 unregistered` (no `identities` row), `500 unavailable`.
@@ -347,11 +424,16 @@ pub async fn get_keystore(State(state): State<AppState>, id: Identity) -> Result
             .await
             .map_err(internal)?;
     match row {
-        Some((keystore, generation)) => Ok(Json(json!({
-            "keystore": keystore.as_deref().map(b64_encode),
-            "generation": generation,
-        }))
-        .into_response()),
+        Some((keystore, generation)) => {
+            let etag = account_etag(keystore.as_deref(), generation);
+            Ok(json_with_etag(
+                json!({
+                    "keystore": keystore.as_deref().map(b64_encode),
+                    "generation": generation,
+                }),
+                &etag,
+            ))
+        }
         None => Err(ApiError::forbidden(
             ec::UNREGISTERED,
             "account identity is not registered",
