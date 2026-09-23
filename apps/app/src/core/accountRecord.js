@@ -335,9 +335,12 @@ export async function createAccountRecord(snapshot) {
 }
 
 /** Replaces active custody while retaining every displaced wrapped identity and its scoped floor. */
-export async function replaceAccountIdentity(record, snapshot) {
+export async function replaceAccountIdentity(record, snapshot, { pendingKind = null } = {}) {
   const current = await validateAccountRecord(record);
   if (current.revision === Number.MAX_SAFE_INTEGER) fail('revision is exhausted');
+  if (pendingKind !== null && pendingKind !== 'backup' && pendingKind !== 'revoke') {
+    fail('identity replacement pending kind must be backup, revoke, or null');
+  }
   const sameIdentity = current.identity.memberId === snapshot?.memberId;
   const knownFloor = accountFloorForMember(current, snapshot?.memberId);
   if (snapshot.generation < knownFloor) fail('identity generation rolls back');
@@ -352,11 +355,11 @@ export async function replaceAccountIdentity(record, snapshot) {
       current.identity,
     ];
   let pendingBackup = null;
-  if (sameIdentity && current.binding !== null
-    && !sameAccountVersion(current.identity.version, identity.version)) {
-    pendingBackup = { kind: 'revoke', version: identity.version, binding: current.binding };
-  } else if (sameIdentity && current.pendingBackup?.kind === 'revoke') {
+  const changedVersion = !sameAccountVersion(current.identity.version, identity.version);
+  if (sameIdentity && current.pendingBackup?.kind === 'revoke') {
     pendingBackup = { ...current.pendingBackup, version: identity.version };
+  } else if (sameIdentity && current.binding !== null && changedVersion && pendingKind !== null) {
+    pendingBackup = { kind: pendingKind, version: identity.version, binding: current.binding };
   } else if (sameIdentity && current.pendingBackup !== null
     && sameAccountVersion(current.pendingBackup.version, identity.version)) {
     pendingBackup = current.pendingBackup;

@@ -112,4 +112,17 @@ describe('sync driver cadence', () => {
     expect(statuses.at(-1).state).toBe('synced');
     driver.stop();
   });
+
+  it('notifies account retry work on every coalesced tree-sync tick', async () => {
+    const worker = fakeWorker();
+    const onTick = vi.fn();
+    const driver = startSyncDriver(worker, 'doc', { onTick });
+
+    await advance(0);
+    expect(onTick).toHaveBeenCalledTimes(1);
+    driver.syncNow();
+    await advance(DEFAULT_SYNC_CADENCE_MS + 100);
+    expect(onTick).toHaveBeenCalledTimes(2);
+    driver.stop();
+  });
 });

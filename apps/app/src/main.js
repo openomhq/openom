@@ -571,6 +571,7 @@ class App {
         // to offer re-connect; do NOT lock the passphrase core.
         onAuthError: () => { this.syncStatus = { state: 'auth-error' }; console.warn('[openom] sync: backend session needs re-auth'); },
         onSecurity: (e) => { this.syncStatus = { state: 'security' }; console.warn('[openom] sync: security signal', e); },
+        onTick: () => { void this.account.retryPending().catch(() => {}); },
       });
     } catch (e) {
       console.warn('[openom] sync start failed', e);

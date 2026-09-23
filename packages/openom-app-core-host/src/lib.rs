@@ -545,10 +545,13 @@ impl<St: VaultStore> AppCoreHost<St> {
     fn next_account_record(
         current: Option<&AccountRecord>,
         handle: &AccountHandle,
+        pending_kind: Option<PendingBackupKind>,
     ) -> Result<AccountRecord, HostError> {
         let identity = Self::stored_identity(handle);
         match current {
-            Some(record) => record.next_identity(identity).map_err(HostError::Store),
+            Some(record) => record
+                .next_identity(identity, pending_kind)
+                .map_err(HostError::Store),
             None => Ok(AccountRecord::new(identity)),
         }
     }
@@ -557,8 +560,9 @@ impl<St: VaultStore> AppCoreHost<St> {
         &self,
         current: Option<&AccountRecord>,
         handle: &AccountHandle,
+        pending_kind: Option<PendingBackupKind>,
     ) -> Result<AccountRecord, HostError> {
-        let next = Self::next_account_record(current, handle)?;
+        let next = Self::next_account_record(current, handle, pending_kind)?;
         self.persist_account_record(current, &next)
     }
 
@@ -595,7 +599,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     ) -> Result<AccountAdopted, HostError> {
         let member_id = handle.member_id().to_string();
         let snapshot = Self::snapshot_wire(openom_app_core::account_snapshot(&handle));
-        let next = Self::next_account_record(current, &handle)?
+        let next = Self::next_account_record(current, &handle, None)?
             .finish_remote_adoption(binding, checkpoint, pending_kind)
             .map_err(HostError::Store)?;
         self.persist_account_record(current, &next)
@@ -673,7 +677,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             return Err(HostError::Store("profile account already exists".into()));
         }
         let created = openom_app_core::account_create(passphrase)?;
-        self.persist_account_handle(None, &created.handle)?;
+        self.persist_account_handle(None, &created.handle, None)?;
         *self
             .account
             .lock()
@@ -948,7 +952,11 @@ impl<St: VaultStore> AppCoreHost<St> {
             record.identity().keystore().as_bytes(),
             openom_app_core::AccountGeneration::new(record.identity().effective_floor().get()),
         )?;
-        self.persist_account_handle(Some(&record), &recovered.handle)?;
+        self.persist_account_handle(
+            Some(&record),
+            &recovered.handle,
+            Some(PendingBackupKind::Revoke),
+        )?;
         *self
             .account
             .lock()
@@ -985,7 +993,9 @@ impl<St: VaultStore> AppCoreHost<St> {
             new_passphrase,
         )?;
         let handle = resident.as_ref().ok_or(HostError::NoAccount)?;
-        if let Err(error) = self.persist_account_handle(Some(&record), handle) {
+        if let Err(error) =
+            self.persist_account_handle(Some(&record), handle, Some(PendingBackupKind::Backup))
+        {
             *resident = None;
             return Err(error);
         }
@@ -1018,7 +1028,9 @@ impl<St: VaultStore> AppCoreHost<St> {
             passphrase,
         )?;
         let handle = resident.as_ref().ok_or(HostError::NoAccount)?;
-        if let Err(error) = self.persist_account_handle(Some(&record), handle) {
+        if let Err(error) =
+            self.persist_account_handle(Some(&record), handle, Some(PendingBackupKind::Revoke))
+        {
             *resident = None;
             return Err(error);
         }
@@ -2910,6 +2922,39 @@ mod tests {
         assert_eq!(
             downgrade.record.unwrap().revision,
             revoke.record.unwrap().revision
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn credential_mutations_journal_operation_specific_intent() {
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let initial = Passphrase::new(b"profile passphrase".to_vec());
+        let created = host.account_create(&initial).unwrap();
+        let member_id = host.account_public_identity().unwrap().member_id;
+        let binding = AccountBinding::new(
+            "https://issuer",
+            "subject-a",
+            AccountMemberId::new(member_id),
+        );
+        host.account_confirm_binding(binding).unwrap();
+
+        let replacement = Passphrase::new(b"replacement passphrase".to_vec());
+        let changed = host.account_change_passphrase(&replacement).unwrap();
+        let changed_record = host.store().load_account().unwrap().unwrap();
+        assert_eq!(changed.generation, created.generation);
+        assert_eq!(
+            changed_record.pending_backup().unwrap().kind(),
+            PendingBackupKind::Backup
+        );
+
+        let rotated = host.account_rotate_root(&replacement).unwrap();
+        let rotated_record = host.store().load_account().unwrap().unwrap();
+        assert_eq!(rotated.generation, changed.generation + 1);
+        assert_eq!(
+            rotated_record.pending_backup().unwrap().kind(),
+            PendingBackupKind::Revoke
         );
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -72,10 +72,14 @@ describe('account record codec', () => {
     expect(sameVersion.acknowledgedBackup).toEqual(confirmed.acknowledgedBackup);
     expect(sameVersion.pendingBackup).toEqual(confirmed.pendingBackup);
 
-    const changedVersion = await replaceAccountIdentity(confirmed, await snapshot('member-a', 2, new Uint8Array([8])));
+    const changedVersion = await replaceAccountIdentity(
+      confirmed,
+      await snapshot('member-a', 2, new Uint8Array([8])),
+      { pendingKind: 'backup' },
+    );
     expect(changedVersion.acknowledgedBackup).toEqual(confirmed.acknowledgedBackup);
     expect(changedVersion.pendingBackup).toMatchObject({
-      kind: 'revoke', version: changedVersion.identity.version,
+      kind: 'backup', version: changedVersion.identity.version,
     });
 
     const different = await replaceAccountIdentity(confirmed, await snapshot('member-b', 0, new Uint8Array([4])));
@@ -182,6 +186,7 @@ describe('account record codec', () => {
     const rewrapped = await replaceAccountIdentity(
       revoke,
       await snapshot('member-a', 1, new Uint8Array([9, 9])),
+      { pendingKind: 'backup' },
     );
     expect(rewrapped.pendingBackup.kind).toBe('revoke');
     expect(rewrapped.pendingBackup.version).toEqual(rewrapped.identity.version);

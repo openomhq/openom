@@ -595,11 +595,11 @@ function accountSnapshotInput(snapshot, memberId) {
   };
 }
 
-async function commitAccountSnapshot(tx, current, handle, snapshot) {
+async function commitAccountSnapshot(tx, current, handle, snapshot, pendingKind = null) {
   const identity = publicAccountIdentityFor(handle);
   const input = accountSnapshotInput(snapshot, identity.memberId);
   const next = current
-    ? await replaceAccountIdentity(current, input)
+    ? await replaceAccountIdentity(current, input, { pendingKind })
     : await createAccountRecord(input);
   const committed = await tx.commit(next);
   return { committed, identity };
@@ -787,7 +787,9 @@ const api = {
           effectiveAccountFloor(saved),
         );
         handle = recovered.takeHandle();
-        const { committed, identity } = await commitAccountSnapshot(tx, saved, handle, recovered);
+        const { committed, identity } = await commitAccountSnapshot(
+          tx, saved, handle, recovered, 'revoke',
+        );
         replaceAccount(handle, committed.identity.version);
         handle = null;
         return {
@@ -952,7 +954,7 @@ const api = {
           effectiveAccountFloor(saved),
         );
         changed = wasmAccountChangePassphrase(handle, next);
-        const { committed } = await commitAccountSnapshot(tx, saved, handle, changed);
+        const { committed } = await commitAccountSnapshot(tx, saved, handle, changed, 'backup');
         replaceAccount(handle, committed.identity.version);
         handle = null;
         return { generation: changed.generation };
@@ -986,7 +988,7 @@ const api = {
           effectiveAccountFloor(saved),
         );
         rotated = wasmAccountRotateRoot(handle, passphrase);
-        const { committed } = await commitAccountSnapshot(tx, saved, handle, rotated);
+        const { committed } = await commitAccountSnapshot(tx, saved, handle, rotated, 'revoke');
         replaceAccount(handle, committed.identity.version);
         handle = null;
         return { recoveryCode: rotated.recoveryCode, generation: rotated.generation };

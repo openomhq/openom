@@ -279,16 +279,16 @@ mod tests {
         store.commit_account(&first, None).unwrap();
 
         let next = first
-            .next_identity(account_identity("member-a", 8, 8))
+            .next_identity(account_identity("member-a", 8, 8), None)
             .unwrap();
         assert!(store.commit_account(&next, None).is_err());
         store.commit_account(&next, Some(first.revision())).unwrap();
 
         assert!(next
-            .next_identity(account_identity("member-a", 6, 6))
+            .next_identity(account_identity("member-a", 6, 6), None)
             .is_err());
         let replacement = next
-            .next_identity(account_identity("member-b", 1, 1))
+            .next_identity(account_identity("member-b", 1, 1), None)
             .unwrap();
         store
             .commit_account(&replacement, Some(next.revision()))

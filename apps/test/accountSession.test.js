@@ -32,20 +32,51 @@ function record(memberId = 'member-local', overrides = {}) {
 
 function backend({ account = 'unlocked', initialRecord = record(), overrides = {} } = {}) {
   let syncRecord = initialRecord;
+  let snapshotKeystore = new Uint8Array([4, 5]);
   const syncState = () => ({ record: syncRecord, storagePersistence: 'granted' });
+  const mutateCredential = async (kind, { rotate = false, byte = 8 } = {}) => {
+    snapshotKeystore = new Uint8Array([byte, byte + 1]);
+    const nextVersion = {
+      generation: syncRecord.identity.version.generation + (rotate ? 1 : 0),
+      blobHash: new Uint8Array(await crypto.subtle.digest('SHA-256', snapshotKeystore)),
+    };
+    const pendingKind = syncRecord.pendingBackup?.kind === 'revoke' ? 'revoke' : kind;
+    syncRecord = {
+      ...syncRecord,
+      revision: syncRecord.revision + 1,
+      identity: {
+        ...syncRecord.identity,
+        version: nextVersion,
+        floor: Math.max(syncRecord.identity.floor, nextVersion.generation),
+        effectiveFloor: Math.max(syncRecord.identity.effectiveFloor, nextVersion.generation),
+      },
+      pendingBackup: syncRecord.binding === null ? null : {
+        kind: pendingKind, version: nextVersion, binding: syncRecord.binding,
+      },
+    };
+  };
   const core = {
     accountStatus: vi.fn(async () => account),
     accountCreate: vi.fn(async () => ({ ...identity('member-created'), recoveryCode: 'recovery' })),
     accountUnlock: vi.fn(async () => identity()),
-    accountRecover: vi.fn(async () => ({ recoveryCode: 'next-recovery', generation: 2 })),
-    accountChangePassphrase: vi.fn(async () => ({ generation: 1 })),
-    accountRotateRoot: vi.fn(async () => ({ recoveryCode: 'rotated', generation: 2 })),
+    accountRecover: vi.fn(async () => {
+      await mutateCredential('revoke', { rotate: true, byte: 9 });
+      return { recoveryCode: 'next-recovery', generation: 2 };
+    }),
+    accountChangePassphrase: vi.fn(async () => {
+      await mutateCredential('backup');
+      return { generation: syncRecord.identity.version.generation };
+    }),
+    accountRotateRoot: vi.fn(async () => {
+      await mutateCredential('revoke', { rotate: true, byte: 10 });
+      return { recoveryCode: 'rotated', generation: syncRecord.identity.version.generation };
+    }),
     accountRegisterProof: vi.fn(async () => new Uint8Array([8, 9])),
     accountPublicIdentity: vi.fn(async () => identity(syncRecord?.identity.memberId ?? 'member-local')),
     accountLock: vi.fn(async () => {}),
     accountSnapshot: vi.fn(async () => ({
       ...identity(syncRecord.identity.memberId),
-      keystore: new Uint8Array([4, 5]),
+      keystore: snapshotKeystore.slice(),
       generation: syncRecord.identity.version.generation,
       blobHash: syncRecord.identity.version.blobHash,
     })),
@@ -129,6 +160,68 @@ function auth(attempts = [{ accessToken: 'token-1', issuer: 'https://issuer', su
 
 function unregistered() {
   return makeError('unregistered', { httpStatus: 403 });
+}
+
+function eventTarget() {
+  const listeners = new Map();
+  return {
+    visibilityState: 'visible',
+    addEventListener(type, callback) {
+      const callbacks = listeners.get(type) ?? new Set();
+      callbacks.add(callback);
+      listeners.set(type, callbacks);
+    },
+    removeEventListener(type, callback) {
+      listeners.get(type)?.delete(callback);
+    },
+    emit(type) {
+      for (const callback of listeners.get(type) ?? []) callback();
+    },
+  };
+}
+
+function serializedLocks() {
+  let tail = Promise.resolve();
+  let active = 0;
+  let maxActive = 0;
+  return {
+    get maxActive() { return maxActive; },
+    request(_name, operation) {
+      const run = async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        try {
+          return await operation();
+        } finally {
+          active -= 1;
+        }
+      };
+      const result = tail.then(run, run);
+      tail = result.then(() => undefined, () => undefined);
+      return result;
+    },
+  };
+}
+
+async function boundAccountRecord({ pendingKind = null } = {}) {
+  const keystore = new Uint8Array([4, 5]);
+  const blobHash = new Uint8Array(await crypto.subtle.digest('SHA-256', keystore));
+  const binding = { issuer: 'https://issuer', subject: 'provider-sub', memberId: 'member-local' };
+  const accountVersion = { generation: 1, blobHash };
+  return {
+    keystore,
+    binding,
+    local: record('member-local', {
+      identity: {
+        memberId: 'member-local', version: accountVersion, floor: 1, effectiveFloor: 1,
+      },
+      binding,
+      acknowledgedBackup: { etag: '"remote-v1"', version: accountVersion },
+      pendingBackup: pendingKind === null ? null : {
+        kind: pendingKind, version: accountVersion, binding,
+      },
+    }),
+  };
 }
 
 function stateShape(overrides = {}) {
@@ -233,7 +326,7 @@ describe('AccountSession local custody and observable axes', () => {
     const session = new AccountSession(core);
     await session.initialize();
     await session.changePassphrase('old', 'new');
-    await session.rotateRoot('new');
+    await session.revokeCredentials('new');
     expect(core.accountSyncState).toHaveBeenCalledTimes(3);
     expect(core.accountChangePassphrase).toHaveBeenCalledWith({ current: 'old', next: 'new' });
   });
@@ -913,5 +1006,182 @@ describe('AccountSession remote restore and conflict decisions', () => {
 
     provider.setSignedIn(false);
     expect(session.state().syncDisposition).toBe('remote');
+  });
+});
+
+describe('AccountSession credential propagation and retry', () => {
+  it('coalesces pending uploads across sessions sharing one browser profile', async () => {
+    const fixture = await boundAccountRecord({ pendingKind: 'backup' });
+    const core = backend({ initialRecord: fixture.local });
+    const locks = serializedLocks();
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local', keystore: fixture.keystore,
+        generation: 1, etag: '"remote-v1"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (_bytes, generation) => ({ generation, etag: '"remote-v2"' })),
+    };
+    const first = new AccountSession(core, { locks, profile: 'shared' });
+    const second = new AccountSession(core, { locks, profile: 'shared' });
+    await Promise.all([first.initialize(), second.initialize()]);
+
+    first.attachSync({ auth: auth(), remote });
+    second.attachSync({ auth: auth(), remote });
+    await vi.waitFor(() => {
+      expect(first.state().pending).toEqual(new Set());
+      expect(second.state().pending).toEqual(new Set());
+    });
+
+    expect(remote.putKeystore).toHaveBeenCalledTimes(1);
+    expect(locks.maxActive).toBe(1);
+  });
+
+  it('discovers and uploads pending work when local initialization follows sync attachment', async () => {
+    const fixture = await boundAccountRecord({ pendingKind: 'backup' });
+    const core = backend({ initialRecord: fixture.local });
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local', keystore: fixture.keystore,
+        generation: 1, etag: '"remote-v1"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (_bytes, generation) => ({ generation, etag: '"remote-v2"' })),
+    };
+    const session = new AccountSession(core);
+    session.attachSync({ auth: auth(), remote });
+
+    await session.initialize();
+    await vi.waitFor(() => expect(session.state().pending).toEqual(new Set()));
+
+    expect(remote.putKeystore).toHaveBeenCalledTimes(1);
+    expect(core.accountAcknowledgeBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it('commits passphrase backup intent before upload and reports remote effectiveness separately', async () => {
+    const fixture = await boundAccountRecord();
+    const core = backend({ initialRecord: fixture.local });
+    let finishUpload;
+    const uploaded = new Promise((resolve) => { finishUpload = resolve; });
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local', keystore: fixture.keystore,
+        generation: 1, etag: '"remote-v1"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (_bytes, generation) => {
+        await uploaded;
+        return { generation, etag: '"remote-v2"' };
+      }),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    const changing = session.changePassphrase('old passphrase', 'new passphrase');
+    await vi.waitFor(() => expect(remote.putKeystore).toHaveBeenCalledTimes(1));
+    expect(session.state().pending).toEqual(new Set(['backup']));
+    expect(core.accountStageBackup).toHaveBeenCalledWith({
+      kind: 'backup', binding: fixture.binding,
+    });
+
+    finishUpload();
+    await expect(changing).resolves.toMatchObject({ generation: 1, pending: false });
+    expect(session.state().pending).toEqual(new Set());
+  });
+
+  it('keeps reporting pending when upload succeeds but exact-version acknowledgement loses a race', async () => {
+    const fixture = await boundAccountRecord();
+    const core = backend({ initialRecord: fixture.local });
+    core.accountAcknowledgeBackup = vi.fn(async () => ({
+      cleared: false,
+      ...await core.accountSyncState(),
+    }));
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local', keystore: fixture.keystore,
+        generation: 1, etag: '"remote-v1"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (_bytes, generation) => ({ generation, etag: '"remote-v2"' })),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.changePassphrase('old passphrase', 'new passphrase')).resolves.toMatchObject({
+      generation: 1,
+      pending: true,
+    });
+    expect(session.state().pending).toEqual(new Set(['backup']));
+  });
+
+  it('returns the rotated recovery code while revocation is pending and resumes without rotating twice', async () => {
+    const fixture = await boundAccountRecord();
+    const core = backend({ initialRecord: fixture.local });
+    let failUpload = true;
+    const remote = {
+      me: vi.fn(async () => ({
+        memberId: 'member-local', keystore: fixture.keystore,
+        generation: 1, etag: '"remote-v1"',
+      })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (_bytes, generation) => {
+        if (failUpload) throw makeError('request_failed');
+        return { generation, etag: '"remote-v2"' };
+      }),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.revokeCredentials('current passphrase')).resolves.toEqual({
+      recoveryCode: 'rotated', generation: 2, pending: true, uploadError: 'request_failed',
+    });
+    expect(session.state().pending).toEqual(new Set(['revoke']));
+
+    failUpload = false;
+    const first = session.retryPending();
+    const second = session.retryPending();
+    expect(second).toBe(first);
+    await first;
+
+    expect(core.accountRotateRoot).toHaveBeenCalledTimes(1);
+    expect(remote.putKeystore).toHaveBeenCalledTimes(2);
+    expect(session.state().pending).toEqual(new Set());
+  });
+
+  it('retries durable pending work on attach, auth changes, online, and visible wakes', async () => {
+    const fixture = await boundAccountRecord({ pendingKind: 'backup' });
+    const wake = eventTarget();
+    const visibility = eventTarget();
+    const provider = auth();
+    const session = new AccountSession(backend({ initialRecord: fixture.local }), {
+      wakeTarget: wake,
+      visibilityTarget: visibility,
+    });
+    await session.initialize();
+    const retry = vi.spyOn(session, 'retryPending').mockResolvedValue(session.state());
+
+    session.attachSync({ auth: provider, remote: {
+      me: vi.fn(), register: vi.fn(), putKeystore: vi.fn(),
+    } });
+    expect(retry).toHaveBeenCalledTimes(1);
+    retry.mockClear();
+
+    provider.setSignedIn(false);
+    expect(retry).toHaveBeenCalledTimes(1);
+    wake.emit('online');
+    expect(retry).toHaveBeenCalledTimes(2);
+    visibility.visibilityState = 'hidden';
+    visibility.emit('visibilitychange');
+    expect(retry).toHaveBeenCalledTimes(2);
+    visibility.visibilityState = 'visible';
+    visibility.emit('visibilitychange');
+    expect(retry).toHaveBeenCalledTimes(3);
+
+    session.dispose();
+    wake.emit('online');
+    expect(retry).toHaveBeenCalledTimes(3);
   });
 });

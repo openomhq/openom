@@ -560,13 +560,19 @@
           expected,
           checkpoint: { etag: '"backup-v1"', version: expected.version },
         });
-        const revoke = await worker.accountStageBackup({ kind: 'revoke', binding });
+        await worker.accountChangePassphrase({
+          current: 'pending journal passphrase', next: 'replacement journal passphrase',
+        });
+        const changed = await worker.accountSyncState();
+        await worker.accountRotateRoot({ passphrase: 'replacement journal passphrase' });
+        const revoke = await worker.accountSyncState();
         const downgrade = await worker.accountStageBackup({ kind: 'backup', binding });
         return {
           staleCleared: staleResult.cleared,
           staleStillPending: staleResult.record.pendingBackup !== null,
           exactCleared: cleared.cleared,
           acknowledgedEtag: cleared.record.acknowledgedBackup.etag,
+          pendingKindAfterPassphraseChange: changed.record.pendingBackup.kind,
           pendingKindAfterDowngrade: downgrade.record.pendingBackup.kind,
           revokeRevision: revoke.record.revision,
           downgradeRevision: downgrade.record.revision,

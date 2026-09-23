@@ -144,7 +144,10 @@ export const DEFAULT_SYNC_CADENCE_MS = 1100;
 export function startSyncDriver(
   worker,
   docId,
-  { subscribeEdits, onStatus, onAuthError, onSecurity, cadenceMs = DEFAULT_SYNC_CADENCE_MS } = {},
+  {
+    subscribeEdits, onStatus, onAuthError, onSecurity, onTick,
+    cadenceMs = DEFAULT_SYNC_CADENCE_MS,
+  } = {},
 ) {
   let stopped = false;
   let inflight = false;
@@ -175,6 +178,7 @@ export function startSyncDriver(
     try {
       do {
         dirty = false;
+        onTick?.();
         const res = await worker.syncNow(docId);
         if (stopped) return;
         if (res?.state === 'ok') onStatus?.({ state: 'synced', at: Date.now(), anomalies: res.anomalies ?? 0 });

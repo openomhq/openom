@@ -67,20 +67,23 @@ checkpoints; tree keyrings, watermarks, and logs stay per document. Browser muta
 use IndexedDB's separate opaque CAS token as a fail-safe, and verify an exact read-back before installing the
 live handle. Committed revisions cross tabs through `BroadcastChannel`; a peer drops resident account and tree
 handles when their exact source blob is stale. Persistent-browser-storage requests are best-effort; only a
-confirmed remote backup supplies a redundant identity copy. Backup/revoke intent is committed before network I/O
-and compare-cleared only for the exact acknowledged blob version. `AccountSession` composes with provider auth and
+confirmed remote backup supplies a redundant identity copy. A passphrase re-wrap commits `backup` intent, while
+local recovery or account-root rotation commits stronger `revoke` intent; neither can be downgraded before network
+I/O, and acknowledgement compare-clears only the exact uploaded blob version. `AccountSession` composes with provider auth and
 the account transport only after all three exist; its observable auth, custody, and binding axes remain independent.
 It probes `/me` before every binding decision, signs the exact pinned token claims for registration, and resumes an
 interrupted register-then-backup flow from durable binding/pending state. Account backup writes use the server's strong
 `ETag` with `If-Match`; reconciliation stays machine-readable in facade state and never silently adopts remote custody.
 Concurrent `enableSync()` callers share one serialized operation, and a successful upload only clears the exact pending
-version it acknowledged.
+version it acknowledged. Credential mutations report local completion separately from remote effectiveness, retain
+their durable pending state after upload failure, and coalesce retries through a separate profile Web Lock on
+initialization, auth changes, online or visible wakes, and tree-sync ticks without repeating credential rotation.
 Owned and joined trees both borrow that account handle;
 joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
 from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle
 and exposes its durable member ID only as the raw development bearer; it does not own accounts.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
-passphrase, snapshot, verified candidate adoption, rotate root, public identity, and registration proof), while
+passphrase, snapshot, verified candidate adoption, revoke credentials, public identity, and registration proof), while
 keeping every secret handle in Rust/wasm. Candidate adoption verifies the fetched wrapped bytes before replacing
 the active persisted snapshot and resident account, while retaining displaced wrapped custody for its trees.
 

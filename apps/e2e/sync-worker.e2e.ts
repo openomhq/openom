@@ -180,6 +180,7 @@ test('app-core: account backup intent compare-clears only its exact version', as
   expect(result.staleStillPending).toBe(true);
   expect(result.exactCleared).toBe(true);
   expect(result.acknowledgedEtag).toBe('"backup-v1"');
+  expect(result.pendingKindAfterPassphraseChange).toBe('backup');
   expect(result.pendingKindAfterDowngrade).toBe('revoke');
   expect(result.downgradeRevision).toBe(result.revokeRevision);
   expect(errors, 'no uncaught page errors').toEqual([]);

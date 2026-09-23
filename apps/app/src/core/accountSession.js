@@ -99,6 +99,12 @@ export class AccountSession {
   #auth = null;
   #remote = null;
   #unsubscribeAuth = null;
+  #wakeTarget;
+  #visibilityTarget;
+  #backupLocks;
+  #backupLockName;
+  #onOnline;
+  #onVisibility;
   #account = 'none';
   #memberId = null;
   #sync = { record: null, storagePersistence: 'unavailable' };
@@ -120,11 +126,29 @@ export class AccountSession {
   #subs = new Set();
   #tail = Promise.resolve();
   #enableSyncPromise = null;
+  #retryPendingPromise = null;
   #clockOffsetSeconds = 0;
 
-  constructor(core) {
+  constructor(core, {
+    wakeTarget = globalThis,
+    visibilityTarget = globalThis.document ?? null,
+    locks = globalThis.navigator?.locks ?? null,
+    profile = 'default',
+  } = {}) {
     if (!core) throw new Error('AccountSession needs an app-core account backend');
     this.#core = core;
+    this.#wakeTarget = wakeTarget;
+    this.#visibilityTarget = visibilityTarget;
+    this.#backupLocks = locks;
+    this.#backupLockName = `openom.account.backup.${profile}`;
+    this.#onOnline = () => this.#triggerPendingRetry({ discover: true });
+    this.#onVisibility = () => {
+      if (this.#visibilityTarget?.visibilityState !== 'hidden') {
+        this.#triggerPendingRetry({ discover: true });
+      }
+    };
+    this.#wakeTarget?.addEventListener?.('online', this.#onOnline);
+    this.#visibilityTarget?.addEventListener?.('visibilitychange', this.#onVisibility);
   }
 
   state() {
@@ -148,6 +172,7 @@ export class AccountSession {
       ? (await this.#core.accountPublicIdentity()).memberId
       : null;
     await this.#refreshLocalSync();
+    this.#triggerPendingRetry();
     return this.state();
   }
 
@@ -170,6 +195,7 @@ export class AccountSession {
     this.#keptOfflineFor = null;
     this.#unsubscribeAuth = auth.onChange(() => this.#onAuthChange());
     this.#publish();
+    this.#triggerPendingRetry();
     return this.state();
   }
 
@@ -190,27 +216,27 @@ export class AccountSession {
     return identity;
   }
 
-  async recover(recoveryCode, newPassphrase) {
-    const opened = await this.#core.accountRecover({ recoveryCode, newPassphrase });
-    const identity = opened.memberId ? opened : { ...opened, ...(await this.#core.accountPublicIdentity()) };
-    this.#setCustody('unlocked', identity.memberId);
-    await this.#refreshLocalSync();
-    this.#clearRemoteContext();
-    return identity;
+  recover(recoveryCode, newPassphrase) {
+    return this.#serialize(async () => {
+      const opened = await this.#core.accountRecover({ recoveryCode, newPassphrase });
+      const identity = opened.memberId ? opened : { ...opened, ...(await this.#core.accountPublicIdentity()) };
+      this.#setCustody('unlocked', identity.memberId);
+      return this.#completeCredentialMutation(identity);
+    });
   }
 
-  async changePassphrase(current, next) {
-    const changed = await this.#core.accountChangePassphrase({ current, next });
-    await this.#refreshLocalSync();
-    this.#clearRemoteContext();
-    return changed;
+  changePassphrase(current, next) {
+    return this.#serialize(async () => {
+      const changed = await this.#core.accountChangePassphrase({ current, next });
+      return this.#completeCredentialMutation(changed);
+    });
   }
 
-  async rotateRoot(passphrase) {
-    const rotated = await this.#core.accountRotateRoot({ passphrase });
-    await this.#refreshLocalSync();
-    this.#clearRemoteContext();
-    return rotated;
+  revokeCredentials(passphrase) {
+    return this.#serialize(async () => {
+      const rotated = await this.#core.accountRotateRoot({ passphrase });
+      return this.#completeCredentialMutation(rotated);
+    });
   }
 
   async registerProof(issuer, subject, timestamp) {
@@ -238,6 +264,17 @@ export class AccountSession {
 
   backup() {
     return this.#serialize(() => this.#backup());
+  }
+
+  retryPending() {
+    if (this.#retryPendingPromise) return this.#retryPendingPromise;
+    const operation = this.#serialize(() => this.#retryPending());
+    this.#retryPendingPromise = operation;
+    void operation.then(
+      () => { if (this.#retryPendingPromise === operation) this.#retryPendingPromise = null; },
+      () => { if (this.#retryPendingPromise === operation) this.#retryPendingPromise = null; },
+    );
+    return operation;
   }
 
   enableSync() {
@@ -284,6 +321,8 @@ export class AccountSession {
   dispose() {
     this.#unsubscribeAuth?.();
     this.#unsubscribeAuth = null;
+    this.#wakeTarget?.removeEventListener?.('online', this.#onOnline);
+    this.#visibilityTarget?.removeEventListener?.('visibilitychange', this.#onVisibility);
     this.#auth = null;
     this.#remote = null;
     this.#subs.clear();
@@ -294,6 +333,46 @@ export class AccountSession {
     const result = this.#tail.then(run, run);
     this.#tail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  async #completeCredentialMutation(result) {
+    await this.#refreshLocalSync();
+    this.#clearRemoteContext();
+    if (this.#sync.record?.pendingBackup === null) return { ...result, pending: false };
+    if (!this.#canRetryPending()) return { ...result, pending: true };
+    try {
+      await this.#backup({ pendingOnly: true });
+      return { ...result, pending: this.#sync.record?.pendingBackup !== null };
+    } catch (error) {
+      await this.#refreshLocalSync();
+      return {
+        ...result,
+        pending: this.#sync.record?.pendingBackup !== null,
+        uploadError: isAppError(error) ? error.code : 'unavailable',
+      };
+    }
+  }
+
+  async #retryPending() {
+    await this.#refreshLocalSync();
+    if (this.#sync.record?.pendingBackup === null || !this.#canRetryPending()) return this.state();
+    return this.#backup({ pendingOnly: true });
+  }
+
+  #canRetryPending() {
+    return this.#account === 'unlocked'
+      && this.#sync.record !== null
+      && this.#remote !== null
+      && this.#auth?.subject() !== null
+      && this.#keptOfflineFor === null;
+  }
+
+  #triggerPendingRetry({ discover = false } = {}) {
+    if (this.#auth === null || this.#remote === null) return;
+    if (!discover && this.#sync.record?.pendingBackup == null) return;
+    void this.retryPending().catch(() => {
+      // Durable intent remains visible in state; a later wake retries it.
+    });
   }
 
   async #register(initialProbe = null) {
@@ -356,8 +435,16 @@ export class AccountSession {
     }
   }
 
-  async #backup() {
+  #backup({ pendingOnly = false } = {}) {
+    const operation = () => this.#backupUnderLock({ pendingOnly });
+    if (typeof this.#backupLocks?.request !== 'function') return operation();
+    return this.#backupLocks.request(this.#backupLockName, operation);
+  }
+
+  async #backupUnderLock({ pendingOnly }) {
+    await this.#refreshLocalSync();
     this.#requireUnlockedLocalAccount();
+    if (pendingOnly && this.#sync.record.pendingBackup === null) return this.state();
     for (let snapshotAttempt = 0; snapshotAttempt < MAX_BACKUP_SNAPSHOT_ATTEMPTS; snapshotAttempt += 1) {
       const probe = await this.#probeRemote();
       this.#assertProbeMatchesLocal(probe);
@@ -431,8 +518,12 @@ export class AccountSession {
         && await remoteMatchesCheckpoint(probe.remote, durable.acknowledgedBackup);
       if (recoveryResume) {
         try {
-          await this.#backup();
-          return { memberId: probe.remote.memberId, pending: false, resumed: true };
+          await this.#backup({ pendingOnly: true });
+          return {
+            memberId: probe.remote.memberId,
+            pending: this.#sync.record?.pendingBackup !== null,
+            resumed: true,
+          };
         } catch (error) {
           return {
             memberId: probe.remote.memberId,
@@ -471,8 +562,12 @@ export class AccountSession {
       this.#publish();
       if (!adopted.recoveryCode) return { memberId: adopted.memberId };
       try {
-        await this.#backup();
-        return { memberId: adopted.memberId, recoveryCode: adopted.recoveryCode, pending: false };
+        await this.#backup({ pendingOnly: true });
+        return {
+          memberId: adopted.memberId,
+          recoveryCode: adopted.recoveryCode,
+          pending: this.#sync.record?.pendingBackup !== null,
+        };
       } catch (error) {
         await this.#refreshLocalSync();
         return {
@@ -697,6 +792,7 @@ export class AccountSession {
     this.#conflict = null;
     this.#keptOfflineFor = null;
     this.#publish();
+    this.#triggerPendingRetry();
   }
 
   #markExpired(error) {

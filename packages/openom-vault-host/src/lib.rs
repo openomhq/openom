@@ -459,10 +459,15 @@ impl AccountRecord {
     }
 
     /// Build the next revision around verified identity bytes. Displaced custody is retained by member id.
+    /// `pending_kind` declares the remote operation required by a changed same-identity blob.
     ///
     /// # Errors
     /// Returns an error if the portable record revision is exhausted.
-    pub fn next_identity(&self, mut identity: AccountIdentityRecord) -> Result<Self, String> {
+    pub fn next_identity(
+        &self,
+        mut identity: AccountIdentityRecord,
+        pending_kind: Option<PendingBackupKind>,
+    ) -> Result<Self, String> {
         let revision = self
             .revision
             .checked_next()
@@ -472,27 +477,28 @@ impl AccountRecord {
                 return Err("account generation rollback".into());
             }
             identity.advance_floor(self.identity.effective_floor());
-            let pending_backup = if identity.version() == self.identity.version() {
-                self.pending_backup.as_ref().and_then(|pending| {
-                    if pending.kind == PendingBackupKind::Revoke {
-                        Some(PendingAccountBackup::new(
-                            PendingBackupKind::Revoke,
-                            identity.version(),
-                            pending.binding.clone(),
-                        ))
-                    } else if pending.version == identity.version() {
-                        Some(pending.clone())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                self.binding.clone().map(|binding| {
+            let pending_backup = if self
+                .pending_backup
+                .as_ref()
+                .is_some_and(|pending| pending.kind == PendingBackupKind::Revoke)
+            {
+                self.pending_backup.as_ref().map(|pending| {
                     PendingAccountBackup::new(
                         PendingBackupKind::Revoke,
                         identity.version(),
-                        binding,
+                        pending.binding.clone(),
                     )
+                })
+            } else if identity.version() != self.identity.version() {
+                self.binding
+                    .clone()
+                    .zip(pending_kind)
+                    .map(|(binding, kind)| {
+                        PendingAccountBackup::new(kind, identity.version(), binding)
+                    })
+            } else {
+                self.pending_backup.as_ref().and_then(|pending| {
+                    (pending.version == identity.version()).then(|| pending.clone())
                 })
             };
             Ok(Self {
@@ -763,7 +769,9 @@ mod account_record_tests {
         ));
         record.validate().unwrap();
 
-        let replacement = record.next_identity(identity("member-b", 1, 1)).unwrap();
+        let replacement = record
+            .next_identity(identity("member-b", 1, 1), None)
+            .unwrap();
 
         assert_eq!(replacement.identity().member_id().as_str(), "member-b");
         assert_eq!(replacement.identity().effective_floor().get(), 1);
@@ -777,7 +785,7 @@ mod account_record_tests {
     }
 
     #[test]
-    fn a_changed_bound_blob_keeps_the_remote_base_and_journals_revocation() {
+    fn a_changed_bound_blob_keeps_the_remote_base_and_journals_credential_intent() {
         let mut record = AccountRecord::new(identity("member-a", 7, 7));
         let binding = AccountBinding::new(
             "https://issuer",
@@ -796,23 +804,32 @@ mod account_record_tests {
             binding,
         ));
 
-        let replacement = record.next_identity(identity("member-a", 7, 8)).unwrap();
+        let rewrapped = record
+            .next_identity(identity("member-a", 7, 8), Some(PendingBackupKind::Backup))
+            .unwrap();
 
         assert_eq!(
-            replacement
+            rewrapped
                 .acknowledged_backup()
                 .and_then(AccountRemoteCheckpoint::version),
             Some(remote_version)
         );
         assert_ne!(
-            replacement
+            rewrapped
                 .acknowledged_backup()
                 .and_then(AccountRemoteCheckpoint::version),
-            Some(replacement.identity().version())
+            Some(rewrapped.identity().version())
         );
-        let pending = replacement.pending_backup().unwrap();
+        let pending = rewrapped.pending_backup().unwrap();
+        assert_eq!(pending.kind(), PendingBackupKind::Backup);
+        assert_eq!(pending.version(), rewrapped.identity().version());
+
+        let rotated = rewrapped
+            .next_identity(identity("member-a", 8, 9), Some(PendingBackupKind::Revoke))
+            .unwrap();
+        let pending = rotated.pending_backup().unwrap();
         assert_eq!(pending.kind(), PendingBackupKind::Revoke);
-        assert_eq!(pending.version(), replacement.identity().version());
+        assert_eq!(pending.version(), rotated.identity().version());
     }
 
     #[test]
@@ -879,7 +896,9 @@ mod account_record_tests {
             .unwrap();
         assert_eq!(downgrade, revoke);
 
-        let rewrapped = revoke.next_identity(identity("member-a", 4, 5)).unwrap();
+        let rewrapped = revoke
+            .next_identity(identity("member-a", 4, 5), Some(PendingBackupKind::Backup))
+            .unwrap();
         let carried = rewrapped.pending_backup().unwrap();
         assert_eq!(carried.kind(), PendingBackupKind::Revoke);
         assert_eq!(carried.version(), rewrapped.identity().version());
