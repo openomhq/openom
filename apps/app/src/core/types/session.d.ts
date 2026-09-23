@@ -26,14 +26,54 @@ export interface AccountIdentitySource {
   onChange(callback: () => void): () => void;
 }
 
-export interface SupabaseSessionLike {
-  readonly access_token: string;
-  readonly user: { readonly id: AuthSubject };
+export interface PasswordCredentials {
+  readonly email: string;
+  readonly password: string;
 }
 
-export interface SupabaseClientLike {
-  readonly auth: {
-    signInWithPassword(credentials: unknown): Promise<unknown>;
-    signOut(): Promise<unknown>;
-  };
+export interface GoTrueTokenSet {
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  readonly expiresAt: number;
+}
+
+export interface GoTrueClientLike {
+  signInWithPassword(credentials: PasswordCredentials): Promise<GoTrueTokenSet>;
+  refresh(refreshToken: string): Promise<GoTrueTokenSet>;
+  signOut(accessToken: string): Promise<void>;
+}
+
+export interface ActiveAuthSessionRecord {
+  readonly version: 1;
+  readonly revision: number;
+  readonly state: 'active';
+  readonly refreshToken: string;
+  readonly issuer: string;
+  readonly subject: string;
+}
+
+export interface InactiveAuthSessionRecord {
+  readonly version: 1;
+  readonly revision: number;
+  readonly state: 'signed_out' | 'expired';
+}
+
+export type AuthSessionRecord = ActiveAuthSessionRecord | InactiveAuthSessionRecord;
+export type AuthSessionRecordState =
+  | Omit<ActiveAuthSessionRecord, 'version' | 'revision'>
+  | Omit<InactiveAuthSessionRecord, 'version' | 'revision'>;
+
+export interface AuthSessionTransactionLike {
+  record(): AuthSessionRecord | null;
+  commit(state: AuthSessionRecordState): { record: AuthSessionRecord; persisted: boolean };
+}
+
+export interface AuthSessionCoordinatorLike {
+  read(): AuthSessionRecord | null;
+  runExclusive<Result>(
+    fallback: AuthSessionRecord | null,
+    operation: (transaction: AuthSessionTransactionLike) => Result | PromiseLike<Result>,
+  ): Promise<Awaited<Result>>;
+  onRevision(callback: (revision: number) => void): () => void;
+  close?(): void;
 }

@@ -158,6 +158,7 @@ src/core/              orchestration — no UI, no rendering.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
   accountRecord.js        validates/codecs the portable identity-scoped account record and its three counters.
   accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.
+  authSessionStore.js     serializes rotating provider refresh-token custody across browser tabs.
   accountComposition.js   constructs the sole AccountSession + provider-auth + remote transport unit.
   accountSession.js       observable local/auth/binding facade; probes, registers, and CAS-backs up account custody.
   gotrueClient.js         validates the direct Supabase Auth REST wire; owns no session or identity state.
@@ -186,7 +187,8 @@ src/core/              orchestration — no UI, no rendering.
   library.js, seed.js, seedKhaldun.js, schema.js   the bundled demo datasets + custom-field defs.
   identity.js              device id + logical clock, persisted across restarts.
   session.js               provider-auth seam; supplies atomic token+issuer+subject registration attempts.
-                           Singleton DevAuth derives only a dev bearer from the unlocked AccountSession.
+                           DevAuth derives only a dev bearer from the unlocked AccountSession; SupabaseAuth keeps
+                           access tokens in memory and serializes rotating refresh custody across browser tabs.
   lockPolicy.js            decides WHEN to auto-lock; platform-agnostic (calls back into the app).
   watermarks.js            anti-rollback: refuses a keyring/snapshot older than one already seen.
   blobs.js                 content-addressed file storage, alongside the document not inside it.

@@ -21,16 +21,22 @@
 /**
  * DevAuth — the singleton development auth provider. It persists no parallel account or identity:
  * availability follows the profile's AccountSession, and the dev server accepts its durable member ID
- * as a raw bearer. Production providers retain their own opaque subjects and are bound in Phase 2.
+ * as a raw bearer. Production providers retain their own opaque subjects and bind them through the account facade.
  */
-import { makeError } from './errorModel.js';
+import { AuthSessionCoordinator } from './authSessionStore.js';
+import { isAppError, makeError } from './errorModel.js';
 
 /** @typedef {import('./types/domain.js').AuthIssuer} AuthIssuer */
 /** @typedef {import('./types/domain.js').AuthSubject} AuthSubject */
 /** @typedef {import('./types/session.js').AccountIdentitySource} AccountIdentitySource */
+/** @typedef {import('./types/session.js').AuthSessionCoordinatorLike} AuthSessionCoordinatorLike */
+/** @typedef {import('./types/session.js').AuthSessionRecord} AuthSessionRecord */
 /** @typedef {import('./types/session.js').AuthSession} AuthSession */
-/** @typedef {import('./types/session.js').SupabaseClientLike} SupabaseClientLike */
-/** @typedef {import('./types/session.js').SupabaseSessionLike} SupabaseSessionLike */
+/** @typedef {import('./types/session.js').GoTrueClientLike} GoTrueClientLike */
+/** @typedef {import('./types/session.js').GoTrueTokenSet} GoTrueTokenSet */
+/** @typedef {import('./types/session.js').PasswordCredentials} PasswordCredentials */
+/** @typedef {{ kind: 'inactive', record: AuthSessionRecord|null } | { kind: 'retry'|'expired', record: AuthSessionRecord } | { kind: 'refreshed', tokens: GoTrueTokenSet, claims: { issuer: AuthIssuer, subject: AuthSubject }, record: AuthSessionRecord }} RefreshOutcome */
+/** @typedef {{ kind: 'retry'|'done', record: AuthSessionRecord|null }} LogoutOutcome */
 
 /** @param {string} accessToken @returns {{ issuer: AuthIssuer, subject: AuthSubject }} */
 function jwtClaims(accessToken) {
@@ -43,10 +49,8 @@ function jwtClaims(accessToken) {
     if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) throw new Error('invalid claims');
     const claims = /** @type {Record<string, unknown>} */ (decoded);
     if (typeof claims.sub !== 'string' || claims.sub.length === 0) throw new Error('missing sub');
-    return {
-      issuer: /** @type {AuthIssuer} */ (typeof claims.iss === 'string' ? claims.iss : ''),
-      subject: /** @type {AuthSubject} */ (claims.sub),
-    };
+    if (typeof claims.iss !== 'string' || claims.iss.length === 0) throw new Error('missing iss');
+    return { issuer: /** @type {AuthIssuer} */ (claims.iss), subject: /** @type {AuthSubject} */ (claims.sub) };
   } catch (error) {
     throw makeError('auth_required', { cause: `auth token claims are unavailable: ${error}` });
   }
@@ -98,7 +102,6 @@ export class DevAuth {
   }
 
   /** @param {() => void} cb */
-  /** @param {() => void} cb */
   onChange(cb) {
     this.#subs.add(cb);
     return () => this.#subs.delete(cb);
@@ -127,39 +130,69 @@ export class DevAuth {
 }
 
 /**
- * SupabaseAuth — a documented stub implementing the SAME AuthSession seam over supabase-js. NOT wired
- * or imported anywhere; it exists so the production swap is one line at composition
- * (`new SessionController(new SupabaseAuth(client))`) with nothing else in the client changing.
- *
- * Shape only (uncomment + `npm i @supabase/supabase-js` when wiring):
- *   getAccessToken() → session.access_token  (supabase-js refreshes under the hood; forceRefresh → refreshSession())
- *   subject()        → session.user.id       (the token's `sub`)
- *   signIn/out       → client.auth.signInWithPassword / signOut
- *   onChange         → client.auth.onAuthStateChange
+ * SupabaseAuth — provider session policy over the direct GoTrue REST client. Access tokens stay in memory;
+ * only a versioned rotating refresh record and non-secret continuity hints are persisted. Every refresh runs
+ * under the project lock and commits the replacement before publishing it or returning an access token.
  */
 /** @implements {AuthSession} */
 export class SupabaseAuth {
-  /** @type {SupabaseClientLike} */
+  /** @type {GoTrueClientLike} */
   #client;
-  /** @type {SupabaseSessionLike | null} */
+  /** @type {AuthSessionCoordinatorLike} */
+  #store;
+  /** @type {AuthSessionRecord|null} */
+  #record;
+  /** @type {{ accessToken: string, expiresAt: number, issuer: AuthIssuer, subject: AuthSubject } | null} */
   #session = null;
   /** @type {Set<() => void>} */
   #subs = new Set();
+  /** @type {Promise<string>|null} */
+  #refreshPromise = null;
+  /** @type {() => void} */
+  #unsubscribeRevision;
+  /** @type {() => number} */
+  #now;
+  /** @type {number} */
+  #refreshMarginMs;
+  #disposed = false;
 
-  /** @param {SupabaseClientLike} client */
-  constructor(client) {
+  /**
+   * @param {GoTrueClientLike} client
+   * @param {{ scope?: string, store?: AuthSessionCoordinatorLike, now?: () => number, refreshMarginMs?: number }} [options]
+   */
+  constructor(client, { scope, store, now = Date.now, refreshMarginMs = 60_000 } = {}) {
+    if (!client || typeof client.signInWithPassword !== 'function'
+      || typeof client.refresh !== 'function' || typeof client.signOut !== 'function') {
+      throw new Error('SupabaseAuth needs a GoTrue client');
+    }
+    if (!store && (typeof scope !== 'string' || scope.length === 0)) {
+      throw new Error('SupabaseAuth needs a project scope');
+    }
+    if (typeof now !== 'function' || !Number.isFinite(refreshMarginMs) || refreshMarginMs < 0) {
+      throw new Error('SupabaseAuth needs a valid clock and refresh margin');
+    }
     this.#client = client;
-    // client.auth.onAuthStateChange((_event, session) => { this.#session = session; this.#notify(); });
+    this.#store = store ?? new AuthSessionCoordinator(/** @type {string} */ (scope));
+    this.#record = this.#store.read();
+    this.#now = now;
+    this.#refreshMarginMs = refreshMarginMs;
+    this.#unsubscribeRevision = this.#store.onRevision((revision) => this.#receiveRevision(revision));
   }
 
   async getAccessToken({ forceRefresh = false } = {}) {
-    if (forceRefresh) {
-      // const { data } = await this.#client.auth.refreshSession();
-      // this.#session = data.session;
+    if (this.#disposed) throw makeError('auth_required', { cause: 'SupabaseAuth is disposed' });
+    if (!forceRefresh && this.#session
+      && this.#session.expiresAt * 1_000 - this.#now() > this.#refreshMarginMs) {
+      return this.#session.accessToken;
     }
-    const token = this.#session?.access_token;
-    if (!token) throw makeError('auth_required', { cause: 'SupabaseAuth: no session' });
-    return token;
+    if (!this.#refreshPromise) {
+      const refresh = this.#refreshWithRetry();
+      this.#refreshPromise = refresh;
+      void refresh.finally(() => {
+        if (this.#refreshPromise === refresh) this.#refreshPromise = null;
+      }).catch(() => {});
+    }
+    return this.#refreshPromise;
   }
 
   async registrationAttempt({ forceRefresh = false } = {}) {
@@ -168,16 +201,74 @@ export class SupabaseAuth {
   }
 
   subject() {
-    return this.#session?.user?.id ?? null;
+    if (this.#session) return this.#session.subject;
+    return this.#record?.state === 'active'
+      ? /** @type {AuthSubject} */ (this.#record.subject)
+      : null;
   }
 
-  /** @param {unknown} credentials */
+  /** @param {PasswordCredentials} credentials */
   async signIn(credentials) {
-    return this.#client.auth.signInWithPassword(credentials);
+    const result = await this.#store.runExclusive(this.#record, async (transaction) => {
+      const tokens = await this.#client.signInWithPassword(credentials);
+      const claims = this.#validatedClaims(tokens.accessToken);
+      const committed = transaction.commit({
+        state: 'active',
+        refreshToken: tokens.refreshToken,
+        issuer: claims.issuer,
+        subject: claims.subject,
+      });
+      return { tokens, claims, record: committed.record };
+    });
+    this.#install(result.tokens, result.claims, result.record);
+    this.#notify();
   }
 
   async signOut() {
-    return this.#client.auth.signOut();
+    if (this.#record?.state !== 'active') {
+      const hadSession = this.#session !== null || this.#record?.state === 'expired';
+      this.#session = null;
+      if (hadSession) this.#notify();
+      return;
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      /** @type {unknown} */
+      let remoteError = null;
+      /** @type {string|null} */
+      let accessToken = null;
+      try {
+        accessToken = await this.getAccessToken();
+      } catch (error) {
+        if (!isAppError(error) || (error.code !== 'auth_required' && error.code !== 'session_expired')) {
+          remoteError = error;
+        }
+      }
+      const claims = accessToken ? this.#validatedClaims(accessToken) : null;
+
+      const outcome = /** @type {LogoutOutcome} */ (await this.#store.runExclusive(this.#record, async (transaction) => {
+        const current = transaction.record();
+        if (current?.state === 'active' && claims
+          && (current.issuer !== claims.issuer || current.subject !== claims.subject)) {
+          return { kind: 'retry', record: current };
+        }
+        if (current?.state !== 'active') return { kind: 'done', record: current };
+        try {
+          if (accessToken) await this.#client.signOut(accessToken);
+        } catch (error) {
+          remoteError = error;
+        }
+        return { kind: 'done', record: transaction.commit({ state: 'signed_out' }).record };
+      }));
+
+      this.#record = outcome.record;
+      this.#session = null;
+      if (outcome.kind === 'retry') continue;
+      this.#notify();
+      if (remoteError) throw remoteError;
+      return;
+    }
+    throw makeError('request_failed', { cause: 'Supabase Auth identity changed during logout' });
   }
 
   /** @param {() => void} cb */
@@ -187,7 +278,127 @@ export class SupabaseAuth {
   }
 
   capabilities() {
-    return { canRegister: true, canLogin: true, sync: true };
+    return { canRegister: false, canLogin: true, sync: true };
+  }
+
+  dispose() {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#unsubscribeRevision();
+    this.#store.close?.();
+    this.#subs.clear();
+    this.#session = null;
+  }
+
+  async #refreshWithRetry() {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const outcome = /** @type {RefreshOutcome} */ (await this.#store.runExclusive(this.#record, async (transaction) => {
+        const current = transaction.record();
+        if (current?.state !== 'active') return { kind: 'inactive', record: current };
+        try {
+          const tokens = await this.#client.refresh(current.refreshToken);
+          const claims = this.#validatedClaims(tokens.accessToken);
+          if (claims.issuer !== current.issuer || claims.subject !== current.subject) {
+            const expired = transaction.commit({ state: 'expired' }).record;
+            return { kind: 'expired', record: expired };
+          }
+          const committed = transaction.commit({
+            state: 'active',
+            refreshToken: tokens.refreshToken,
+            issuer: claims.issuer,
+            subject: claims.subject,
+          });
+          return { kind: 'refreshed', tokens, claims, record: committed.record };
+        } catch (error) {
+          if (!isAppError(error) || error.code !== 'session_expired') throw error;
+          const latest = this.#store.read();
+          if (latest?.state === 'active'
+            && (latest.revision !== current.revision || latest.refreshToken !== current.refreshToken)) {
+            return { kind: 'retry', record: latest };
+          }
+          const expired = transaction.commit({ state: 'expired' }).record;
+          return { kind: 'expired', record: expired };
+        }
+      }));
+
+      if (outcome.kind === 'retry') {
+        this.#record = outcome.record;
+        this.#session = null;
+        continue;
+      }
+      if (outcome.kind === 'refreshed') {
+        this.#install(outcome.tokens, outcome.claims, outcome.record);
+        return outcome.tokens.accessToken;
+      }
+      this.#record = outcome.record;
+      this.#session = null;
+      if (outcome.kind === 'expired') {
+        this.#notify();
+        throw makeError('session_expired', { cause: 'Supabase Auth session expired' });
+      }
+      throw this.#missingSessionError();
+    }
+    throw makeError('request_failed', { cause: 'Supabase Auth session changed during refresh' });
+  }
+
+  /** @param {GoTrueTokenSet} tokens @param {{ issuer: AuthIssuer, subject: AuthSubject }} claims @param {AuthSessionRecord} record */
+  #install(tokens, claims, record) {
+    this.#record = record;
+    this.#session = {
+      accessToken: tokens.accessToken,
+      expiresAt: tokens.expiresAt,
+      issuer: claims.issuer,
+      subject: claims.subject,
+    };
+  }
+
+  /** @param {string} accessToken */
+  #validatedClaims(accessToken) {
+    try {
+      return jwtClaims(accessToken);
+    } catch {
+      throw makeError('request_failed', { cause: 'Supabase Auth returned invalid JWT claims' });
+    }
+  }
+
+  #missingSessionError() {
+    return this.#record?.state === 'expired'
+      ? makeError('session_expired', { cause: 'Supabase Auth session expired' })
+      : makeError('auth_required', { cause: 'SupabaseAuth: no session' });
+  }
+
+  /** @param {number} revision */
+  #receiveRevision(revision) {
+    if (this.#disposed || revision <= 0) return;
+    void this.#store.runExclusive(this.#record, (transaction) => transaction.record())
+      .then((record) => {
+        if (this.#disposed || !record || this.#sameRecord(record, this.#record)) return;
+        this.#record = record;
+        this.#session = null;
+        this.#notify();
+      })
+      .catch(() => {
+        // A later operation rereads storage under the same lock; invalidation is best effort.
+      });
+  }
+
+  /** @param {AuthSessionRecord} left @param {AuthSessionRecord|null} right */
+  #sameRecord(left, right) {
+    if (!right || left.revision !== right.revision || left.state !== right.state) return false;
+    if (left.state !== 'active' || right.state !== 'active') return true;
+    return left.refreshToken === right.refreshToken
+      && left.issuer === right.issuer
+      && left.subject === right.subject;
+  }
+
+  #notify() {
+    for (const cb of this.#subs) {
+      try {
+        cb();
+      } catch (error) {
+        console.warn('[openom] auth onChange subscriber threw', error);
+      }
+    }
   }
 }
 
@@ -217,9 +428,6 @@ export class SessionController {
   subject() {
     return this.#auth.subject();
   }
-  /** @param {() => void} cb */
-  /** @param {() => void} cb */
-  /** @param {() => void} cb */
   /** @param {() => void} cb */
   onChange(cb) {
     return this.#auth.onChange(cb);
