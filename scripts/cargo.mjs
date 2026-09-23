@@ -21,7 +21,7 @@
 //            On a host where local builds succeed, force `local` to avoid a
 //            redundant Docker retry when a genuine test actually fails.
 //
-// OPENOM_CARGO_IMAGE — image for docker/auto (default rust:1-bookworm). The FULL
+// OPENOM_CARGO_IMAGE — image for docker/auto (default rust:1.97.1-bookworm). The FULL
 //   image ships gcc; rusqlite's `bundled` feature compiles SQLite from C and needs
 //   it. The `-slim` tag would fail at that step.
 //
@@ -72,7 +72,7 @@ function loadEnv() {
 loadEnv();
 
 const RUNNER = (process.env.OPENOM_RUNNER || 'auto').toLowerCase();
-const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
+const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 const TARGET_VOLUME = 'openom-cargo-target';
 

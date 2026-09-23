@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CRATE = path.join(REPO, 'packages', 'openom-data-tree');
-const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
+const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 
 const TRIPLE = 'x86_64-pc-windows-msvc';

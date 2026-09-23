@@ -11,7 +11,7 @@
 #
 # The build context is `scripts/` (this file is self-contained — it copies nothing from the repo; the
 # workspace is bind-mounted at run time).
-FROM rust:1-bookworm
+FROM rust:1.97.1-bookworm
 
 # `cargo kani setup` fetches a prebuilt CBMC + the Kani compiler bundle; a couple of runtime libs and
 # python (used by some of Kani's helper scripts) round it out. Keep the layer lean.

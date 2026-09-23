@@ -43,9 +43,9 @@ members = [
 version = "0.1.0"
 license = "AGPL-3.0-or-later"
 edition = "2021"
-# The only supported build path is the container (see scripts/cargo.mjs), currently
-# rustc 1.97. 1.85 as an honest floor lets the MSRV-aware resolver pick the newest
-# dependencies rather than downgrading them.
+# The supported toolchain is pinned in rust-toolchain.toml and the container runner
+# (see scripts/cargo.mjs). 1.85 remains the honest MSRV floor so the resolver can
+# pick current dependencies rather than downgrading them.
 rust-version = "1.85"
 
 [workspace.lints.rust]

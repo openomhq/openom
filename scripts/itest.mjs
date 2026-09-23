@@ -33,7 +33,7 @@ try {
   }
 } catch {}
 
-const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
+const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
 const HOST = 'host.docker.internal';
 const cliArgs = process.argv.slice(2);
 const fresh = cliArgs.includes('--fresh');

@@ -8,7 +8,7 @@
 # registry and target dirs cached in volumes (see docker-compose.yml). So editing
 # server code live-reloads without ever rebuilding this image, and the dependency
 # compile happens once into the target volume, not into an image layer.
-ARG RUST_IMAGE=rust:1-bookworm
+ARG RUST_IMAGE=rust:1.97.1-bookworm
 FROM ${RUST_IMAGE}
 
 # A BuildKit cache mount keeps the crate downloads out of the image and makes a

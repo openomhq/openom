@@ -17,7 +17,7 @@
 //!   -e S3_PUBLIC_ENDPOINT=http://host.docker.internal:9000 \
 //!   -e S3_BUCKET=openom-trees -e S3_REGION=us-east-1 \
 //!   -e S3_ACCESS_KEY=openom -e S3_SECRET_KEY=openompw123 \
-//!   --add-host host.docker.internal:host-gateway rust:1-bookworm \
+//!   --add-host host.docker.internal:host-gateway rust:1.97.1-bookworm \
 //!   cargo test -p openom --test api -- --ignored --nocapture
 //! ```
 

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CRATE = path.join(REPO, 'packages', 'openom-app-core');
-const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
+const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 
 // The HOST triple for the wasm-bindgen CLI download — the Rust build runs in Docker (Linux), but the
