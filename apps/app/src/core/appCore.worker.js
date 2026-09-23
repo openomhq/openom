@@ -509,12 +509,13 @@ async function publishMembership(docId, engine, treeId) {
   }
 }
 
-// Adopt any newer keyring/membership before a data pull (keyring-before-data), refreshing the resolver +
-// moderators. A no-op unless the tree is shared and has a treeId. Chain walks the per-revision successors; the
-// dag adopts the latest self-contained anchor against its pin + the persisted anti-rollback floor.
+// Reconcile membership before any data transfer (keyring-before-data): adopt a newer remote keyring, then
+// publish any locally-newer tail/anchor. Publication is a hard gate for this tick — if it fails, no attributed
+// delta may reach the data channel before the authorization material needed to verify it. A no-op unless the
+// tree is shared and has a treeId. Chain walks per-revision successors; dag merges its self-contained anchor.
 /** @param {Core} c */
-async function syncKeyringForTick(c) {
-  if (!c.shared || !c.treeId || c.aborted) return;
+async function reconcileMembershipForTick(c) {
+  if (!c.shared || !c.treeId || !c.engine || c.aborted) return;
   const transport = keyringTransportFor(c.docId);
   if (!transport) return;
   if (c.engine === 'chain') {
@@ -526,7 +527,17 @@ async function syncKeyringForTick(c) {
     if (head) await refreshMembershipAndEpochs(c, 'chain', head.bytes);
   } else if (c.engine === 'dag') {
     const r = await syncDagAnchor(
-      { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, dagAnchorPin: wasmDagAnchorPin, acceptRemoteDagAnchor: wasmAcceptRemoteDagAnchor }, transport, keyringStore: keyringStore() },
+      {
+        wasm: {
+          unwrapDagKeyring: wasmUnwrapDagKeyring,
+          dagAnchorPin: wasmDagAnchorPin,
+          keyringSummary: wasmKeyringSummary,
+          keyringCovers: wasmKeyringCovers,
+          acceptRemoteDagAnchor: wasmAcceptRemoteDagAnchor,
+        },
+        transport,
+        keyringStore: keyringStore(),
+      },
       { docId: c.docId, treeId: c.treeId, floor: await loadWatermark(c.docId) },
     );
     if (r.changed && r.watermark) {
@@ -535,6 +546,9 @@ async function syncKeyringForTick(c) {
       if (head) await refreshMembershipAndEpochs(c, 'dag', head.bytes);
     }
   }
+  // Idempotent in the steady state. This closes the durable-outbox gap where a membership mutation committed
+  // locally but its immediate keyring PUT failed: every later tick retries before touching the data channel.
+  await publishMembership(c.docId, c.engine, c.treeId);
 }
 
 // After a member adopts a keyring change: refresh the §B3 resolver + moderators AND — if the change rotated
@@ -635,7 +649,7 @@ async function pushMembership(docId, engine) {
       refresh: async () => {
         // We're behind the server's basis: pull the newer keyring, then recompute from the fresh head.
         const c = cores.get(docId);
-        if (c) await syncKeyringForTick(c);
+        if (c) await reconcileMembershipForTick(c);
         const h = await keyringStore().loadHead(docId);
         if (!h) throw new Error('membership keyring disappeared during refresh');
         return parseMembershipSummary(wasmKeyringSummary(h.engine || eng, h.bytes));
@@ -2116,7 +2130,7 @@ async function runTick(c) {
     do {
       c.dirty = false;
       if (c.aborted) break;
-      await syncKeyringForTick(c); // keyring-before-data: verify the arrivals against the CURRENT membership
+      await reconcileMembershipForTick(c); // keyring-before-data: authorize arrivals before data transfer
       if (c.aborted) break;
       await syncData(c);
     } while (c.dirty);

@@ -6,7 +6,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   joinAsMember, publishDagAnchor, publishKeyring, restoreOwnerTree, syncKeyring,
-  frameHops, unframe, JoinError, KeyringForkError,
+  syncDagAnchor, frameHops, unframe, JoinError, KeyringForkError,
 } from '../app/src/core/sharing.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 
@@ -274,6 +274,47 @@ describe('publishDagAnchor wiring', () => {
 
     expect(result).toEqual({ head: 3 });
     expect(transport.putKeyring).not.toHaveBeenCalled();
+  });
+});
+
+describe('syncDagAnchor stale-remote classification', () => {
+  it('leaves a locally-newer verified anchor available for republish', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.saveHead('k1', 'dag', REV2);
+    const acceptRemoteDagAnchor = vi.fn();
+    const result = await syncDagAnchor({
+      wasm: {
+        unwrapDagKeyring: () => REV1,
+        keyringSummary: () => JSON.stringify({ members: [], basis: ['op:remote-tip'] }),
+        keyringCovers: () => true,
+        dagAnchorPin: vi.fn(),
+        acceptRemoteDagAnchor,
+      },
+      transport: transport([{ revision: 1, bytes: REV1 }]),
+      keyringStore,
+    }, { docId: 'k1', treeId, floor: new Uint8Array([9]) });
+
+    expect(result).toEqual({ changed: false });
+    expect(acceptRemoteDagAnchor).not.toHaveBeenCalled();
+    expect([...(await keyringStore.loadHead('k1')).bytes]).toEqual([...REV2]);
+  });
+
+  it('does not classify an incomparable anchor as stale', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.saveHead('k1', 'dag', REV2);
+    const rollback = new Error('remote anchor does not cover the local floor');
+    await expect(syncDagAnchor({
+      wasm: {
+        unwrapDagKeyring: () => REV1,
+        keyringSummary: () => JSON.stringify({ members: [], basis: ['op:concurrent-tip'] }),
+        keyringCovers: () => false,
+        dagAnchorPin: () => new Uint8Array([7]),
+        acceptRemoteDagAnchor: () => { throw rollback; },
+      },
+      transport: transport([{ revision: 1, bytes: REV1 }]),
+      keyringStore,
+    }, { docId: 'k1', treeId, floor: new Uint8Array([9]) })).rejects.toBe(rollback);
+    expect([...(await keyringStore.loadHead('k1')).bytes]).toEqual([...REV2]);
   });
 });
 

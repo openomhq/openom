@@ -187,6 +187,30 @@ test('app-core: account backup intent compare-clears only its exact version', as
 });
 
 for (const engine of ['chain', 'dag'] as const) {
+  test(`app-core: a web tick republishes failed membership before data (${engine})`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(String(error)));
+
+    await page.goto('/e2e/sync-worker-harness.html');
+    await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+    const result = await page.evaluate(
+      (selectedEngine) => (window as any).__syncWorker.keyringRepublishAfterFailure(selectedEngine),
+      engine,
+    );
+    expect(result.genesisState).toBe('ok');
+    expect(result.shareFailed, 'the immediate post-mutation membership PUT failed').toBe(true);
+    expect(result.blockedState, 'a failed membership retry aborts the data tick').toBe('error');
+    expect(result.blockedHead, 'only genesis is remotely available while membership is blocked').toBe(1);
+    expect(result.blockedData, 'no attributed delta outruns its authorizing membership').toBe(0);
+    expect(result.retriedState, JSON.stringify(result.retriedError)).toBe('ok');
+    expect(result.finalHead, 'the tick republished the missing tail/anchor').toBe(2);
+    expect(result.finalData, 'the delta uploads after membership is available').toBe(1);
+    expect(errors, 'no uncaught page errors').toEqual([]);
+  });
+}
+
+for (const engine of ['chain', 'dag'] as const) {
   test(`app-core: one durable account owns and joins multiple trees (${engine})`, async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(String(e)));

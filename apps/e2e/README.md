@@ -24,7 +24,9 @@ pnpm test:e2e
   + local store + replicator, meeting through an in-page transport. Asserts they converge and that an
   un-pushed offline mint is still offered outbound once a transport attaches. It also runs two workers for one
   browser profile and verifies that an account re-wrap invalidates the peer's stale account/tree custody, and
-  that stale backup acknowledgements cannot clear a newer pending journal entry.
+  that stale backup acknowledgements cannot clear a newer pending journal entry. Chain and DAG fault-injection
+  cases also prove a web tick republishes a locally committed membership change before allowing an attributed
+  data delta onto the remote channel.
 - `sqlite.e2e.ts` + `sqlite-harness.html` / `sqlite-harness.worker.js` — WASM SQLite over the
   OPFS-SAHPool VFS, run in a module Worker; asserts data survives a page reload, header-free
   (no COOP/COEP).

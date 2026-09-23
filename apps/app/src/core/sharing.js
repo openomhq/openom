@@ -119,6 +119,19 @@ function parseVerifiedSigners(json) {
   });
 }
 
+/** @param {string} json @returns {string[]} */
+function parseKeyringBasis(json) {
+  const parsed = /** @type {unknown} */ (JSON.parse(json));
+  if (!parsed || typeof parsed !== 'object' || !('basis' in parsed)) {
+    throw new Error('keyring summary is missing its basis');
+  }
+  const basis = /** @type {{ basis: unknown }} */ (parsed).basis;
+  if (!Array.isArray(basis) || basis.length === 0 || !basis.every((token) => typeof token === 'string')) {
+    throw new Error('keyring summary has a malformed basis');
+  }
+  return basis;
+}
+
 /** A member-join failed terminally (bad walk / pin / account unlock) — nothing was persisted. */
 export class JoinError extends Error {
   /** @param {string} message */
@@ -486,6 +499,13 @@ export async function syncDagAnchor(deps, { docId, treeId, floor }) {
   const latest = revisions.at(-1);
   if (!latest) return { changed: false };
   const remote = wasm.unwrapDagKeyring(latest.bytes);
+  if (bytesEqual(remote, head.bytes)) return { changed: false };
+  // A locally-authored DAG op can be durable before its immediate PUT succeeds. In that state the served
+  // anchor is legitimately behind our persisted floor, so feeding it to acceptRemoteDagAnchor would report a
+  // rollback before the caller gets a chance to republish. Prove that every remote frontier op is already in
+  // our verified local closure; only then classify the remote as stale and let the tick publish our anchor.
+  const remoteBasis = parseKeyringBasis(wasm.keyringSummary('dag', remote));
+  if (wasm.keyringCovers('dag', head.bytes, remoteBasis)) return { changed: false };
   // The pin's founder identity comes from our TRUSTED local anchor (verified at join); the floor is our
   // persisted watermark. acceptRemoteDagAnchor throws on a rollback below the floor or a founder swap.
   const pin = wasm.dagAnchorPin(head.bytes);

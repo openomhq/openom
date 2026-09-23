@@ -71,6 +71,7 @@
       const getKeys = []; // every key blobGet fetched since the last _resetGets() (OPE-464 fetch-skip assertion)
       const keyrings = new Map(); // revision -> MembershipEnvelope bytes (the walk's per-revision body)
       let keyringHead = 0;
+      let keyringPutFailures = 0;
       let snapshotCovered = null; // the last x-openom-covered header seen on a snapshot PUT (OPE-409)
       let reportedFrontier = null; // the last PULL frontier reported to PUT /frontier (OPE-409 gate 2)
       // The advisory membership summary (OPE-293): a faithful in-memory stand-in for the server's /access —
@@ -128,6 +129,10 @@
         // The keyring channel. publishKeyring PUTs ascending from head+1, so the revision is the publish
         // order; we store the unwrapped MembershipEnvelope payload (what a joiner's walk consumes).
         async putKeyring(_docId, update) {
+          if (keyringPutFailures > 0) {
+            keyringPutFailures -= 1;
+            throw new Error('simulated keyring transport failure');
+          }
           const revision = keyringHead + 1;
           keyrings.set(revision, keyringUpdatePayload(update));
           keyringHead = revision;
@@ -202,6 +207,12 @@
         },
         _resetGets() {
           getKeys.length = 0;
+        },
+        _failKeyringPuts(count = 1) {
+          keyringPutFailures = count;
+        },
+        _keyringHead() {
+          return keyringHead;
         },
       };
     }
@@ -668,6 +679,70 @@
           registrationProofLength: registrationProof.length,
           rotatedRecoveryCodeLength: rotated.recoveryCode.length,
           accountStatuses: [initialAccountStatus, createdAccountStatus, lockedAccountStatus],
+        };
+      },
+
+      // OPE-546: a membership mutation is locally durable even if its immediate keyring PUT fails. A later
+      // web tick must republish that chain tail / DAG anchor BEFORE it uploads an attributed data delta.
+      async keyringRepublishAfterFailure(engine) {
+        const transport = makeTransport();
+        const nonce = crypto.randomUUID();
+        const ownerDoc = `keyring-republish-${engine}-${nonce}`;
+        const treeId = new Uint8Array(16).fill(engine === 'dag' ? 41 : 42);
+        const ownerPass = 'keyring republish owner passphrase';
+        const memberPass = 'keyring republish member passphrase';
+
+        const owner = spawnWorker(`${ownerDoc}:owner`);
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await provisionTree(owner, { passphrase: ownerPass, treeId, docId: ownerDoc, engine });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const genesis = await owner.syncNow(ownerDoc);
+
+        const member = spawnWorker(`${ownerDoc}:member`);
+        await member.warm();
+        const account = await member.provisionMember(memberPass);
+
+        transport._failKeyringPuts();
+        let shareFailed = false;
+        try {
+          await owner.addMember(ownerDoc, {
+            passphrase: ownerPass,
+            treeId,
+            ownerMemberId: 'ignored',
+            minRevision: 1,
+            newMemberId: account.memberId,
+            role: 'editor',
+            memberAuthorPublic: account.authorPublicKey,
+            memberHpkePublic: account.hpkePublicKey,
+            engine,
+          });
+        } catch {
+          shareFailed = true;
+        }
+
+        await owner.assertAnchor(ownerDoc, 'pAfterFailedShare', PERSON);
+        await owner.commit(ownerDoc);
+
+        // Keep the authorization channel unavailable for one tick. The data channel must remain untouched.
+        transport._failKeyringPuts();
+        const blocked = await owner.syncNow(ownerDoc);
+        const blockedHead = transport._keyringHead();
+        const blockedData = transport._size();
+
+        // Once the channel recovers, the same tick publishes membership first and only then the signed delta.
+        const retried = await owner.syncNow(ownerDoc);
+        return {
+          genesisState: genesis.state,
+          shareFailed,
+          blockedState: blocked.state,
+          blockedError: blocked.error ?? null,
+          blockedHead,
+          blockedData,
+          retriedState: retried.state,
+          retriedError: retried.error ?? null,
+          finalHead: transport._keyringHead(),
+          finalData: transport._size(),
         };
       },
 

@@ -142,6 +142,12 @@ export interface SyncDagDeps {
   readonly wasm: {
     unwrapDagKeyring(update: KeyringUpdateBytes): KeyringBytes;
     dagAnchorPin(keyring: KeyringBytes): DagAnchorPinBytes;
+    keyringSummary(engine: KeyringEngine, keyring: KeyringBytes): string;
+    keyringCovers(
+      engine: KeyringEngine,
+      keyring: KeyringBytes,
+      storedBasis: ReadonlyArray<string>,
+    ): boolean;
     acceptRemoteDagAnchor(
       local: KeyringBytes,
       remote: KeyringBytes,
