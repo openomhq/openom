@@ -14,7 +14,15 @@ const CRATE = path.join(REPO, 'packages', 'openom-data-tree');
 const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 
-const TRIPLE = 'x86_64-pc-windows-msvc';
+// The HOST triple for the wasm-bindgen CLI download — the Rust build runs in Docker (Linux), but the
+// bindings generator runs natively on THIS machine, so it must match the host OS/arch.
+const TRIPLE = (() => {
+  if (process.platform === 'win32') return 'x86_64-pc-windows-msvc';
+  if (process.platform === 'darwin') return process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+  // wasm-bindgen publishes Linux binaries as static MUSL archives.
+  return process.arch === 'arm64' ? 'aarch64-unknown-linux-musl' : 'x86_64-unknown-linux-musl';
+})();
+const BINDGEN_BIN = process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen';
 const TARGET_SUBDIR = 'target-wasm';
 const CONTAINER_TARGET = `/work/packages/openom-data-tree/${TARGET_SUBDIR}`;
 const PROFILE = process.env.WASM_PROFILE || 'wasm-release';
@@ -58,14 +66,14 @@ console.log(`[✓] Compiled ${path.relative(REPO, WASM)} (${(fs.statSync(WASM).s
 
 function resolvedBindgenVersion() {
   const lock = fs.readFileSync(path.join(REPO, 'Cargo.lock'), 'utf8');
-  const m = lock.match(/name = "wasm-bindgen"\nversion = "([^"]+)"/);
+  const m = lock.match(/name = "wasm-bindgen"\r?\nversion = "([^"]+)"/);
   if (!m) throw new Error('could not find the resolved wasm-bindgen version in Cargo.lock');
   return m[1];
 }
 
 async function ensureWasmBindgen(ver) {
   const dir = path.join(TOOLS_DIR, `wasm-bindgen-${ver}-${TRIPLE}`);
-  const exe = path.join(dir, 'wasm-bindgen.exe');
+  const exe = path.join(dir, BINDGEN_BIN);
   if (fs.existsSync(exe)) return exe;
   const name = `wasm-bindgen-${ver}-${TRIPLE}`;
   const url = `https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${ver}/${name}.tar.gz`;
@@ -77,7 +85,7 @@ async function ensureWasmBindgen(ver) {
   await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tarball));
   run('tar', ['-xzf', path.basename(tarball)], { cwd: TOOLS_DIR });
   fs.rmSync(tarball, { force: true });
-  if (!fs.existsSync(exe)) throw new Error(`wasm-bindgen.exe not found after extracting ${name}`);
+  if (!fs.existsSync(exe)) throw new Error(`${BINDGEN_BIN} not found after extracting ${name}`);
   console.log(`[✓] Installed wasm-bindgen CLI to ${path.relative(REPO, dir)}`);
   return exe;
 }
