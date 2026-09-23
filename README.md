@@ -50,6 +50,11 @@ There is no build chain for the web app: `pnpm serve` is a tiny static server (`
 exists only because `file://` blocks ES modules in some browsers. Tauri serves the same `apps/app/` folder —
 one app, two shells.
 
+Ordinary local development uses `DevAuth`. To exercise the real Supabase Auth wire locally without a cloud
+project, run `pnpm test:e2e:supabase-auth` from `apps/`. The runner starts pinned GoTrue services through the
+optional `supabase-auth` Compose profile, generates a temporary ES256 key, and proves password sign-in, rotating
+refresh tokens, JWKS verification, and the openom server's unregistered-account boundary.
+
 ## Continuous integration
 
 | Workflow | Runs on | Answers |

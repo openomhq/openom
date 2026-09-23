@@ -6,6 +6,10 @@
 #   docker compose down           # stop
 #   docker compose down -v        # stop and wipe the data + build-cache volumes
 #
+# Real Supabase Auth is opt-in and does not replace DevAuth for ordinary local work:
+#   COMPOSE_PROFILES=supabase-auth docker compose up supabase-auth-gateway
+# Prefer `pnpm test:e2e:supabase-auth` from apps/ for the reproducible ES256/JWKS acceptance.
+#
 # First `up` compiles the server (a few minutes); after that the target volume
 # caches it, so restarts are fast. Health: http://localhost:6060/health and
 # http://localhost:6060/ready (the latter pings Postgres).
@@ -111,6 +115,67 @@ services:
     volumes:
       - openom-minio:/data
 
+  # A real, pinned Supabase Auth service for local integration tests. All three services live behind
+  # a profile so ordinary `docker compose up` remains the lightweight DevAuth stack. The acceptance
+  # runner supplies an ephemeral ES256 private JWK through OPENOM_SUPABASE_JWT_KEYS; no signing key is
+  # committed or written to disk.
+  supabase-auth-db:
+    image: postgres:17-alpine
+    profiles: ["supabase-auth"]
+    environment:
+      # GoTrue's pinned migrations grant read access to a role literally named `postgres`.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres-local-only
+      POSTGRES_DB: gotrue
+    volumes:
+      - supabase-auth-db:/var/lib/postgresql/data
+    configs:
+      - source: supabase_auth_db_init
+        target: /docker-entrypoint-initdb.d/001-auth-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gotrue"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  supabase-auth:
+    image: supabase/auth:v2.197.0
+    profiles: ["supabase-auth"]
+    depends_on:
+      supabase-auth-db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: "http://localhost:${OPENOM_SUPABASE_AUTH_PORT:-9999}/auth/v1"
+      GOTRUE_DB_DRIVER: postgres
+      DATABASE_URL: postgres://postgres:postgres-local-only@supabase-auth-db:5432/gotrue
+      # v2.197.0 expects a JSON ARRAY of private JWKs. The selected key must include `sign` in key_ops.
+      GOTRUE_JWT_KEYS: "${OPENOM_SUPABASE_JWT_KEYS:-[]}"
+      GOTRUE_JWT_ISSUER: "http://localhost:${OPENOM_SUPABASE_AUTH_PORT:-9999}/auth/v1"
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_EXP: "3600"
+      # GoTrue still requires the legacy secret even when asymmetric keys are configured; JWT_KEYS wins.
+      GOTRUE_JWT_SECRET: openom-local-gotrue-fallback-secret-32-chars
+      GOTRUE_SITE_URL: http://localhost:5173
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_ADMIN_EMAIL: admin@openom.local
+
+  # Hosted Supabase exposes GoTrue below /auth/v1; bare GoTrue serves from /. Keep the local and hosted
+  # client contracts identical and add the browser CORS headers normally supplied by Supabase's gateway.
+  supabase-auth-gateway:
+    image: caddy:2.10.2-alpine
+    profiles: ["supabase-auth"]
+    depends_on:
+      supabase-auth:
+        condition: service_started
+    ports:
+      - "${OPENOM_SUPABASE_AUTH_PORT:-9999}:9999"
+    configs:
+      - source: supabase_auth_caddyfile
+        target: /etc/caddy/Caddyfile
+
   # Local observability, opt-in to spare the machine. grafana/otel-lgtm is an
   # all-in-one image: one OTLP endpoint (4317 gRPC / 4318 HTTP) feeding Grafana +
   # Loki (logs) + Tempo (traces) + Prometheus/Mimir (metrics). It does NOT start by
@@ -129,3 +194,31 @@ volumes:
   openom-server-target:
   openom-postgres:
   openom-minio:
+  supabase-auth-db:
+
+configs:
+  supabase_auth_db_init:
+    content: |
+      CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION postgres;
+      ALTER ROLE postgres IN DATABASE gotrue SET search_path = auth, public;
+  supabase_auth_caddyfile:
+    content: |
+      :9999 {
+          @preflight method OPTIONS
+          handle @preflight {
+              header Access-Control-Allow-Origin "http://localhost:5173"
+              header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+              header Access-Control-Allow-Headers "authorization, apikey, content-type, x-client-info, x-supabase-api-version"
+              header Access-Control-Max-Age "3600"
+              header Vary "Origin"
+              respond 204
+          }
+          handle_path /auth/v1/* {
+              header Access-Control-Allow-Origin "http://localhost:5173"
+              header Vary "Origin"
+              reverse_proxy supabase-auth:9999 {
+                  header_up Host supabase-auth:9999
+              }
+          }
+          respond "openom local Supabase Auth gateway" 200
+      }
