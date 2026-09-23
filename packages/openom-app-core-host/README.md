@@ -18,6 +18,8 @@ This crate coordinates synchronous account, tree, sharing, and local-data operat
 provides the injected persistence seam for the singleton wrapped account plus per-tree keyrings/watermarks;
 Tauri commands are a thin asynchronous veneer in `apps/src-tauri`. It is not an auth provider or network
 client, and it does not persist invite-handshake resume state.
+Its Rust-facing tree lifecycle and keyring synchronization APIs retain `TreeId`/`MemberId`/`ReplicaId`
+newtypes; only the Tauri command boundary accepts raw transport values.
 
 ## Invariants
 

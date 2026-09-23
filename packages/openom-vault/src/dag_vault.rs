@@ -750,7 +750,7 @@ impl KeyringLifecycle for DagVault {
         // then re-wrap it under the new passphrase. `from_bytes`+`change_passphrase` never touch the tree.
         let ks = AccountKeystore::from_bytes(keystore)?;
         let unlocked = ks.unlock_with_recovery(recovery_code)?;
-        let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
+        let new_ks = ks.change_passphrase(&unlocked, new_passphrase)?;
 
         // Open the tree with the restored identity by the ordinary owner path — the anchor is unchanged, so the
         // resolved owner is exactly this identity (anti-substitution inside `unlock_with_account` enforces it).
@@ -786,8 +786,8 @@ impl KeyringLifecycle for DagVault {
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
         let ks = AccountKeystore::from_bytes(keystore)?;
-        let unlocked = ks.unlock(old_passphrase.expose())?; // a wrong current passphrase fails closed here
-        let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
+        let unlocked = ks.unlock(old_passphrase)?; // a wrong current passphrase fails closed here
+        let new_ks = ks.change_passphrase(&unlocked, new_passphrase)?;
 
         let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
         Ok(Rekeyed {
@@ -997,7 +997,7 @@ impl DagVault {
         anchor: &[u8],
         account: &UnlockedAccount,
     ) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
-        if ctx.member_id.as_str() != account.member_id {
+        if ctx.member_id != &account.member_id {
             return Err(VaultError::NotAuthorized);
         }
         Self::unlock_as_member_with_root(ctx, anchor, account.tree_root())
@@ -1460,7 +1460,7 @@ impl DagVault {
         account: &UnlockedAccount,
         floor: &[u8],
     ) -> Result<Backfilled, VaultError> {
-        if ctx.member_id.as_str() != account.member_id {
+        if ctx.member_id != &account.member_id {
             return Err(VaultError::NotAuthorized);
         }
         let root = account.tree_root();
@@ -1725,11 +1725,11 @@ mod tests {
     /// and re-derives a fresh [`UnlockedAccount`] per owner-authored op ([`acct`]); the derived identity is
     /// stable, so provision + every later unlock/mutation resolve the SAME owner.
     fn owner_ks(pass: &Passphrase) -> AccountKeystore {
-        AccountKeystore::create(pass.expose()).unwrap().0
+        AccountKeystore::create(pass).unwrap().0
     }
     /// A fresh [`UnlockedAccount`] for an owner-authored op, from the owner's keystore + passphrase.
     fn acct(ks: &AccountKeystore, pass: &Passphrase) -> UnlockedAccount {
-        ks.unlock(pass.expose()).unwrap()
+        ks.unlock(pass).unwrap()
     }
     /// Provision a dag tree owned by a freshly-minted account keystore; returns the keystore (for later owner
     /// ops) and the provisioned result.
@@ -2606,11 +2606,11 @@ mod tests {
         let new_pass = Passphrase::new(b"a whole new passphrase");
 
         // The app creates the durable account (keeping its recovery code), then provisions the tree from it.
-        let (ks, account_code, _u) = AccountKeystore::create(old_pass.expose()).unwrap();
+        let (ks, account_code, _u) = AccountKeystore::create(&old_pass).unwrap();
         let p = DagVault
             .provision(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
-                &ks.unlock(old_pass.expose()).unwrap(),
+                &ks.unlock(&old_pass).unwrap(),
             )
             .unwrap();
         let sealed = p
@@ -2655,7 +2655,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r3")),
                 &p.anchor,
-                &new_ks.unlock(new_pass.expose()).unwrap(),
+                &new_ks.unlock(&new_pass).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -2669,7 +2669,7 @@ mod tests {
 
         // The OLD passphrase no longer opens the re-wrapped account (the passphrase was rotated by recovery).
         assert!(
-            new_ks.unlock(old_pass.expose()).is_err(),
+            new_ks.unlock(&old_pass).is_err(),
             "the pre-recovery passphrase no longer opens the re-wrapped account"
         );
     }
@@ -2877,11 +2877,11 @@ mod tests {
         let old_pass = Passphrase::new(b"correct horse");
         let new_pass = Passphrase::new(b"battery staple unicorn");
 
-        let (ks, account_code, _u) = AccountKeystore::create(old_pass.expose()).unwrap();
+        let (ks, account_code, _u) = AccountKeystore::create(&old_pass).unwrap();
         let p = DagVault
             .provision(
                 &ctx(&tree, &member, &ReplicaId::new(b"r1")),
-                &ks.unlock(old_pass.expose()).unwrap(),
+                &ks.unlock(&old_pass).unwrap(),
             )
             .unwrap();
         let sealed = p
@@ -2917,7 +2917,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"r2")),
                 &p.anchor,
-                &new_ks.unlock(new_pass.expose()).unwrap(),
+                &new_ks.unlock(&new_pass).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -2925,7 +2925,7 @@ mod tests {
             b"keepsake"
         );
         assert!(
-            new_ks.unlock(old_pass.expose()).is_err(),
+            new_ks.unlock(&old_pass).is_err(),
             "the pre-change passphrase no longer opens the account"
         );
 

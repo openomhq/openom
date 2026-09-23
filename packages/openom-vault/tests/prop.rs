@@ -12,7 +12,8 @@ proptest! {
     #[test]
     fn unlock_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
         // OPE-543: unlock takes the durable ACCOUNT identity; the arbitrary bytes are the untrusted keyring.
-        let (_ks, _code, account) = AccountKeystore::create(b"pass").unwrap();
+        let (_ks, _code, account) =
+            AccountKeystore::create(&Passphrase::new(b"pass".to_vec())).unwrap();
         let r = unlock(
             &bytes,
             &account,
@@ -25,7 +26,8 @@ proptest! {
     #[test]
     fn recover_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
         // Recovery is account-keystore-mediated; a valid keystore blob + code, arbitrary (untrusted) keyring.
-        let (ks, code, _account) = AccountKeystore::create(b"pass").unwrap();
+        let (ks, code, _account) =
+            AccountKeystore::create(&Passphrase::new(b"pass".to_vec())).unwrap();
         let r = recover(
             &bytes,
             &ks.to_bytes().unwrap(),

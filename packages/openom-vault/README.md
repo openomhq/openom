@@ -4,7 +4,7 @@
 > change-passphrase / author membership) over a keyring, for both engines.
 
 **Status:** built · key-custody lifecycle · openom-coupled by design · design keyring-dag/design.dag-vault.md (OPE-273/279)
-**Last updated:** 2026-09-21
+**Last updated:** 2026-09-23
 
 ## What it is — and is not
 
@@ -33,6 +33,10 @@ key-free binding surface. Unlike the engines below it, this crate is **openom-co
 `openom-crypto`'s AEAD/KDF and `openom-protocol`'s envelope/id types) and keeps the `openom-` prefix; that
 coupling is load-bearing, not incidental (see `packages/openom-crypto` and OPE-283).
 
+The pure-Rust vault boundary accepts `Passphrase`, `RecoveryCode`, `TreeId`, `ReplicaId`, and `MemberId`
+directly. Raw byte slices and strings are confined to serialization, cryptographic mechanism layers, and
+platform veneers, preventing same-shaped credentials and identifiers from being interchanged at call sites.
+
 ## Invariants
 
 | id | guarantee | why it matters | verified by |
@@ -54,7 +58,7 @@ use openom_vault::{AppVault, lifecycle::{KeyringLifecycle, VaultContext}};
 
 // Dispatches to the chain or dag engine on the tree's bound EngineKind.
 let vault = AppVault::from_kind(engine_kind);
-let account = keystore.unlock(passphrase.expose())?;
+let account = keystore.unlock(&passphrase)?;
 let ctx = VaultContext { tree_id, member_id, replica_id };
 
 let provisioned = vault.provision(&ctx, &account)?; // new tree → keyring bytes + a DEK session

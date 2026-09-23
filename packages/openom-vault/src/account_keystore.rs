@@ -23,9 +23,10 @@ use keyeo_crypto::{
 use openom_crypto::{
     default_kdf_params, derive_account_keys, derive_kek, generate_account_root,
     generate_recovery_code, generate_salt, parse_recovery_code, recovery_kdf_params, Kek,
-    RecoveryCode, RootKeys,
+    Passphrase, RecoveryCode, RootKeys,
 };
 use openom_keyring_api::derive_member_id;
+use openom_protocol::ids::MemberId;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -60,7 +61,7 @@ pub struct UnlockedAccount {
     /// Identity / HPKE / KEK keys derived from `identity_master`.
     pub root: RootKeys,
     /// The stable user-level `member_id`.
-    pub member_id: String,
+    pub member_id: MemberId,
     /// The rotatable wrapping root (re-wrapped by `change_passphrase`).
     account_root: Zeroizing<[u8; 32]>,
     /// The durable identity master (re-wrapped, unchanged, by a root rotation).
@@ -143,7 +144,9 @@ impl AccountKeystore {
     ///
     /// # Errors
     /// [`VaultError`] on RNG / KDF / wrap failure.
-    pub fn create(passphrase: &[u8]) -> Result<(Self, RecoveryCode, UnlockedAccount), VaultError> {
+    pub fn create(
+        passphrase: &Passphrase,
+    ) -> Result<(Self, RecoveryCode, UnlockedAccount), VaultError> {
         let identity_master = generate_account_root()?;
         let account_root = generate_account_root()?;
         let root = derive_account_keys(&identity_master);
@@ -166,7 +169,7 @@ impl AccountKeystore {
         // OUTER: account_root under the passphrase KEK + the recovery-code KEK.
         let outer_gid = outer_group_id(&member_id, generation);
         let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
-        let pass_kek = derive_kek(passphrase, &pass_kdf)?;
+        let pass_kek = derive_kek(passphrase.expose(), &pass_kdf)?;
         let pass_wrap = keyeo_kek_wrap(
             account_root.as_slice(),
             member_id.clone(),
@@ -197,7 +200,7 @@ impl AccountKeystore {
         };
         let unlocked = UnlockedAccount {
             root,
-            member_id,
+            member_id: MemberId::new(member_id),
             account_root,
             identity_master,
         };
@@ -209,8 +212,8 @@ impl AccountKeystore {
     /// # Errors
     /// [`VaultError`] if the passphrase is wrong, the KDF params are out of window, or the unwrapped identity
     /// does not match the plaintext public fields (tamper / forged-`generation` detection).
-    pub fn unlock(&self, passphrase: &[u8]) -> Result<UnlockedAccount, VaultError> {
-        self.unlock_with(passphrase, KekKind::Passphrase)
+    pub fn unlock(&self, passphrase: &Passphrase) -> Result<UnlockedAccount, VaultError> {
+        self.unlock_with(passphrase.expose(), KekKind::Passphrase)
     }
 
     /// Unlock with the printed recovery code.
@@ -246,7 +249,7 @@ impl AccountKeystore {
         self.verify_public_fields(&root)?;
         Ok(UnlockedAccount {
             root,
-            member_id: self.member_id.clone(),
+            member_id: MemberId::new(&self.member_id),
             account_root,
             identity_master,
         })
@@ -260,11 +263,11 @@ impl AccountKeystore {
     pub fn change_passphrase(
         &self,
         unlocked: &UnlockedAccount,
-        new_passphrase: &[u8],
+        new_passphrase: &Passphrase,
     ) -> Result<Self, VaultError> {
         let outer_gid = outer_group_id(&self.member_id, self.generation);
         let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
-        let pass_kek = derive_kek(new_passphrase, &pass_kdf)?;
+        let pass_kek = derive_kek(new_passphrase.expose(), &pass_kdf)?;
         let pass_wrap = keyeo_kek_wrap(
             unlocked.account_root.as_slice(),
             self.member_id.clone(),
@@ -295,7 +298,7 @@ impl AccountKeystore {
     pub fn rotate_account_root(
         &self,
         unlocked: &UnlockedAccount,
-        passphrase: &[u8],
+        passphrase: &Passphrase,
     ) -> Result<(Self, RecoveryCode), VaultError> {
         let generation = self.generation.saturating_add(1);
         let account_root = generate_account_root()?;
@@ -312,7 +315,7 @@ impl AccountKeystore {
 
         let outer_gid = outer_group_id(&self.member_id, generation);
         let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
-        let pass_kek = derive_kek(passphrase, &pass_kdf)?;
+        let pass_kek = derive_kek(passphrase.expose(), &pass_kdf)?;
         let pass_wrap = keyeo_kek_wrap(
             account_root.as_slice(),
             self.member_id.clone(),
@@ -418,19 +421,19 @@ impl AccountKeystore {
 mod tests {
     use super::*;
 
-    fn pass() -> &'static [u8] {
-        b"correct horse battery staple"
+    fn pass() -> Passphrase {
+        Passphrase::new(b"correct horse battery staple".to_vec())
     }
 
     #[test]
     fn create_then_unlock_roundtrips_the_identity() {
-        let (ks, _code, unlocked) = AccountKeystore::create(pass()).unwrap();
+        let (ks, _code, unlocked) = AccountKeystore::create(&pass()).unwrap();
         assert_eq!(
             ks.wraps.len(),
             3,
             "passphrase + recovery + account-root wraps"
         );
-        let again = ks.unlock(pass()).unwrap();
+        let again = ks.unlock(&pass()).unwrap();
         assert_eq!(unlocked.member_id, again.member_id);
         assert_eq!(
             unlocked.root.identity.verifying_key().to_bytes(),
@@ -441,13 +444,15 @@ mod tests {
 
     #[test]
     fn wrong_passphrase_fails() {
-        let (ks, _code, _u) = AccountKeystore::create(pass()).unwrap();
-        assert!(ks.unlock(b"wrong passphrase").is_err());
+        let (ks, _code, _u) = AccountKeystore::create(&pass()).unwrap();
+        assert!(ks
+            .unlock(&Passphrase::new(b"wrong passphrase".to_vec()))
+            .is_err());
     }
 
     #[test]
     fn recovery_code_unlocks_the_same_identity() {
-        let (ks, code, unlocked) = AccountKeystore::create(pass()).unwrap();
+        let (ks, code, unlocked) = AccountKeystore::create(&pass()).unwrap();
         let via_code = ks.unlock_with_recovery(&code).unwrap();
         assert_eq!(unlocked.member_id, via_code.member_id);
         assert_eq!(
@@ -458,22 +463,21 @@ mod tests {
 
     #[test]
     fn change_passphrase_keeps_member_id_and_recovery() {
-        let (ks, code, unlocked) = AccountKeystore::create(pass()).unwrap();
-        let ks2 = ks
-            .change_passphrase(&unlocked, b"a brand new passphrase")
-            .unwrap();
+        let (ks, code, unlocked) = AccountKeystore::create(&pass()).unwrap();
+        let new_passphrase = Passphrase::new(b"a brand new passphrase".to_vec());
+        let ks2 = ks.change_passphrase(&unlocked, &new_passphrase).unwrap();
         assert_eq!(ks.member_id, ks2.member_id);
         assert_eq!(ks.author_public, ks2.author_public);
-        let u2 = ks2.unlock(b"a brand new passphrase").unwrap();
-        assert_eq!(u2.member_id, ks.member_id);
-        assert!(ks2.unlock(pass()).is_err());
+        let u2 = ks2.unlock(&new_passphrase).unwrap();
+        assert_eq!(u2.member_id.as_str(), ks.member_id);
+        assert!(ks2.unlock(&pass()).is_err());
         assert!(ks2.unlock_with_recovery(&code).is_ok());
     }
 
     #[test]
     fn rotate_account_root_keeps_identity_and_revokes_the_old_recovery_code() {
-        let (ks, old_code, unlocked) = AccountKeystore::create(pass()).unwrap();
-        let (ks2, new_code) = ks.rotate_account_root(&unlocked, pass()).unwrap();
+        let (ks, old_code, unlocked) = AccountKeystore::create(&pass()).unwrap();
+        let (ks2, new_code) = ks.rotate_account_root(&unlocked, &pass()).unwrap();
         // identity + member_id unchanged; generation bumped
         assert_eq!(ks.member_id, ks2.member_id);
         assert_eq!(ks.author_public, ks2.author_public);
@@ -486,16 +490,16 @@ mod tests {
             inner_after.ciphertext.as_ref()
         );
         // same identity still opens; the NEW recovery code works, the OLD one no longer does
-        let u2 = ks2.unlock(pass()).unwrap();
-        assert_eq!(u2.member_id, ks.member_id);
+        let u2 = ks2.unlock(&pass()).unwrap();
+        assert_eq!(u2.member_id.as_str(), ks.member_id);
         assert!(ks2.unlock_with_recovery(&new_code).is_ok());
         assert!(ks2.unlock_with_recovery(&old_code).is_err());
     }
 
     #[test]
     fn generation_floor_refuses_a_rolled_back_keystore() {
-        let (ks, _old_code, unlocked) = AccountKeystore::create(pass()).unwrap();
-        let (ks2, _new_code) = ks.rotate_account_root(&unlocked, pass()).unwrap();
+        let (ks, _old_code, unlocked) = AccountKeystore::create(&pass()).unwrap();
+        let (ks2, _new_code) = ks.rotate_account_root(&unlocked, &pass()).unwrap();
         let floor = ks2.generation; // the client has now seen generation 1
         assert_eq!(floor, 1);
 
@@ -517,18 +521,18 @@ mod tests {
 
     #[test]
     fn tampered_author_public_is_rejected() {
-        let (mut ks, _code, _u) = AccountKeystore::create(pass()).unwrap();
+        let (mut ks, _code, _u) = AccountKeystore::create(&pass()).unwrap();
         ks.author_public[0] ^= 0xff;
-        assert!(ks.unlock(pass()).is_err());
+        assert!(ks.unlock(&pass()).is_err());
     }
 
     #[test]
     fn persisted_blob_roundtrips_and_still_unlocks() {
-        let (ks, code, unlocked) = AccountKeystore::create(pass()).unwrap();
+        let (ks, code, unlocked) = AccountKeystore::create(&pass()).unwrap();
         let bytes = ks.to_bytes().unwrap();
         let loaded = AccountKeystore::from_bytes(&bytes).unwrap();
         assert_eq!(ks, loaded);
-        let via_pass = loaded.unlock(pass()).unwrap();
+        let via_pass = loaded.unlock(&pass()).unwrap();
         let via_code = loaded.unlock_with_recovery(&code).unwrap();
         assert_eq!(via_pass.member_id, unlocked.member_id);
         assert_eq!(via_code.member_id, unlocked.member_id);

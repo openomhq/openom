@@ -4,7 +4,7 @@
 > encrypted tree sessions, the claim engine, and local-first synchronization.
 
 **Status:** built · account/tree custody cutover in progress · wasm + native rlib
-**Last updated:** 2026-09-22
+**Last updated:** 2026-09-23
 
 ## What it is — and is not
 
@@ -22,6 +22,8 @@ It is not an authentication session, network client, or persistence policy. Supa
 profile-level location of the wrapped keystore belong to the shell/session layers. Secret account material
 never leaves [`AccountHandle`]; the shell receives only the wrapped keystore, public identity fields,
 registration signature, generation, and one-time recovery code.
+Pure-Rust account and tree lifecycle calls use `Passphrase`, `RecoveryCode`, `TreeId`, `ReplicaId`, and
+`MemberId`; wasm/native veneers construct those domain types from their raw transport values at ingress.
 
 ## Invariants
 

@@ -532,7 +532,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         let version = snapshot.version();
         let generation = AccountGeneration::new(version.generation().get());
         AccountIdentityRecord::new(
-            AccountMemberId::new(handle.member_id()),
+            AccountMemberId::new(handle.member_id().as_str()),
             AccountKeystore::new(snapshot.into_keystore()),
             StoredAccountBackupVersion::new(
                 generation,
@@ -597,7 +597,7 @@ impl<St: VaultStore> AppCoreHost<St> {
         checkpoint: AccountRemoteCheckpoint,
         pending_kind: Option<PendingBackupKind>,
     ) -> Result<AccountAdopted, HostError> {
-        let member_id = handle.member_id().to_string();
+        let member_id = handle.member_id().as_str().to_string();
         let snapshot = Self::snapshot_wire(openom_app_core::account_snapshot(&handle));
         let next = Self::next_account_record(current, &handle, None)?
             .finish_remote_adoption(binding, checkpoint, pending_kind)
@@ -707,7 +707,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             record.identity().keystore().as_bytes(),
             openom_app_core::AccountGeneration::new(record.identity().effective_floor().get()),
         )?;
-        if handle.member_id() != record.identity().member_id().as_str() {
+        if handle.member_id().as_str() != record.identity().member_id().as_str() {
             return Err(HostError::Store(
                 "stored account member id does not match authenticated keystore".into(),
             ));
@@ -870,7 +870,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             candidate,
             openom_app_core::AccountGeneration::new(floor),
         )?;
-        if handle.member_id() != expected_member_id.as_str() {
+        if handle.member_id().as_str() != expected_member_id.as_str() {
             return Err(HostError::IdentityConflict(
                 "account candidate member id does not match the bound remote identity".into(),
             ));
@@ -913,7 +913,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             candidate,
             openom_app_core::AccountGeneration::new(floor),
         )?;
-        if recovered.handle.member_id() != expected_member_id.as_str() {
+        if recovered.handle.member_id().as_str() != expected_member_id.as_str() {
             return Err(HostError::IdentityConflict(
                 "account candidate member id does not match the bound remote identity".into(),
             ));
@@ -1188,8 +1188,8 @@ impl<St: VaultStore> AppCoreHost<St> {
                 self.doc_store(doc)?,
                 self.engine,
                 account,
-                tree_id.as_bytes(),
-                replica.as_bytes(),
+                tree_id,
+                &replica,
                 doc.to_string(),
             )
             .map_err(HostError::from)
@@ -1237,8 +1237,8 @@ impl<St: VaultStore> AppCoreHost<St> {
                             self.doc_store(doc)?,
                             self.engine,
                             account,
-                            tree_id.as_bytes(),
-                            replica.as_bytes(),
+                            tree_id,
+                            &replica,
                             &anchor,
                             doc.to_string(),
                         )?;
@@ -1257,9 +1257,9 @@ impl<St: VaultStore> AppCoreHost<St> {
                             self.engine,
                             account,
                             &anchor,
-                            tree_id.as_bytes(),
+                            tree_id,
                             &signers,
-                            replica.as_bytes(),
+                            &replica,
                             floor,
                             &retained,
                             doc.to_string(),
@@ -1414,6 +1414,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             &self.store.watermark(doc).map_err(HostError::Store)?,
         );
         let replica = ReplicaId::new(fresh_replica()?);
+        let member_id = MemberId::new(&member.member_id);
         let added = self.with_account(|account| {
             openom_app_core::add_tree_member(
                 &openom_app_core::TreeMutationContext {
@@ -1425,7 +1426,7 @@ impl<St: VaultStore> AppCoreHost<St> {
                     min_revision: floor,
                 },
                 &openom_app_core::MemberAdmission {
-                    member_id: &member.member_id,
+                    member_id: &member_id,
                     role: &member.role,
                     author_public_key: &member.author_public_key,
                     hpke_public_key: &member.hpke_public_key,
@@ -1446,8 +1447,8 @@ impl<St: VaultStore> AppCoreHost<St> {
                 self.doc_store(doc)?,
                 self.engine,
                 account,
-                tree_id.as_bytes(),
-                reopen_replica.as_bytes(),
+                tree_id,
+                &reopen_replica,
                 &added.keyring,
                 doc.to_string(),
             )
@@ -1558,8 +1559,8 @@ impl<St: VaultStore> AppCoreHost<St> {
                 self.doc_store(doc)?,
                 self.engine,
                 account,
-                tree_id.as_bytes(),
-                reopen_replica.as_bytes(),
+                tree_id,
+                &reopen_replica,
                 &removed.keyring,
                 doc.to_string(),
             )
@@ -1700,7 +1701,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             )));
         }
         let walk = openom_vault::sharing::verify_keyring_walk(
-            tree_id.as_bytes(),
+            tree_id,
             hops,
             pinned_revision,
             pinned_hash,
@@ -1714,9 +1715,9 @@ impl<St: VaultStore> AppCoreHost<St> {
                 self.engine,
                 account,
                 &walk.head_keyring,
-                tree_id.as_bytes(),
+                tree_id,
                 &walk.trusted_signers_flat,
-                replica.as_bytes(),
+                &replica,
                 walk.revision,
                 &retained,
                 doc.to_string(),
@@ -1777,7 +1778,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             )));
         }
         let anchor = openom_vault::sharing::unwrap_dag_keyring(anchor_wrapped)?;
-        let verified = openom_vault::sharing::verify_dag_anchor(&anchor, tree_id.as_bytes(), pin)?;
+        let verified = openom_vault::sharing::verify_dag_anchor(&anchor, tree_id, pin)?;
         let no_retained: Vec<(u32, Vec<u8>)> = Vec::new();
         // Unlock at the verified anchor BEFORE persisting (F3). Dag carries no signer walk / retention, so the
         // trusted-signers are empty and the revision is 0 (mirrors the web joinDagAnchor).
@@ -1788,9 +1789,9 @@ impl<St: VaultStore> AppCoreHost<St> {
                 self.engine,
                 account,
                 &verified.keyring,
-                tree_id.as_bytes(),
+                tree_id,
                 &[],
-                replica.as_bytes(),
+                &replica,
                 0,
                 &no_retained,
                 doc.to_string(),
@@ -1995,7 +1996,7 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// [`HostError::NoCore`] / [`HostError::NoKeyring`] if the tree isn't open / stored; [`HostError::Vault`] on
     /// a rejected keyring run; [`HostError::Core`] on adoption / resolver; [`HostError::Store`] on a store fault
     /// (or a dag deployment, where this path doesn't apply).
-    pub fn sync_keyring(&self, doc: &str, tree_id: &[u8], hops: &[u8]) -> Result<(), HostError> {
+    pub fn sync_keyring(&self, doc: &str, tree_id: &TreeId, hops: &[u8]) -> Result<(), HostError> {
         if self.engine != EngineKind::Chain {
             return Err(HostError::Store(
                 "dag keyring adoption is the anchor merge, not this chain-walk path".into(),
@@ -3007,7 +3008,7 @@ mod tests {
 
         let remote_passphrase = Passphrase::new(b"remote profile passphrase".to_vec());
         let remote = openom_app_core::account_create(&remote_passphrase).unwrap();
-        let remote_member = remote.handle.member_id().to_string();
+        let remote_member = remote.handle.member_id().as_str().to_string();
         let remote_version = openom_app_core::account_snapshot(&remote.handle).version();
         let adoption = || adoption_context(&remote_member, remote_version);
         assert_ne!(local_member, remote_member);
@@ -3107,7 +3108,7 @@ mod tests {
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
         let remote_passphrase = Passphrase::new(b"remote profile passphrase".to_vec());
         let remote = openom_app_core::account_create(&remote_passphrase).unwrap();
-        let remote_member = remote.handle.member_id().to_string();
+        let remote_member = remote.handle.member_id().as_str().to_string();
         let old_recovery = RecoveryCode::new(remote.recovery_code);
         let new_passphrase = Passphrase::new(b"recovered profile passphrase".to_vec());
         let remote_version = openom_app_core::account_snapshot(&remote.handle).version();
@@ -3955,7 +3956,9 @@ mod tests {
             .unwrap();
         let successor =
             openom_vault::sharing::frame_keyring_hops(std::slice::from_ref(&rev3.keyring));
-        bob_host.sync_keyring("t", &tree_id, &successor).unwrap();
+        bob_host
+            .sync_keyring("t", &TreeId::new(tree_id), &successor)
+            .unwrap();
 
         assert_eq!(
             bob_host.store().load_keyring("t").unwrap().unwrap(),

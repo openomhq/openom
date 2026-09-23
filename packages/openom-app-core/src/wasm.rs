@@ -41,7 +41,7 @@ impl AccountHandle {
     #[wasm_bindgen(getter, js_name = memberId)]
     #[must_use]
     pub fn member_id(&self) -> String {
-        self.inner.member_id().to_string()
+        self.inner.member_id().as_str().to_string()
     }
 
     /// The authenticated account-keystore generation currently resident in this handle.
@@ -870,12 +870,14 @@ pub fn provision_tree(
     replica_id: &[u8],
     doc: String,
 ) -> Result<OpenResult, JsError> {
+    let tree_id = TreeId::new(tree_id);
+    let replica_id = ReplicaId::new(replica_id);
     let provisioned = crate::provision_tree(
         MemoryBlob::new(),
         parse_engine(engine)?,
         &account.inner,
-        tree_id,
-        replica_id,
+        &tree_id,
+        &replica_id,
         doc,
     )
     .map_err(to_js)?;
@@ -905,12 +907,14 @@ pub fn unlock_tree(
     anchor: &[u8],
     doc: String,
 ) -> Result<OpenResult, JsValue> {
+    let tree_id = TreeId::new(tree_id);
+    let replica_id = ReplicaId::new(replica_id);
     let unlocked = crate::unlock_tree(
         MemoryBlob::new(),
         parse_engine(engine)?,
         &account.inner,
-        tree_id,
-        replica_id,
+        &tree_id,
+        &replica_id,
         anchor,
         doc,
     )
@@ -944,14 +948,16 @@ pub fn unlock_tree_as_member(
     min_revision: u32,
     doc: String,
 ) -> Result<OpenResult, JsError> {
+    let tree_id = TreeId::new(tree_id);
+    let replica_id = ReplicaId::new(replica_id);
     let unlocked = crate::unlock_tree_as_member(
         MemoryBlob::new(),
         parse_engine(engine)?,
         &account.inner,
         keyring,
-        tree_id,
+        &tree_id,
         trusted_signers,
-        replica_id,
+        &replica_id,
         min_revision,
         &[],
         doc,
@@ -988,13 +994,13 @@ pub fn provision(
 ) -> Result<OpenResult, JsError> {
     // The construction lives in the shared store-generic rlib fn (crate::provision) so this veneer and the
     // native host share ONE implementation; here we supply the wasm worker's in-memory store + wrap the result.
+    let _ = member_id;
     let p = crate::provision(
         MemoryBlob::new(),
         parse_engine(engine)?,
         &Passphrase::new(passphrase.into_bytes()),
-        tree_id,
-        member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &ReplicaId::new(replica_id),
         doc,
     )
     .map_err(to_js)?;
@@ -1032,13 +1038,13 @@ pub fn unlock(
     // worker `importLog`s the durably persisted log, THEN `bootstrap`s. Bootstrapping the fresh empty store here
     // would be dead work and would conflate a bad passphrase with one corrupt log entry. `keystore` is the
     // durable-account blob the platform layer persisted at provision (empty for a chain tree).
+    let _ = member_id;
     let u = crate::unlock(
         MemoryBlob::new(),
         parse_engine(engine)?,
         &Passphrase::new(passphrase.into_bytes()),
-        tree_id,
-        member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &ReplicaId::new(replica_id),
         anchor,
         keystore,
         doc,
@@ -1090,9 +1096,9 @@ pub fn recover(
         parse_engine(engine)?,
         &RecoveryCode::new(recovery_code),
         &Passphrase::new(new_passphrase.into_bytes()),
-        tree_id,
-        member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(member_id),
+        &ReplicaId::new(replica_id),
         anchor,
         keystore,
         floor,
@@ -1141,9 +1147,9 @@ pub fn change_passphrase(
         parse_engine(engine)?,
         &Passphrase::new(old_passphrase.into_bytes()),
         &Passphrase::new(new_passphrase.into_bytes()),
-        tree_id,
-        member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(member_id),
+        &ReplicaId::new(replica_id),
         anchor,
         keystore,
         floor,
@@ -1219,11 +1225,11 @@ pub fn backfill_rrk_with_account(
         .as_dag()
         .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
     let tree = TreeId::new(tree_id);
-    let member = MemberId::new(account.inner.member_id());
+    let member = account.inner.member_id();
     let replica = ReplicaId::new(replica_id);
     let ctx = VaultContext {
         tree_id: &tree,
-        member_id: &member,
+        member_id: member,
         replica_id: &replica,
     };
     let result = dag
@@ -1322,11 +1328,11 @@ pub fn add_member(
         keyring,
         &Passphrase::new(owner_passphrase.into_bytes()),
         owner_keystore,
-        tree_id,
-        owner_member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(owner_member_id),
+        &ReplicaId::new(replica_id),
         min_revision,
-        new_member_id,
+        &MemberId::new(new_member_id),
         role,
         member_author_public,
         member_hpke_public,
@@ -1364,11 +1370,11 @@ pub fn remove_member(
         keyring,
         &Passphrase::new(owner_passphrase.into_bytes()),
         owner_keystore,
-        tree_id,
-        owner_member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(owner_member_id),
+        &ReplicaId::new(replica_id),
         min_revision,
-        remove_member_id,
+        &MemberId::new(remove_member_id),
     )
     .map_err(to_js)?;
     Ok(MembershipChange {
@@ -1406,11 +1412,11 @@ pub fn change_role(
         keyring,
         &Passphrase::new(owner_passphrase.into_bytes()),
         owner_keystore,
-        tree_id,
-        owner_member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(owner_member_id),
+        &ReplicaId::new(replica_id),
         min_revision,
-        target_member_id,
+        &MemberId::new(target_member_id),
         new_role,
     )
     .map_err(to_js)?;
@@ -1438,15 +1444,19 @@ pub fn add_member_with_account(
     member_author_public: &[u8],
     member_hpke_public: &[u8],
 ) -> Result<MembershipChange, JsError> {
+    let tree_id = TreeId::new(tree_id);
+    let owner_member_id = account.inner.member_id();
+    let replica_id = ReplicaId::new(replica_id);
+    let new_member_id = MemberId::new(new_member_id);
     let changed = openom_vault::sharing::add_member_as_account(
         parse_engine(engine)?,
         keyring,
         &account.inner.account,
-        tree_id,
-        account.inner.member_id(),
-        replica_id,
+        &tree_id,
+        owner_member_id,
+        &replica_id,
         min_revision,
-        new_member_id,
+        &new_member_id,
         role,
         member_author_public,
         member_hpke_public,
@@ -1473,15 +1483,19 @@ pub fn remove_member_with_account(
     min_revision: u32,
     remove_member_id: &str,
 ) -> Result<MembershipChange, JsError> {
+    let tree_id = TreeId::new(tree_id);
+    let owner_member_id = account.inner.member_id();
+    let replica_id = ReplicaId::new(replica_id);
+    let remove_member_id = MemberId::new(remove_member_id);
     let changed = openom_vault::sharing::remove_member_as_account(
         parse_engine(engine)?,
         keyring,
         &account.inner.account,
-        tree_id,
-        account.inner.member_id(),
-        replica_id,
+        &tree_id,
+        owner_member_id,
+        &replica_id,
         min_revision,
-        remove_member_id,
+        &remove_member_id,
     )
     .map_err(to_js)?;
     Ok(MembershipChange {
@@ -1506,15 +1520,19 @@ pub fn change_role_with_account(
     target_member_id: &str,
     new_role: &str,
 ) -> Result<MembershipChange, JsError> {
+    let tree_id = TreeId::new(tree_id);
+    let founder_member_id = account.inner.member_id();
+    let replica_id = ReplicaId::new(replica_id);
+    let target_member_id = MemberId::new(target_member_id);
     let changed = openom_vault::sharing::change_role_as_account(
         parse_engine(engine)?,
         keyring,
         &account.inner.account,
-        tree_id,
-        account.inner.member_id(),
-        replica_id,
+        &tree_id,
+        founder_member_id,
+        &replica_id,
         min_revision,
-        target_member_id,
+        &target_member_id,
         new_role,
     )
     .map_err(to_js)?;
@@ -1613,8 +1631,13 @@ pub fn verify_keyring_walk(
     pinned_revision: u32,
     pinned_hash: &[u8],
 ) -> Result<KeyringWalk, JsError> {
-    let w = openom_vault::sharing::verify_keyring_walk(tree_id, hops, pinned_revision, pinned_hash)
-        .map_err(to_js)?;
+    let w = openom_vault::sharing::verify_keyring_walk(
+        &TreeId::new(tree_id),
+        hops,
+        pinned_revision,
+        pinned_hash,
+    )
+    .map_err(to_js)?;
     Ok(KeyringWalk {
         revision: w.revision,
         head_keyring: w.head_keyring,
@@ -1634,7 +1657,8 @@ pub fn sync_keyring(
     tree_id: &[u8],
     hops: &[u8],
 ) -> Result<MembershipChange, JsError> {
-    let a = openom_vault::sharing::accept_remote_keyring(anchor, tree_id, hops).map_err(to_js)?;
+    let a = openom_vault::sharing::accept_remote_keyring(anchor, &TreeId::new(tree_id), hops)
+        .map_err(to_js)?;
     Ok(MembershipChange {
         keyring: a.keyring,
         watermark: a.watermark,
@@ -1688,7 +1712,8 @@ pub fn verify_dag_anchor(
     tree_id: &[u8],
     pin: &[u8],
 ) -> Result<MembershipChange, JsError> {
-    let a = openom_vault::sharing::verify_dag_anchor(anchor, tree_id, pin).map_err(to_js)?;
+    let a = openom_vault::sharing::verify_dag_anchor(anchor, &TreeId::new(tree_id), pin)
+        .map_err(to_js)?;
     Ok(MembershipChange {
         keyring: a.keyring,
         watermark: a.watermark,
@@ -1708,8 +1733,14 @@ pub fn accept_remote_dag_anchor(
     pin: &[u8],
     floor: &[u8],
 ) -> Result<MembershipChange, JsError> {
-    let a = openom_vault::sharing::accept_remote_dag_anchor(local, remote, tree_id, pin, floor)
-        .map_err(to_js)?;
+    let a = openom_vault::sharing::accept_remote_dag_anchor(
+        local,
+        remote,
+        &TreeId::new(tree_id),
+        pin,
+        floor,
+    )
+    .map_err(to_js)?;
     Ok(MembershipChange {
         keyring: a.keyring,
         watermark: a.watermark,
@@ -1728,7 +1759,8 @@ pub fn wrap_dag_keyring_update(
     tree_id: &[u8],
     revision: u32,
 ) -> Result<Vec<u8>, JsError> {
-    openom_vault::sharing::wrap_dag_keyring_update(anchor, tree_id, revision).map_err(to_js)
+    openom_vault::sharing::wrap_dag_keyring_update(anchor, &TreeId::new(tree_id), revision)
+        .map_err(to_js)
 }
 
 /// Unwrap a served dag `MembershipEnvelope` payload to the raw anchor bytes (the dag mirror of
@@ -1762,8 +1794,8 @@ pub fn adopt_reset(
     tree_id: &[u8],
     candidate: &[u8],
 ) -> Result<MembershipChange, JsError> {
-    let a =
-        openom_vault::sharing::accept_reset_keyring(anchor, tree_id, candidate).map_err(to_js)?;
+    let a = openom_vault::sharing::accept_reset_keyring(anchor, &TreeId::new(tree_id), candidate)
+        .map_err(to_js)?;
     Ok(MembershipChange {
         keyring: a.keyring,
         watermark: a.watermark,

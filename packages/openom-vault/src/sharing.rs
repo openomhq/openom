@@ -59,7 +59,7 @@ pub fn account_tree_role(
             let member = decoded
                 .members
                 .iter()
-                .find(|member| member.member_id == account.member_id);
+                .find(|member| member.member_id == account.member_id.as_str());
             let Some(member) = member else {
                 return Ok(None);
             };
@@ -70,7 +70,7 @@ pub fn account_tree_role(
                 .members
                 .iter()
                 .find(|member| member.role == MEMBER_OWNER)
-                .is_some_and(|founder| founder.member_id == account.member_id)
+                .is_some_and(|founder| founder.member_id == account.member_id.as_str())
         }
         EngineKind::Dag => {
             let resolved = dag_client::resolve(keyring).map_err(|e| err(e.to_string()))?;
@@ -78,7 +78,7 @@ pub fn account_tree_role(
                 .members
                 .members
                 .iter()
-                .find(|member| member.member_id == account.member_id);
+                .find(|member| member.member_id == account.member_id.as_str());
             let Some(member) = member else {
                 return Ok(None);
             };
@@ -88,7 +88,7 @@ pub fn account_tree_role(
             resolved
                 .members
                 .owner()
-                .is_some_and(|founder| founder.member_id == account.member_id)
+                .is_some_and(|founder| founder.member_id == account.member_id.as_str())
         }
     };
     Ok(Some(if is_founder {
@@ -383,12 +383,12 @@ pub fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, VaultError> {
 /// Never in practice: the hop run is validated non-empty before its last element is taken.
 pub fn accept_remote_keyring(
     anchor: &[u8],
-    tree_id: &[u8],
+    tree_id: &TreeId,
     hops: &[u8],
 ) -> Result<AcceptedKeyring, VaultError> {
     let anchor_keyring =
         Keyring::decode(anchor).map_err(|e| err(format!("bad anchor keyring: {e}")))?;
-    if anchor_keyring.tree_id != tree_id {
+    if anchor_keyring.tree_id != tree_id.as_bytes() {
         return Err(err("anchor keyring is for a different tree"));
     }
     let raw = split_length_prefixed(hops)?;
@@ -433,7 +433,7 @@ pub fn accept_remote_keyring(
 /// # Panics
 /// Never in practice: the hop run is validated non-empty before its last element is taken.
 pub fn verify_keyring_walk(
-    tree_id: &[u8],
+    tree_id: &TreeId,
     hops: &[u8],
     pinned_revision: u32,
     pinned_hash: &[u8],
@@ -480,7 +480,7 @@ pub fn verify_keyring_walk(
     let genesis_anchor =
         bootstrap_from_genesis(genesis, &founder_key).map_err(|e| err(e.to_string()))?;
     let head = verify_walk(&genesis_anchor, &decoded[1..]).map_err(|e| err(e.to_string()))?;
-    if head.tree_id != tree_id {
+    if head.tree_id != tree_id.as_bytes() {
         return Err(err("keyring history is for a different tree"));
     }
     // Bind the verified history to the invite's out-of-band pin — a PREFIX: the pinned revision must appear
@@ -588,11 +588,11 @@ pub fn dag_anchor_pin(anchor: &[u8]) -> Result<Vec<u8>, VaultError> {
 /// wrong tree, checkpoint).
 pub fn verify_dag_anchor(
     anchor: &[u8],
-    tree_id: &[u8],
+    tree_id: &TreeId,
     pin: &[u8],
 ) -> Result<AcceptedKeyring, VaultError> {
     let pin = dag_client::DagPin::decode(pin).map_err(|e| err(e.to_string()))?;
-    dag_client::verify_anchor(anchor, tree_id, &pin).map_err(|e| err(e.to_string()))?;
+    dag_client::verify_anchor(anchor, tree_id.as_bytes(), &pin).map_err(|e| err(e.to_string()))?;
     let watermark = dag_client::watermark(anchor).map_err(|e| err(e.to_string()))?;
     Ok(AcceptedKeyring {
         keyring: anchor.to_vec(),
@@ -608,12 +608,12 @@ pub fn verify_dag_anchor(
 pub fn accept_remote_dag_anchor(
     local: &[u8],
     remote: &[u8],
-    tree_id: &[u8],
+    tree_id: &TreeId,
     pin: &[u8],
     floor: &[u8],
 ) -> Result<AcceptedKeyring, VaultError> {
     let pin = dag_client::DagPin::decode(pin).map_err(|e| err(e.to_string()))?;
-    let merged = dag_client::accept_remote_anchor(local, remote, tree_id, &pin, floor)
+    let merged = dag_client::accept_remote_anchor(local, remote, tree_id.as_bytes(), &pin, floor)
         .map_err(|e| err(e.to_string()))?;
     let watermark = dag_client::watermark(&merged).map_err(|e| err(e.to_string()))?;
     Ok(AcceptedKeyring {
@@ -632,13 +632,13 @@ pub fn accept_remote_dag_anchor(
 #[allow(clippy::unnecessary_wraps)]
 pub fn wrap_dag_keyring_update(
     anchor: &[u8],
-    tree_id: &[u8],
+    tree_id: &TreeId,
     revision: u32,
 ) -> Result<Vec<u8>, VaultError> {
     const KEYRING_UPDATE_VERSION: u32 = 1;
     let update = KeyringUpdate {
         version: KEYRING_UPDATE_VERSION,
-        tree_id: tree_id.to_vec(),
+        tree_id: tree_id.as_bytes().to_vec(),
         engine: EngineKind::Dag.as_tag().to_string(),
         update_ref: encode_governing_ref(revision),
         payload: MembershipEnvelope::wrap(EngineKind::Dag, anchor.to_vec()).encode(),
@@ -672,13 +672,13 @@ pub fn unwrap_dag_keyring(bytes: &[u8]) -> Result<Vec<u8>, VaultError> {
 /// or a rejected reset.
 pub fn accept_reset_keyring(
     anchor: &[u8],
-    tree_id: &[u8],
+    tree_id: &TreeId,
     candidate: &[u8],
 ) -> Result<AcceptedKeyring, VaultError> {
     let anchor_kr = Keyring::decode(anchor).map_err(|e| err(format!("bad anchor keyring: {e}")))?;
     let cand =
         Keyring::decode(candidate).map_err(|e| err(format!("bad candidate keyring: {e}")))?;
-    if anchor_kr.tree_id != tree_id || cand.tree_id != tree_id {
+    if anchor_kr.tree_id != tree_id.as_bytes() || cand.tree_id != tree_id.as_bytes() {
         return Err(err("keyring is for a different tree"));
     }
     // Must supersede our trusted head — never roll back or fork.
@@ -904,7 +904,7 @@ fn owner_account(
     owner_keystore: &[u8],
     owner_passphrase: &Passphrase,
 ) -> Result<UnlockedAccount, VaultError> {
-    AccountKeystore::from_bytes(owner_keystore)?.unlock(owner_passphrase.expose())
+    AccountKeystore::from_bytes(owner_keystore)?.unlock(owner_passphrase)
 }
 
 /// Add a member (owner action) — HPKE-wrap the tree DEK to the OOB-verified joiner keys + record them in a
@@ -923,11 +923,11 @@ pub fn add_member(
     keyring: &[u8],
     owner_passphrase: &Passphrase,
     owner_keystore: &[u8],
-    tree_id: &[u8],
-    owner_member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    owner_member_id: &MemberId,
+    replica_id: &ReplicaId,
     min_revision: u32,
-    new_member_id: &str,
+    new_member_id: &MemberId,
     role: &str,
     member_author_public: &[u8],
     member_hpke_public: &[u8],
@@ -957,25 +957,24 @@ pub fn add_member_as_account(
     engine: EngineKind,
     keyring: &[u8],
     account: &UnlockedAccount,
-    tree_id: &[u8],
-    owner_member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    owner_member_id: &MemberId,
+    replica_id: &ReplicaId,
     min_revision: u32,
-    new_member_id: &str,
+    new_member_id: &MemberId,
     role: &str,
     member_author_public: &[u8],
     member_hpke_public: &[u8],
 ) -> Result<AcceptedKeyring, VaultError> {
-    let joiner_id = MemberId::new(new_member_id);
     match engine {
         EngineKind::Chain => {
             let added = vault::add_member(
                 keyring,
                 account,
-                &TreeId::new(tree_id),
+                tree_id,
                 min_revision,
                 &vault::Joiner::from_bytes(
-                    &joiner_id,
+                    new_member_id,
                     parse_member_role(role)?,
                     member_author_public,
                     member_hpke_public,
@@ -991,18 +990,13 @@ pub fn add_member_as_account(
             })
         }
         EngineKind::Dag => {
-            let (tree, owner, replica) = (
-                TreeId::new(tree_id),
-                MemberId::new(owner_member_id),
-                ReplicaId::new(replica_id),
-            );
             let ctx = VaultContext {
-                tree_id: &tree,
-                member_id: &owner,
-                replica_id: &replica,
+                tree_id,
+                member_id: owner_member_id,
+                replica_id,
             };
             let joiner = vault::Joiner::from_bytes(
-                &joiner_id,
+                new_member_id,
                 parse_keyring_role(role)?,
                 member_author_public,
                 member_hpke_public,
@@ -1033,11 +1027,11 @@ pub fn remove_member(
     keyring: &[u8],
     owner_passphrase: &Passphrase,
     owner_keystore: &[u8],
-    tree_id: &[u8],
-    owner_member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    owner_member_id: &MemberId,
+    replica_id: &ReplicaId,
     min_revision: u32,
-    remove_member_id: &str,
+    remove_member_id: &MemberId,
 ) -> Result<AcceptedKeyring, VaultError> {
     let account = owner_account(owner_keystore, owner_passphrase)?;
     remove_member_as_account(
@@ -1061,21 +1055,21 @@ pub fn remove_member_as_account(
     engine: EngineKind,
     keyring: &[u8],
     account: &UnlockedAccount,
-    tree_id: &[u8],
-    owner_member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    owner_member_id: &MemberId,
+    replica_id: &ReplicaId,
     min_revision: u32,
-    remove_member_id: &str,
+    remove_member_id: &MemberId,
 ) -> Result<AcceptedKeyring, VaultError> {
     match engine {
         EngineKind::Chain => {
             let removed = vault::remove_member(
                 keyring,
                 account,
-                &TreeId::new(tree_id),
+                tree_id,
                 min_revision,
-                &MemberId::new(remove_member_id),
-                &ReplicaId::new(replica_id),
+                remove_member_id,
+                replica_id,
             )?;
             Ok(AcceptedKeyring {
                 keyring: removed.keyring,
@@ -1087,17 +1081,13 @@ pub fn remove_member_as_account(
             })
         }
         EngineKind::Dag => {
-            let (tree, owner, replica) = (
-                TreeId::new(tree_id),
-                MemberId::new(owner_member_id),
-                ReplicaId::new(replica_id),
-            );
             let ctx = VaultContext {
-                tree_id: &tree,
-                member_id: &owner,
-                replica_id: &replica,
+                tree_id,
+                member_id: owner_member_id,
+                replica_id,
             };
-            let anchor = DagVault.remove_member(&ctx, keyring, account, remove_member_id)?;
+            let anchor =
+                DagVault.remove_member(&ctx, keyring, account, remove_member_id.as_str())?;
             let watermark = DagVault.watermark(&anchor)?;
             Ok(AcceptedKeyring {
                 keyring: anchor,
@@ -1129,11 +1119,11 @@ pub fn change_role(
     keyring: &[u8],
     founder_passphrase: &Passphrase,
     founder_keystore: &[u8],
-    tree_id: &[u8],
-    founder_member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    founder_member_id: &MemberId,
+    replica_id: &ReplicaId,
     min_revision: u32,
-    target_member_id: &str,
+    target_member_id: &MemberId,
     new_role: &str,
 ) -> Result<AcceptedKeyring, VaultError> {
     let account = owner_account(founder_keystore, founder_passphrase)?;
@@ -1159,28 +1149,27 @@ pub fn change_role_as_account(
     engine: EngineKind,
     keyring: &[u8],
     account: &UnlockedAccount,
-    tree_id: &[u8],
-    founder_member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    founder_member_id: &MemberId,
+    replica_id: &ReplicaId,
     min_revision: u32,
-    target_member_id: &str,
+    target_member_id: &MemberId,
     new_role: &str,
 ) -> Result<AcceptedKeyring, VaultError> {
     let promote = new_role == "co-owner";
     match engine {
         EngineKind::Chain => {
-            let (tree, target) = (TreeId::new(tree_id), MemberId::new(target_member_id));
             // PROMOTE adds to the signer set; DEMOTE lowers the co-owner to a non-signer role (admin/editor/
             // viewer) — forward-secure via the OPE-421 look-behind. Both return the same `CoOwnerChanged`.
             let changed = if promote {
-                vault::add_co_owner(keyring, account, &tree, min_revision, &target)?
+                vault::add_co_owner(keyring, account, tree_id, min_revision, target_member_id)?
             } else {
                 vault::remove_co_owner(
                     keyring,
                     account,
-                    &tree,
+                    tree_id,
                     min_revision,
-                    &target,
+                    target_member_id,
                     parse_member_role(new_role)?,
                 )?
             };
@@ -1194,21 +1183,16 @@ pub fn change_role_as_account(
             })
         }
         EngineKind::Dag => {
-            let (tree, owner, replica) = (
-                TreeId::new(tree_id),
-                MemberId::new(founder_member_id),
-                ReplicaId::new(replica_id),
-            );
             let ctx = VaultContext {
-                tree_id: &tree,
-                member_id: &owner,
-                replica_id: &replica,
+                tree_id,
+                member_id: founder_member_id,
+                replica_id,
             };
             let anchor = DagVault.change_role(
                 &ctx,
                 keyring,
                 account,
-                target_member_id,
+                target_member_id.as_str(),
                 parse_keyring_role(new_role)?,
             )?;
             let watermark = DagVault.watermark(&anchor)?;
@@ -1232,20 +1216,19 @@ pub fn unlock_as_member(
     keyring: &[u8],
     passphrase: &Passphrase,
     member_kdf_params: &[u8],
-    tree_id: &[u8],
-    member_id: &str,
+    tree_id: &TreeId,
+    member_id: &MemberId,
     trusted_signers: &[u8],
-    replica_id: &[u8],
+    replica_id: &ReplicaId,
     min_revision: u32,
 ) -> Result<MemberUnlock, VaultError> {
     let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
         .map_err(|_| err("bad kdf params"))?;
-    let member = MemberId::new(member_id);
     let epoch_secret = |engine, hpke_secret| MemberEpochSecret {
         engine,
         hpke_secret,
-        tree_id: tree_id.to_vec(),
-        member_id: member_id.to_string(),
+        tree_id: tree_id.as_bytes().to_vec(),
+        member_id: member_id.as_str().to_string(),
     };
     match engine {
         EngineKind::Chain => {
@@ -1255,11 +1238,11 @@ pub fn unlock_as_member(
                 &vault::MemberAuth {
                     passphrase,
                     kdf: &kdf,
-                    member_id: &member,
+                    member_id,
                     trusted_signers: &trusted,
                 },
-                &TreeId::new(tree_id),
-                &ReplicaId::new(replica_id),
+                tree_id,
+                replica_id,
                 min_revision,
             )?;
             Ok(MemberUnlock {
@@ -1271,11 +1254,10 @@ pub fn unlock_as_member(
             })
         }
         EngineKind::Dag => {
-            let (tree, replica) = (TreeId::new(tree_id), ReplicaId::new(replica_id));
             let ctx = VaultContext {
-                tree_id: &tree,
-                member_id: &member,
-                replica_id: &replica,
+                tree_id,
+                member_id,
+                replica_id,
             };
             let (u, hpke_secret) = DagVault.unlock_as_member(&ctx, keyring, passphrase, &kdf)?;
             Ok(MemberUnlock {
@@ -1300,18 +1282,17 @@ pub fn unlock_as_account_member(
     engine: EngineKind,
     keyring: &[u8],
     account: &UnlockedAccount,
-    tree_id: &[u8],
+    tree_id: &TreeId,
     trusted_signers: &[u8],
-    replica_id: &[u8],
+    replica_id: &ReplicaId,
     min_revision: u32,
 ) -> Result<MemberUnlock, VaultError> {
-    let member_id = account.member_id.clone();
-    let member = MemberId::new(&member_id);
+    let member = &account.member_id;
     let epoch_secret = |engine, hpke_secret| MemberEpochSecret {
         engine,
         hpke_secret,
-        tree_id: tree_id.to_vec(),
-        member_id: member_id.clone(),
+        tree_id: tree_id.as_bytes().to_vec(),
+        member_id: member.as_str().to_string(),
     };
     match engine {
         EngineKind::Chain => {
@@ -1320,8 +1301,8 @@ pub fn unlock_as_account_member(
                 keyring,
                 account,
                 &trusted,
-                &TreeId::new(tree_id),
-                &ReplicaId::new(replica_id),
+                tree_id,
+                replica_id,
                 min_revision,
             )?;
             Ok(MemberUnlock {
@@ -1337,12 +1318,10 @@ pub fn unlock_as_account_member(
             })
         }
         EngineKind::Dag => {
-            let tree = TreeId::new(tree_id);
-            let replica = ReplicaId::new(replica_id);
             let ctx = VaultContext {
-                tree_id: &tree,
-                member_id: &member,
-                replica_id: &replica,
+                tree_id,
+                member_id: member,
+                replica_id,
             };
             let (unlocked, hpke_secret) =
                 DagVault.unlock_as_account_member(&ctx, keyring, account)?;
@@ -1428,10 +1407,10 @@ mod tests {
 
         // OPE-543 durable identity: the owner IS a durable account. Owner provisions the genesis (rev 1) from
         // its account; bob mints his member account; owner admits bob (rev 2) authorized by the account.
-        let (owner_ks, _code, _u) = AccountKeystore::create(owner_pass.expose()).unwrap();
+        let (owner_ks, _code, _u) = AccountKeystore::create(&owner_pass).unwrap();
         let owner_ks_bytes = owner_ks.to_bytes().unwrap();
         let prov = vault::provision(
-            &owner_ks.unlock(owner_pass.expose()).unwrap(),
+            &owner_ks.unlock(&owner_pass).unwrap(),
             &tree,
             &owner,
             &ReplicaId::new(b"ro".to_vec()),
@@ -1440,27 +1419,27 @@ mod tests {
         let owner_key = prov.did_key.to_public_key(); // the signer bob pins
                                                       // OPE-543: the owner's on-tree id is SELF-CERTIFYING — `derive_member_id(account key)`, not the caller's
                                                       // "acct-owner" label — so the owner-path DEK lookups must be keyed by the derived id.
-        let owner_derived = derive_member_id(
+        let owner_derived = MemberId::new(derive_member_id(
             &owner_ks
-                .unlock(owner_pass.expose())
+                .unlock(&owner_pass)
                 .unwrap()
                 .root
                 .identity
                 .verifying_key()
                 .to_bytes(),
-        );
+        ));
         let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
         let bob = vault::provision_member(&bob_pass).unwrap();
         // The joiner id self-certifies its author key (OPE-543 `Joiner::from_bytes` admission).
-        let bob_id = derive_member_id(&bob.author_public_key);
+        let bob_id = MemberId::new(derive_member_id(&bob.author_public_key));
         let shared = super::add_member(
             EngineKind::Chain,
             &prov.keyring,
             &owner_pass,
             &owner_ks_bytes,
-            b"tree-uuid-16byte",
+            &tree,
             &owner_derived,
-            b"ro",
+            &ReplicaId::new(b"ro"),
             1,
             &bob_id,
             "editor",
@@ -1480,7 +1459,7 @@ mod tests {
             .to_vec();
 
         // Genesis-walk + invite-pin (pin the genesis rev 1).
-        let walk = super::verify_keyring_walk(b"tree-uuid-16byte", &hops, 1, &pin_hash).unwrap();
+        let walk = super::verify_keyring_walk(&tree, &hops, 1, &pin_hash).unwrap();
         assert_eq!(walk.revision, 2, "walks to the shared head");
         assert_eq!(walk.head_keyring, shared, "head body is the rev-2 keyring");
         assert_eq!(
@@ -1495,10 +1474,10 @@ mod tests {
             &walk.head_keyring,
             &bob_pass,
             &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
-            b"tree-uuid-16byte",
+            &tree,
             &bob_id,
             &owner_key,
-            b"rb",
+            &ReplicaId::new(b"rb"),
             walk.revision,
         )
         .unwrap();

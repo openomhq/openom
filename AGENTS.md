@@ -55,10 +55,13 @@ functions — unless the logic is irreducibly coupled (shared mutable state that
 threaded across a call boundary), in which case say why in a brief comment. This is a guideline, not
 a hard gate: a clear phase structure and readability matter more than the exact line count.
 
-Reach for the type system to make errors impossible rather than merely caught: newtype
-domain values that would otherwise be interchangeable primitives (ids, keys, codes — a `TreeId` is
-not a `ReplicaId`, a `Dek` is not a `Kek`), so a wrong-argument slip is a compile error, not a
-runtime one.
+Reach for the type system to make errors impossible rather than merely caught. Newtype domain
+values that would otherwise be interchangeable primitives (ids, keys, codes — a `TreeId` is not a
+`ReplicaId`, a `Dek` is not a `Kek`), so a wrong-argument slip is a compile error rather than a
+runtime error. At minimum, pure-Rust domain and public API boundaries must accept those newtypes and
+secret wrappers directly; do not regress them to raw `&[u8]`/`&str` and reconstruct the type inside.
+Convert raw values at external boundaries such as wasm, IPC, and serialization. Mechanism layers
+may remain raw where appropriate, but may also use stronger types when that improves their design.
 
 ## Package & app documentation
 

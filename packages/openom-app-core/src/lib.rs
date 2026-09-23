@@ -224,8 +224,8 @@ pub struct AccountPublicIdentity {
 impl AccountHandle {
     /// The stable self-certifying identity shared by every owned and joined tree.
     #[must_use]
-    pub fn member_id(&self) -> &str {
-        &self.keystore.member_id
+    pub fn member_id(&self) -> &MemberId {
+        &self.account.member_id
     }
 
     /// The account's Ed25519 verification key.
@@ -292,7 +292,7 @@ pub struct AccountRotated {
 /// # Errors
 /// Returns [`VaultError`] if key generation, wrapping, or serialization fails.
 pub fn account_create(passphrase: &Passphrase) -> Result<AccountCreated, VaultError> {
-    let (keystore, recovery_code, account) = AccountKeystore::create(passphrase.expose())?;
+    let (keystore, recovery_code, account) = AccountKeystore::create(passphrase)?;
     let generation = AccountGeneration::new(keystore.generation);
     let bytes = keystore.to_bytes()?;
     Ok(AccountCreated {
@@ -318,7 +318,7 @@ pub fn account_unlock(
 ) -> Result<AccountHandle, VaultError> {
     let exact_bytes = keystore.to_vec();
     let keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor.get())?;
-    let account = keystore.unlock(passphrase.expose())?;
+    let account = keystore.unlock(passphrase)?;
     Ok(AccountHandle {
         keystore,
         keystore_bytes: exact_bytes,
@@ -348,7 +348,7 @@ pub fn account_change_passphrase(
 ) -> Result<AccountChanged, VaultError> {
     let keystore = handle
         .keystore
-        .change_passphrase(&handle.account, new_passphrase.expose())?;
+        .change_passphrase(&handle.account, new_passphrase)?;
     let bytes = keystore.to_bytes()?;
     let generation = AccountGeneration::new(keystore.generation);
     handle.keystore = keystore;
@@ -373,8 +373,8 @@ pub fn account_recover(
     let old_keystore = AccountKeystore::from_bytes_with_floor(keystore, generation_floor.get())?;
     let recovered = old_keystore.unlock_with_recovery(recovery_code)?;
     let (keystore, next_recovery_code) =
-        old_keystore.rotate_account_root(&recovered, new_passphrase.expose())?;
-    let account = keystore.unlock(new_passphrase.expose())?;
+        old_keystore.rotate_account_root(&recovered, new_passphrase)?;
+    let account = keystore.unlock(new_passphrase)?;
     let generation = AccountGeneration::new(keystore.generation);
     let bytes = keystore.to_bytes()?;
     Ok(AccountRecovered {
@@ -412,8 +412,8 @@ pub fn account_rotate_root(
 ) -> Result<AccountRotated, VaultError> {
     let (keystore, recovery_code) = handle
         .keystore
-        .rotate_account_root(&handle.account, passphrase.expose())?;
-    let account = keystore.unlock(passphrase.expose())?;
+        .rotate_account_root(&handle.account, passphrase)?;
+    let account = keystore.unlock(passphrase)?;
     let bytes = keystore.to_bytes()?;
     let generation = AccountGeneration::new(keystore.generation);
     handle.keystore = keystore;
@@ -449,7 +449,7 @@ pub fn account_register_proof(
 #[must_use]
 pub fn account_public_identity(handle: &AccountHandle) -> AccountPublicIdentity {
     AccountPublicIdentity {
-        member_id: handle.member_id().to_string(),
+        member_id: handle.member_id().as_str().to_string(),
         author_public_key: handle.author_public_key().to_vec(),
         hpke_public_key: handle.hpke_public_key().to_vec(),
     }
@@ -472,7 +472,7 @@ pub fn account_tree_role(
 
 /// OOB-verified public admission material for a member being added to a tree.
 pub struct MemberAdmission<'a> {
-    pub member_id: &'a str,
+    pub member_id: &'a MemberId,
     pub role: &'a str,
     pub author_public_key: &'a [u8],
     pub hpke_public_key: &'a [u8],
@@ -508,9 +508,9 @@ pub fn add_tree_member(
         context.engine,
         context.keyring,
         &context.account.account,
-        context.tree_id.as_bytes(),
+        context.tree_id,
         context.account.member_id(),
-        context.replica_id.as_bytes(),
+        context.replica_id,
         context.min_revision,
         member.member_id,
         member.role,
@@ -536,11 +536,11 @@ pub fn remove_tree_member(
         context.engine,
         context.keyring,
         &context.account.account,
-        context.tree_id.as_bytes(),
+        context.tree_id,
         context.account.member_id(),
-        context.replica_id.as_bytes(),
+        context.replica_id,
         context.min_revision,
-        member_id.as_str(),
+        member_id,
     )?;
     Ok(MembershipChange {
         keyring: changed.keyring,
@@ -562,11 +562,11 @@ pub fn change_tree_member_role(
         context.engine,
         context.keyring,
         &context.account.account,
-        context.tree_id.as_bytes(),
+        context.tree_id,
         context.account.member_id(),
-        context.replica_id.as_bytes(),
+        context.replica_id,
         context.min_revision,
-        member_id.as_str(),
+        member_id,
         role,
     )?;
     Ok(MembershipChange {
@@ -592,17 +592,14 @@ pub fn provision_tree<S: BlobStore>(
     store: S,
     engine: EngineKind,
     account: &AccountHandle,
-    tree_id: &[u8],
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    replica_id: &ReplicaId,
     doc: impl Into<String>,
 ) -> Result<TreeProvisioned<S>, VaultError> {
-    let tree = TreeId::new(tree_id);
-    let member = MemberId::new(account.member_id());
-    let replica = ReplicaId::new(replica_id);
     let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
+        tree_id,
+        member_id: account.member_id(),
+        replica_id,
     };
     let provisioned = AppVault::from_kind(engine).provision(&ctx, &account.account)?;
     let did_key = provisioned.did_key.into_string();
@@ -612,7 +609,7 @@ pub fn provision_tree<S: BlobStore>(
             provisioned.sealer,
             Arc::new(store),
             doc,
-            replica_id,
+            replica_id.as_bytes(),
         ),
         keyring: provisioned.anchor,
         did_key,
@@ -628,18 +625,15 @@ pub fn unlock_tree<S: BlobStore>(
     store: S,
     engine: EngineKind,
     account: &AccountHandle,
-    tree_id: &[u8],
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    replica_id: &ReplicaId,
     anchor: &[u8],
     doc: impl Into<String>,
 ) -> Result<Unlocked<S>, VaultError> {
-    let tree = TreeId::new(tree_id);
-    let member = MemberId::new(account.member_id());
-    let replica = ReplicaId::new(replica_id);
     let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
+        tree_id,
+        member_id: account.member_id(),
+        replica_id,
     };
     let unlocked = AppVault::from_kind(engine).unlock(&ctx, anchor, &account.account)?;
     let did_key = unlocked.did_key.into_string();
@@ -649,7 +643,7 @@ pub fn unlock_tree<S: BlobStore>(
             unlocked.sealer,
             Arc::new(store),
             doc,
-            replica_id,
+            replica_id.as_bytes(),
         ),
         did_key,
         watermark: unlocked.watermark,
@@ -729,12 +723,10 @@ pub fn provision<S: BlobStore>(
     store: S,
     engine: EngineKind,
     passphrase: &Passphrase,
-    tree_id: &[u8],
-    member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    replica_id: &ReplicaId,
     doc: impl Into<String>,
 ) -> Result<Provisioned<S>, VaultError> {
-    let _ = member_id;
     let created = account_create(passphrase)?;
     let tree = provision_tree(store, engine, &created.handle, tree_id, replica_id, doc)?;
     Ok(Provisioned {
@@ -752,21 +744,19 @@ pub fn provision<S: BlobStore>(
 ///
 /// # Errors
 /// Returns [`VaultError`] if the engine can't unlock the anchor (wrong passphrase / stale keyring).
-// The flat lifecycle argument list (engine + passphrase + the three ids + anchor + doc) is the veneer/host
+// The flat lifecycle argument list (engine + passphrase + typed tree/replica ids + anchor + doc) is the veneer/host
 // calling convention shared with the wasm export, not a struct to bundle.
 #[allow(clippy::too_many_arguments)]
 pub fn unlock<S: BlobStore>(
     store: S,
     engine: EngineKind,
     passphrase: &Passphrase,
-    tree_id: &[u8],
-    member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    replica_id: &ReplicaId,
     anchor: &[u8],
     keystore: &[u8],
     doc: impl Into<String>,
 ) -> Result<Unlocked<S>, VaultError> {
-    let _ = member_id;
     let account = account_unlock(passphrase, keystore, AccountGeneration::default())?;
     unlock_tree(store, engine, &account, tree_id, replica_id, anchor, doc)
 }
@@ -800,23 +790,18 @@ pub fn recover<S: BlobStore>(
     engine: EngineKind,
     recovery_code: &RecoveryCode,
     new_passphrase: &Passphrase,
-    tree_id: &[u8],
-    member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    member_id: &MemberId,
+    replica_id: &ReplicaId,
     anchor: &[u8],
     keystore: &[u8],
     floor: &[u8],
     doc: impl Into<String>,
 ) -> Result<Recovered<S>, VaultError> {
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
     let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
+        tree_id,
+        member_id,
+        replica_id,
     };
     // OPE-542/543: the dag recovers via the ACCOUNT keystore blob (restoring the durable identity + re-wrapping
     // under the new passphrase); the chain ignores `keystore` and recovers op-based. `r.keystore` is the new
@@ -831,7 +816,13 @@ pub fn recover<S: BlobStore>(
     )?;
     let did = r.did_key.into_string();
     Ok(Recovered {
-        core: AppCore::new(did.clone(), r.sealer, Arc::new(store), doc, replica_id),
+        core: AppCore::new(
+            did.clone(),
+            r.sealer,
+            Arc::new(store),
+            doc,
+            replica_id.as_bytes(),
+        ),
         keyring: r.anchor,
         recovery_code: r.recovery_code.into_string(),
         keystore: r.keystore,
@@ -864,22 +855,17 @@ pub fn change_passphrase(
     engine: EngineKind,
     old_passphrase: &Passphrase,
     new_passphrase: &Passphrase,
-    tree_id: &[u8],
-    member_id: &str,
-    replica_id: &[u8],
+    tree_id: &TreeId,
+    member_id: &MemberId,
+    replica_id: &ReplicaId,
     anchor: &[u8],
     keystore: &[u8],
     floor: &[u8],
 ) -> Result<PassphraseChanged, VaultError> {
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
     let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
+        tree_id,
+        member_id,
+        replica_id,
     };
     // OPE-542/543: the dag re-wraps the ACCOUNT keystore blob under the new passphrase (no on-tree op — the
     // keyring anchor is unchanged); the chain ignores `keystore` and re-keys the keyring op-based. `re.keystore`
@@ -920,9 +906,9 @@ pub fn unlock_tree_as_member<S: BlobStore>(
     engine: EngineKind,
     account: &AccountHandle,
     keyring: &[u8],
-    tree_id: &[u8],
+    tree_id: &TreeId,
     trusted_signers: &[u8],
-    replica_id: &[u8],
+    replica_id: &ReplicaId,
     min_revision: u32,
     retained: &[(u32, Vec<u8>)],
     doc: impl Into<String>,
@@ -941,7 +927,7 @@ pub fn unlock_tree_as_member<S: BlobStore>(
         unlocked.sealer,
         Arc::new(store),
         doc,
-        replica_id,
+        replica_id.as_bytes(),
     );
     core.set_member_epoch_secret(unlocked.epoch_secret);
     let resolver = openom_vault::resolver_from(engine, keyring, retained)?;
@@ -957,6 +943,7 @@ pub fn unlock_tree_as_member<S: BlobStore>(
 mod lifecycle_tests {
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::{derive_member_id_bytes, EngineKind};
+    use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicU64, Ordering};
     use store_blob::FsBlob;
@@ -979,7 +966,7 @@ mod lifecycle_tests {
         // OPE-429: the store-generic rlib lifecycle drives a REAL provision/unlock over a native FsBlob store
         // (the wasm veneer uses the same fns over MemoryBlob) — the "one core, two runtimes" foundation.
         let dir = temp_dir();
-        let (tree_id, replica_id) = ([7u8; 16], [1u8; 16]);
+        let (tree_id, replica_id) = (TreeId::new([7u8; 16]), ReplicaId::new([1u8; 16]));
         let pass = Passphrase::new(b"correct horse battery staple".to_vec());
 
         // provision yields a working core over the native store: mint + commit + project round-trips in-core.
@@ -988,7 +975,6 @@ mod lifecycle_tests {
             EngineKind::Chain,
             &pass,
             &tree_id,
-            "acct-owner",
             &replica_id,
             "doc",
         )
@@ -1008,12 +994,6 @@ mod lifecycle_tests {
             "the provisioned core folds its own committed mint"
         );
         let (did, keyring, keystore) = (p.did_key.clone(), p.keyring.clone(), p.keystore.clone());
-        // OPE-543: the owner's on-tree id is SELF-CERTIFYING (`derive_member_id(account key)`), read from the
-        // keystore's plaintext `member_id` — the owner-path DEK lookup on unlock must be keyed by it, not the
-        // "acct-owner" label (which the owner path ignores).
-        let owner_mid = openom_vault::AccountKeystore::from_bytes(&keystore)
-            .unwrap()
-            .member_id;
         drop(p); // release the FsBlob handle before re-opening the dir
 
         // unlock reconstructs the SAME identity from the keyring anchor over a fresh native store, and
@@ -1025,7 +1005,6 @@ mod lifecycle_tests {
             EngineKind::Chain,
             &pass,
             &tree_id,
-            &owner_mid,
             &replica_id,
             &keyring,
             &keystore,
@@ -1041,7 +1020,6 @@ mod lifecycle_tests {
                 EngineKind::Chain,
                 &Passphrase::new(b"wrong".to_vec()),
                 &tree_id,
-                &owner_mid,
                 &replica_id,
                 &keyring,
                 &keystore,
@@ -1058,13 +1036,13 @@ mod lifecycle_tests {
     fn one_account_handle_owns_and_reopens_multiple_trees_on_both_engines() {
         let passphrase = Passphrase::new(b"profile passphrase".to_vec());
         let mut created = super::account_create(&passphrase).unwrap();
-        let member_id = created.handle.member_id().to_string();
+        let member_id = created.handle.member_id().as_str().to_string();
         let mut trees = Vec::new();
 
         for (engine_index, engine) in [EngineKind::Chain, EngineKind::Dag].into_iter().enumerate() {
             for tree_index in 0..2u8 {
-                let tree_id = [10 + (engine_index as u8 * 2) + tree_index; 16];
-                let replica_id = [20 + tree_index; 16];
+                let tree_id = TreeId::new([10 + (engine_index as u8 * 2) + tree_index; 16]);
+                let replica_id = ReplicaId::new([20 + tree_index; 16]);
                 let provisioned = super::provision_tree(
                     store_blob::MemoryBlob::new(),
                     engine,
@@ -1097,7 +1075,7 @@ mod lifecycle_tests {
             changed.generation,
         )
         .unwrap();
-        assert_eq!(reopened_account.member_id(), member_id);
+        assert_eq!(reopened_account.member_id().as_str(), member_id);
 
         for (engine, tree_id, replica_id, anchor, did_key) in trees {
             let reopened = super::unlock_tree(
@@ -1126,16 +1104,16 @@ mod lifecycle_tests {
             store_blob::MemoryBlob::new(),
             EngineKind::Chain,
             &member.handle,
-            &[50; 16],
-            &[51; 16],
+            &TreeId::new([50; 16]),
+            &ReplicaId::new([51; 16]),
             "member-owned",
         )
         .unwrap();
         let mut joined_trees = Vec::new();
 
         for (index, engine) in [EngineKind::Chain, EngineKind::Dag].into_iter().enumerate() {
-            let tree_id = [60 + index as u8; 16];
-            let replica_id = [70 + index as u8; 16];
+            let tree_id = TreeId::new([60 + index as u8; 16]);
+            let replica_id = ReplicaId::new([70 + index as u8; 16]);
             let provisioned = super::provision_tree(
                 store_blob::MemoryBlob::new(),
                 engine,
@@ -1149,6 +1127,7 @@ mod lifecycle_tests {
                 super::account_tree_role(engine, &provisioned.keyring, &owner.handle).unwrap(),
                 Some(openom_vault::sharing::AccountTreeRole::Founder)
             );
+            let member_id = MemberId::new(&member_public.member_id);
             let added = openom_vault::sharing::add_member_as_account(
                 engine,
                 &provisioned.keyring,
@@ -1157,7 +1136,7 @@ mod lifecycle_tests {
                 owner.handle.member_id(),
                 &replica_id,
                 0,
-                &member_public.member_id,
+                &member_id,
                 "editor",
                 &member_public.author_public_key,
                 &member_public.hpke_public_key,
@@ -1180,7 +1159,10 @@ mod lifecycle_tests {
         drop(member.handle);
         let reopened_account =
             super::account_unlock(&member_passphrase, &member_keystore, member_generation).unwrap();
-        assert_eq!(reopened_account.member_id(), member_public.member_id);
+        assert_eq!(
+            reopened_account.member_id().as_str(),
+            member_public.member_id
+        );
 
         for (engine, tree_id, replica_id, keyring, trusted_signers) in joined_trees {
             let joined = super::unlock_tree_as_member(
@@ -1258,14 +1240,14 @@ mod lifecycle_tests {
         assert_eq!(recovered.handle.member_id(), created.handle.member_id());
         let rotated = openom_vault::AccountKeystore::from_bytes(snapshot.keystore()).unwrap();
         assert!(rotated.unlock_with_recovery(&old_recovery).is_err());
-        assert!(rotated.unlock(&new_passphrase.expose()).is_ok());
+        assert!(rotated.unlock(&new_passphrase).is_ok());
     }
 
     #[test]
     fn recovery_and_root_rotation_refresh_the_handle_and_revoke_old_material() {
         let passphrase = Passphrase::new(b"profile passphrase".to_vec());
         let created = super::account_create(&passphrase).unwrap();
-        let member_id = created.handle.member_id().to_string();
+        let member_id = created.handle.member_id().as_str().to_string();
         let old_recovery = RecoveryCode::new(created.recovery_code);
         let new_passphrase = Passphrase::new(b"recovered passphrase".to_vec());
         let mut recovered = super::account_recover(
@@ -1277,7 +1259,7 @@ mod lifecycle_tests {
         .unwrap();
 
         assert_eq!(recovered.generation.get(), created.generation.get() + 1);
-        assert_eq!(recovered.handle.member_id(), member_id);
+        assert_eq!(recovered.handle.member_id().as_str(), member_id);
         assert!(
             super::account_unlock(&passphrase, &created.keystore, recovered.generation).is_err()
         );
@@ -1291,7 +1273,7 @@ mod lifecycle_tests {
         let rotated = super::account_rotate_root(&mut recovered.handle, &new_passphrase).unwrap();
         assert_eq!(rotated.generation.get(), recovered.generation.get() + 1);
         assert_eq!(recovered.handle.generation(), rotated.generation);
-        assert_eq!(recovered.handle.member_id(), member_id);
+        assert_eq!(recovered.handle.member_id().as_str(), member_id);
         let rotated_keystore =
             openom_vault::AccountKeystore::from_bytes(&rotated.keystore).unwrap();
         assert!(rotated_keystore
@@ -1302,8 +1284,8 @@ mod lifecycle_tests {
             store_blob::MemoryBlob::new(),
             EngineKind::Dag,
             &recovered.handle,
-            &[41; 16],
-            &[42; 16],
+            &TreeId::new([41; 16]),
+            &ReplicaId::new([42; 16]),
             "after-rotation",
         )
         .unwrap();
@@ -1347,14 +1329,13 @@ mod lifecycle_tests {
         // over the PLAINTEXT (stable / the media_link value), the stored envelope is opaque, and open recovers
         // the exact bytes across a fresh AEAD nonce each time.
         let dir = temp_dir();
-        let (tree_id, replica_id) = ([9u8; 16], [2u8; 16]);
+        let (tree_id, replica_id) = (TreeId::new([9u8; 16]), ReplicaId::new([2u8; 16]));
         let pass = Passphrase::new(b"correct horse battery staple".to_vec());
         let p = super::provision(
             FsBlob::new(dir.clone()),
             EngineKind::Chain,
             &pass,
             &tree_id,
-            "acct-owner",
             &replica_id,
             "doc",
         )

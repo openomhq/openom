@@ -281,8 +281,7 @@ pub fn unlock(
     // OPE-543: the owner id is the account's SELF-CERTIFYING, tamper-checked `member_id` — sourced from the
     // VERIFIED account, never a caller label, so the DEK / escrow / author paths below cannot diverge from it.
     // (There is no longer any caller-supplied owner id to get wrong — the label bug is unrepresentable here.)
-    let member_id_owned = account.member_id.clone();
-    let member_id = member_id_owned.as_str();
+    let member_id = account.member_id.as_str();
     let replica_id = replica_id.as_bytes();
     let Opened {
         key_id: write_key_id,
@@ -383,7 +382,7 @@ pub fn recover(
     // then re-wrap it under the new passphrase. Neither touches the tree.
     let ks = AccountKeystore::from_bytes(keystore)?;
     let unlocked = ks.unlock_with_recovery(recovery_code)?;
-    let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
+    let new_ks = ks.change_passphrase(&unlocked, new_passphrase)?;
 
     // Open the tree with the restored identity by the ordinary owner path — the anchor is unchanged, so the
     // resolved owner is exactly this identity (anti-substitution inside `unlock` enforces it).
@@ -434,8 +433,8 @@ pub fn change_passphrase(
     }
 
     let ks = AccountKeystore::from_bytes(keystore)?;
-    let unlocked = ks.unlock(old_passphrase.expose())?; // a wrong current passphrase fails closed here
-    let new_ks = ks.change_passphrase(&unlocked, new_passphrase.expose())?;
+    let unlocked = ks.unlock(old_passphrase)?; // a wrong current passphrase fails closed here
+    let new_ks = ks.change_passphrase(&unlocked, new_passphrase)?;
 
     Ok(Rekeyed {
         keyring: keyring_bytes.to_vec(),
@@ -740,7 +739,7 @@ pub fn unlock_as_account_member(
     unlock_as_member_with_root(
         keyring_bytes,
         account.tree_root(),
-        &account.member_id,
+        account.member_id.as_str(),
         trusted_signers,
         tree_id,
         replica_id,
@@ -1556,12 +1555,12 @@ mod tests {
     /// one-time account recovery code. The derived identity is random-but-stable across unlock, so one
     /// keystore is the tree's single owner across provision / unlock / membership ops.
     fn make_owner(pass: &Passphrase) -> (AccountKeystore, RecoveryCode) {
-        let (ks, code, _u) = AccountKeystore::create(pass.expose()).unwrap();
+        let (ks, code, _u) = AccountKeystore::create(pass).unwrap();
         (ks, code)
     }
     /// A fresh `UnlockedAccount` for the owner (each vault call that signs consumes one).
     fn acct(ks: &AccountKeystore, pass: &Passphrase) -> UnlockedAccount {
-        ks.unlock(pass.expose()).unwrap()
+        ks.unlock(pass).unwrap()
     }
     /// The owner's SELF-CERTIFYING on-tree `member_id` (OPE-543): `derive_member_id(account author key)`.
     /// `provision` derives the owner id from the account key (ignoring the caller's label), so this is the id
@@ -1569,7 +1568,7 @@ mod tests {
     /// and pass it where the real owner id is needed.
     fn owner_id(ks: &AccountKeystore, pass: &Passphrase) -> MemberId {
         MemberId::new(derive_member_id(
-            &ks.unlock(pass.expose())
+            &ks.unlock(pass)
                 .unwrap()
                 .root
                 .identity
@@ -1777,6 +1776,7 @@ mod tests {
     #[test]
     fn change_passphrase_rewraps_the_account_without_touching_the_tree() {
         let old = Passphrase::new(b"old");
+        let new = Passphrase::new(b"new");
         let (ks, _c) = make_owner(&old);
         let me = owner_id(&ks, &old);
         let p = provision(
@@ -1791,7 +1791,7 @@ mod tests {
             &p.keyring,
             &ks_bytes,
             &Passphrase::new(b"old"),
-            &Passphrase::new(b"new"),
+            &new,
             &TreeId::new(TREE),
             &me,
             0,
@@ -1801,11 +1801,11 @@ mod tests {
         assert_eq!(re.revision, 1);
         assert!(re.recovery_code.expose().is_empty());
         let new_ks = AccountKeystore::from_bytes(&re.keystore).unwrap();
-        assert!(new_ks.unlock(b"new").is_ok());
-        assert!(new_ks.unlock(b"old").is_err());
+        assert!(new_ks.unlock(&new).is_ok());
+        assert!(new_ks.unlock(&old).is_err());
         let u = unlock(
             &re.keyring,
-            &new_ks.unlock(b"new").unwrap(),
+            &new_ks.unlock(&new).unwrap(),
             &TreeId::new(TREE),
             &ReplicaId::new(b"r"),
         )
@@ -1816,6 +1816,7 @@ mod tests {
     #[test]
     fn change_passphrase_with_the_wrong_old_passphrase_fails() {
         let old = Passphrase::new(b"old");
+        let new = Passphrase::new(b"new");
         let (ks, _c) = make_owner(&old);
         let p = provision(
             &acct(&ks, &old),
@@ -1829,7 +1830,7 @@ mod tests {
             &p.keyring,
             &ks_bytes,
             &Passphrase::new(b"wrong"),
-            &Passphrase::new(b"new"),
+            &new,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -1840,6 +1841,7 @@ mod tests {
     #[test]
     fn recover_restores_the_same_identity_and_opens_the_data() {
         let old = Passphrase::new(b"old");
+        let new = Passphrase::new(b"new");
         let (ks, code) = make_owner(&old);
         let me = owner_id(&ks, &old);
         let p = provision(
@@ -1856,7 +1858,7 @@ mod tests {
             &p.keyring,
             &ks_bytes,
             &code,
-            &Passphrase::new(b"new"),
+            &new,
             &TreeId::new(TREE),
             &ReplicaId::new(b"r2"),
             &no_watermark(),
@@ -1876,8 +1878,8 @@ mod tests {
             b"data"
         );
         let new_ks = AccountKeystore::from_bytes(&rec.keystore).unwrap();
-        assert!(new_ks.unlock(b"new").is_ok());
-        assert!(new_ks.unlock(b"old").is_err());
+        assert!(new_ks.unlock(&new).is_ok());
+        assert!(new_ks.unlock(&old).is_err());
         assert!(new_ks.unlock_with_recovery(&code).is_ok());
     }
 

@@ -400,8 +400,8 @@ mod tests {
         use crate::AccountKeystore;
         let tree = TreeId::new(TREE);
         let pass = Passphrase::new(b"correct horse");
-        let (ks, _code, _u) = AccountKeystore::create(pass.expose()).unwrap();
-        let real = MemberId::new(ks.unlock(pass.expose()).unwrap().member_id);
+        let (ks, _code, _u) = AccountKeystore::create(&pass).unwrap();
+        let real = ks.unlock(&pass).unwrap().member_id;
         let bogus = MemberId::new("acct-owner-not-self-certifying".to_string());
         assert_ne!(
             real.as_str(),
@@ -412,7 +412,7 @@ mod tests {
         let p = ChainVault
             .provision(
                 &ctx(&tree, &real, &ReplicaId::new(b"rA")),
-                &ks.unlock(pass.expose()).unwrap(),
+                &ks.unlock(&pass).unwrap(),
             )
             .unwrap();
         // Unlock passing the BOGUS label — the owner is resolved from the account, so it opens regardless.
@@ -420,7 +420,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &bogus, &ReplicaId::new(b"rB")),
                 &p.anchor,
-                &ks.unlock(pass.expose()).unwrap(),
+                &ks.unlock(&pass).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -442,17 +442,17 @@ mod tests {
         let pass = Passphrase::new(b"correct horse");
         // The durable ACCOUNT is the owner on BOTH engines (OPE-542/543). One keystore is the tree's single
         // owner across every lifecycle call; tree sessions borrow it and derive their own owned signing keys.
-        let (ks, code, _u) = AccountKeystore::create(pass.expose()).unwrap();
+        let (ks, code, _u) = AccountKeystore::create(&pass).unwrap();
         let ks_bytes = ks.to_bytes().unwrap();
         // OPE-543: the owner's on-tree id is SELF-CERTIFYING — the durable account's `member_id`
         // (`derive_member_id(account key)`), NOT the caller's label. Both engines record and resolve the owner
         // by this id, so the owner-path DEK lookups (chain) must be keyed by it.
-        let member = MemberId::new(ks.unlock(pass.expose()).unwrap().member_id);
+        let member = ks.unlock(&pass).unwrap().member_id;
 
         let p = engine
             .provision(
                 &ctx(&tree, &member, &ReplicaId::new(b"rA")),
-                &ks.unlock(pass.expose()).unwrap(),
+                &ks.unlock(&pass).unwrap(),
             )
             .unwrap();
         assert!(
@@ -473,7 +473,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"rB")),
                 &p.anchor,
-                &ks.unlock(pass.expose()).unwrap(),
+                &ks.unlock(&pass).unwrap(),
             )
             .unwrap();
         assert_eq!(u.did_key, p.did_key);
@@ -516,7 +516,7 @@ mod tests {
             .unlock(
                 &ctx(&tree, &member, &ReplicaId::new(b"rC")),
                 &re.anchor,
-                &re_ks.unlock(new_pass.expose()).unwrap(),
+                &re_ks.unlock(&new_pass).unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -572,9 +572,8 @@ mod tests {
         use crate::AccountKeystore;
 
         let passphrase = Passphrase::new(b"one profile passphrase");
-        let (_keystore, _recovery_code, account) =
-            AccountKeystore::create(passphrase.expose()).unwrap();
-        let member = MemberId::new(account.member_id.clone());
+        let (_keystore, _recovery_code, account) = AccountKeystore::create(&passphrase).unwrap();
+        let member = account.member_id.clone();
         let first_tree = TreeId::new(b"first-tree-id-01");
         let second_tree = TreeId::new(b"second-tree-id02");
 
