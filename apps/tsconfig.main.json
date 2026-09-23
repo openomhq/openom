@@ -12,6 +12,7 @@
     "app/src/core/accountSession.js",
     "app/src/core/accountComposition.js",
     "app/src/core/appCoreClient.js",
+    "app/src/core/gotrueClient.js",
     "app/src/core/membership.js",
     "app/src/core/remoteStore.js",
     "app/src/vendor/comlink.d.ts",

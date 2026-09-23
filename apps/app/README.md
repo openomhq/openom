@@ -7,7 +7,7 @@
 (the module-level `§`-refs — SERVER-DATA-FORMAT, the launch-gate design — live inline in the
 `core/` files they govern, not in one apps/app-level doc)
 
-**Last updated:** 2026-09-23
+**Last updated:** 2026-09-24
 
 ## Run / verify
 
@@ -160,6 +160,7 @@ src/core/              orchestration — no UI, no rendering.
   accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.
   accountComposition.js   constructs the sole AccountSession + provider-auth + remote transport unit.
   accountSession.js       observable local/auth/binding facade; probes, registers, and CAS-backs up account custody.
+  gotrueClient.js         validates the direct Supabase Auth REST wire; owns no session or identity state.
   membership.js, sharing.js   resumable invite/claim orchestration and verified chain/DAG join bootstrap.
   store.js               DocStore contract: opaque-bytes persistence (memory / IndexedDB / Tauri).
   indexedDbStore.js       the browser DocStore implementation.
