@@ -355,4 +355,3 @@ function generateUUID() {
 }
 
 export { createEndpoint, expose, finalizer, proxy, proxyMarker, releaseProxy, transfer, transferHandlers, windowEndpoint, wrap };
-//# sourceMappingURL=comlink.mjs.map
