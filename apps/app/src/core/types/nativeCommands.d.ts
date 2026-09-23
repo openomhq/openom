@@ -220,7 +220,7 @@ export interface NativeCommandMap {
     args: {
       readonly doc: DocId;
       readonly treeId: NativeBytes<TreeId>;
-      readonly anchor: NativeBytes<KeyringBytes>;
+      readonly anchor: NativeBytes<KeyringUpdateBytes>;
       readonly pin: NativeBytes<DagAnchorPinBytes>;
     };
     result: { readonly didKey: DidKey };

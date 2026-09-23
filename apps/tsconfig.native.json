@@ -9,6 +9,7 @@
     "app/src/core/types/appCoreApi.d.ts",
     "app/src/core/types/nativeCommands.d.ts",
     "app/src/core/nativeHost.js",
+    "app/src/core/nativeAppCore.js",
     "typecheck/native-boundary.check.js"
   ]
 }

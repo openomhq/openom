@@ -10,11 +10,15 @@
 
 import { ERROR_CODES } from './errorCodes.generated.js';
 
+/** @typedef {keyof typeof ERROR_CODES} ErrorCode */
+/** @typedef {{ code: ErrorCode, domain: string, retriable: boolean, action: string|null, args?: Record<string, string|number|boolean>, retryAfter?: number, httpStatus?: number, requestId?: string, cause?: string }} AppError */
+/** @typedef {{ args?: Record<string, unknown>, retryAfter?: number, httpStatus?: number, requestId?: string|number, cause?: unknown }} ErrorOptions */
+
 // Only these value types may cross the Comlink boundary inside an AppError (B2). A live object anywhere in
 // the payload makes Comlink discard the WHOLE error, so we never let one in.
+/** @param {unknown} v @returns {string|number|boolean|undefined} */
 function safeArgValue(v) {
-  const t = typeof v;
-  return t === 'string' || t === 'number' || t === 'boolean' ? v : undefined;
+  return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' ? v : undefined;
 }
 
 /**
@@ -22,14 +26,20 @@ function safeArgValue(v) {
  * the per-occurrence extras. Unknown args, non-primitive arg values, and a live `cause` are dropped/coerced —
  * so the result is always structured-clone-safe. Falls back to `internalError` if anything throws.
  * @param {string} code
- * @param {{ args?: object, retryAfter?: number, httpStatus?: number, requestId?: string|number, cause?: unknown }} [opts]
+ * @param {ErrorOptions} [opts]
+ * @returns {AppError}
  */
 export function makeError(code, opts = {}) {
   try {
-    const meta = ERROR_CODES[code];
+    const meta = /** @type {Readonly<Record<string, (typeof ERROR_CODES)[ErrorCode]>>} */ (
+      ERROR_CODES
+    )[code];
     if (!meta) return internalError(`unknown error code: ${code}`);
-    const out = { code, domain: meta.domain, retriable: meta.retriable, action: meta.action };
+    const knownCode = /** @type {ErrorCode} */ (code);
+    /** @type {AppError} */
+    const out = { code: knownCode, domain: meta.domain, retriable: meta.retriable, action: meta.action };
     if (opts.args && meta.args.length) {
+      /** @type {Record<string, string|number|boolean>} */
       const args = {};
       for (const { name } of meta.args) {
         const v = safeArgValue(opts.args[name]);
@@ -51,7 +61,9 @@ export function makeError(code, opts = {}) {
  * The zero-dynamic-content literal fallback (B2): built from constants, so serializing it can never fail.
  * Used whenever construction/normalization itself throws.
  */
+/** @param {unknown} [cause] @returns {AppError} */
 export function internalError(cause) {
+  /** @type {AppError} */
   const out = { code: 'internal', domain: 'app', retriable: false, action: 'contact' };
   if (cause != null) {
     try { out.cause = String(cause); } catch { /* a hostile toString — leave cause unset */ }
@@ -60,11 +72,14 @@ export function internalError(cause) {
 }
 
 /** True if `x` is a well-formed AppError carrying a known registry code. */
+/** @param {unknown} x @returns {x is AppError} */
 export function isAppError(x) {
+  if (!x || typeof x !== 'object') return false;
+  const candidate = /** @type {Record<string, unknown>} */ (x);
   return (
-    !!x && typeof x === 'object' &&
-    typeof x.code === 'string' && Object.prototype.hasOwnProperty.call(ERROR_CODES, x.code) &&
-    typeof x.domain === 'string' && typeof x.retriable === 'boolean'
+    typeof candidate.code === 'string' && Object.prototype.hasOwnProperty.call(ERROR_CODES, candidate.code) &&
+    typeof candidate.domain === 'string' && typeof candidate.retriable === 'boolean' &&
+    (candidate.action === null || typeof candidate.action === 'string')
   );
 }
 
@@ -73,11 +88,14 @@ export function isAppError(x) {
  * error hooks funnel through (B1/C5). A raw Error's `.stack` is NEVER read or forwarded; only a string cause
  * is kept. An already-normalized AppError passes through unchanged.
  */
+/** @param {unknown} e @returns {AppError} */
 export function normalizeUnknown(e) {
   if (isAppError(e)) return e;
   let cause;
   try {
-    cause = e && e.message != null ? String(e.message) : String(e);
+    cause = e && (typeof e === 'object' || typeof e === 'function') && 'message' in e && e.message != null
+      ? String(e.message)
+      : String(e);
   } catch {
     cause = 'non-stringable error';
   }
@@ -93,10 +111,12 @@ export function normalizeUnknown(e) {
  * and never throws.
  * @param {string} context  where it failed, e.g. 'gate' / 'sync' — the console prefix
  * @param {unknown} e       the caught value
+ * @returns {AppError}
  */
 export function logError(context, e) {
   const err = normalizeUnknown(e);
   try {
+    /** @type {Record<string, string|number>} */
     const detail = { code: err.code, domain: err.domain };
     if (err.cause != null) detail.cause = err.cause;
     if (err.requestId != null) detail.requestId = err.requestId;

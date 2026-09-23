@@ -1597,7 +1597,7 @@ const api = {
     const c = core(docId);
     const bytes = c.handle.propose(); // Uint8Array | undefined
     if (!bytes) return null; // nothing minted since the last commit/propose
-    return transport.createProposal(c.treeKey, bytes);
+    return transport.createProposal(docId, bytes);
   },
 
   /** Maintainer path: the open proposals to review, as `[{ id, proposer, sizeBytes, createdAt, expiresAt }]`
@@ -1605,7 +1605,7 @@ const api = {
   async pendingProposals(docId) {
     const transport = transportFor(docId);
     if (!transport) return [];
-    const list = await transport.listProposals(core(docId).treeKey);
+    const list = await transport.listProposals(docId);
     return list.map(({ id, proposer, sizeBytes, createdAt, expiresAt }) => ({
       id, proposer, sizeBytes, createdAt, expiresAt,
     }));
@@ -1618,11 +1618,11 @@ const api = {
     const transport = transportFor(docId);
     if (!transport) throw new Error('attach a transport before approving');
     const c = core(docId);
-    const p = (await transport.listProposals(c.treeKey)).find((x) => x.id === proposalId);
+    const p = (await transport.listProposals(docId)).find((x) => x.id === proposalId);
     if (!p) throw new Error('proposal not found');
     const committed = c.handle.approveProposal(p.payload); // throws on a forged / misattributed proposal → no delete
     await persistBlobs(c);
-    await transport.deleteProposal(c.treeKey, proposalId); // committed → resolve the proposal
+    await transport.deleteProposal(docId, proposalId); // committed → resolve the proposal
     await syncData(c);
     return committed;
   },
@@ -1631,7 +1631,7 @@ const api = {
   async rejectProposal(docId, proposalId) {
     const transport = transportFor(docId);
     if (!transport) throw new Error('attach a transport before rejecting');
-    await transport.deleteProposal(core(docId).treeKey, proposalId);
+    await transport.deleteProposal(docId, proposalId);
   },
 
   /** The change-history activity feed: per-change records the UI renders directly — `{ author, createdAt,
@@ -1642,7 +1642,7 @@ const api = {
     const transport = transportFor(docId);
     if (!transport) return { entries: [], nextCursor: null };
     const c = core(docId);
-    const feed = await transport.getHistory(c.treeKey, opts);
+    const feed = await transport.getHistory(docId, opts);
     const entries = [];
     for (const e of feed.entries) {
       let ops = null;
@@ -1891,7 +1891,7 @@ async function syncData(c, compactKOverride) {
   const pull = c.handle.pullFrontier(); // JSON `{replica_hex: counter}`
   if (pull && pull !== '{}' && pull !== c.reportedFrontier) {
     try {
-      await transport.putFrontier(c.treeKey, JSON.parse(pull));
+      await transport.putFrontier(c.docId, JSON.parse(pull));
       c.reportedFrontier = pull;
     } catch {
       /* advisory telemetry — swallow; gate 2 stays conservative without this report */

@@ -239,8 +239,30 @@ export interface RemoteHistoryPage {
   readonly nextCursor: number | null;
 }
 
+export interface MembershipSummaryMember {
+  readonly memberId: MemberId;
+  readonly role: number;
+}
+
+export interface StoredMembershipSummary {
+  readonly members: ReadonlyArray<MembershipSummaryMember>;
+  readonly generation: number | null;
+  readonly basis: ReadonlyArray<string>;
+}
+
+export interface MembershipSummaryUpdate {
+  readonly members: ReadonlyArray<MembershipSummaryMember>;
+  readonly expectedGeneration: number | null;
+  readonly basis: ReadonlyArray<string>;
+}
+
+export interface MembershipSummaryPutResult {
+  readonly generation: number | null;
+  readonly unchanged: boolean;
+}
+
 export interface AppCoreTransport {
-  createTree(tree: RemoteTreeKey): Awaitable<unknown>;
+  createTree(tree: TreeUuid): Awaitable<unknown>;
   blobList(prefix: RemoteTreeKey): Awaitable<ReadonlyArray<RemoteBlobMeta>>;
   blobGet(key: TreeObjectKey): Awaitable<TreeObjectBytes | null>;
   blobPut(
@@ -249,15 +271,15 @@ export interface AppCoreTransport {
     pointer: boolean,
     covered?: CoveredFrontierJson,
   ): Awaitable<unknown>;
-  putFrontier(tree: RemoteTreeKey, frontier: Readonly<Record<string, number>>): Awaitable<unknown>;
+  putFrontier(tree: TreeUuid, frontier: Readonly<Record<string, number>>): Awaitable<unknown>;
   readKeyring(tree: TreeUuid, from: KeyringRevision): Awaitable<RemoteKeyringWalk>;
   putKeyring(tree: TreeUuid, update: KeyringUpdateBytes): Awaitable<unknown>;
-  getAccess(tree: TreeUuid): Awaitable<unknown>;
-  putAccess(tree: TreeUuid, body: unknown): Awaitable<unknown>;
-  createProposal(tree: RemoteTreeKey, proposal: ProposalEnvelopeBytes): Awaitable<CreatedProposal>;
-  listProposals(tree: RemoteTreeKey): Awaitable<ReadonlyArray<RemoteProposal>>;
-  deleteProposal(tree: RemoteTreeKey, proposalId: ProposalId): Awaitable<unknown>;
-  getHistory(tree: RemoteTreeKey, options: HistoryOptions): Awaitable<RemoteHistoryPage>;
+  getAccess(tree: TreeUuid): Awaitable<StoredMembershipSummary | null>;
+  putAccess(tree: TreeUuid, body: MembershipSummaryUpdate): Awaitable<MembershipSummaryPutResult>;
+  createProposal(tree: TreeUuid, proposal: ProposalEnvelopeBytes): Awaitable<CreatedProposal>;
+  listProposals(tree: TreeUuid): Awaitable<ReadonlyArray<RemoteProposal>>;
+  deleteProposal(tree: TreeUuid, proposalId: ProposalId): Awaitable<unknown>;
+  getHistory(tree: TreeUuid, options: HistoryOptions): Awaitable<RemoteHistoryPage>;
 }
 
 export interface AppCoreService {

@@ -24,23 +24,155 @@ import { invokeNative, isNativeHost } from './nativeHost.js';
 
 export { isNativeHost };
 
+/** @typedef {import('./types/domain.js').DocId} DocId */
+/** @typedef {import('./types/domain.js').AppSecretEnvelopeBytes} AppSecretEnvelopeBytes */
+/** @typedef {import('./types/domain.js').AppSecretPlaintextBytes} AppSecretPlaintextBytes */
+/** @typedef {import('./types/domain.js').AuthorPublicKeyBytes} AuthorPublicKeyBytes */
+/** @typedef {import('./types/domain.js').InviteId} InviteId */
+/** @typedef {import('./types/domain.js').InviteMacBytes} InviteMacBytes */
+/** @typedef {import('./types/domain.js').HistoryDeltaEnvelopeBytes} HistoryDeltaEnvelopeBytes */
+/** @typedef {import('./types/domain.js').KeyringEngine} KeyringEngine */
+/** @typedef {import('./types/domain.js').KeyringHashBytes} KeyringHashBytes */
+/** @typedef {import('./types/domain.js').KeyringRevision} KeyringRevision */
+/** @typedef {import('./types/domain.js').MemberId} MemberId */
+/** @typedef {import('./types/domain.js').MemberRole} MemberRole */
+/** @typedef {import('./types/domain.js').RemoteTreeKey} RemoteTreeKey */
+/** @typedef {import('./types/domain.js').RecoveryCode} RecoveryCode */
+/** @typedef {import('./types/domain.js').TreeId} TreeId */
+/** @typedef {import('./types/domain.js').TreeObjectBytes} TreeObjectBytes */
+/** @typedef {import('./types/domain.js').TreeObjectKey} TreeObjectKey */
+/** @typedef {import('./types/domain.js').TreeUuid} TreeUuid */
+/** @typedef {import('./types/appCoreApi.js').AppCoreTransport} AppCoreTransport */
+/** @typedef {import('./types/appCoreApi.js').SyncResult} SyncResult */
+/** @typedef {Omit<import('./types/appCoreApi.js').AppCoreService, 'syncNow'> & {
+ *   syncNow: (docId: DocId, compactK?: number) => import('./types/appCoreApi.js').Awaitable<SyncResult>,
+ *   anomalies: (docId: DocId) => import('./types/appCoreApi.js').Awaitable<number>
+ * }} NativeAppCoreService */
+/** @typedef {import('./types/nativeCommands.js').NativeBytes<Uint8Array>} NativeBytes */
+/** @typedef {{
+ *   inviteId: InviteId,
+ *   uuid: TreeUuid,
+ *   role: MemberRole,
+ *   engine: KeyringEngine,
+ *   sMacClaim: Uint8Array,
+ *   expiry: number,
+ *   recipientPin: string|null,
+ *   signerIds: MemberId[],
+ * }} NativeMintRecord */
+/** @typedef {{ memberId: MemberId, role: number }} SummaryMember */
+/** @typedef {{ members: SummaryMember[], basis: string[] }} MembershipSummary */
+
 // A Vec<u8> argument as the number array Tauri deserializes; passes strings/undefined through untouched.
-const bytes = (x) => (x == null ? x : Array.from(x));
+/**
+ * @template {Uint8Array} Value
+ * @param {Value} value
+ * @returns {import('./types/nativeCommands.js').NativeBytes<Value>}
+ */
+const bytes = (value) => /** @type {import('./types/nativeCommands.js').NativeBytes<Value>} */ (
+  /** @type {unknown} */ (Array.from(value))
+);
 // A Vec<u8> result (number array) back to a Uint8Array, the shape the web code expects for keyring bytes.
-const u8 = (x) => (x == null ? x : x instanceof Uint8Array ? x : new Uint8Array(x));
+/** @template {Uint8Array} Value @param {Value} value @returns {Value} */
+const u8 = (value) => /** @type {Value} */ (new Uint8Array(value));
 // The remote (per-tree) blob-key prefix: the 16 tree-id bytes as lowercase hex — the same mapping main.js uses
 // for the tree UUID's byte seam (the worker's `treeKey`). The core's LOCAL keyspace is `{docId}/…`; the shared
 // REMOTE is `{treeKey}/…`, so the sync tick re-keys between them (exactly as appCore.worker.js does).
-const hexKey = (treeId) => Array.from(treeId, (b) => b.toString(16).padStart(2, '0')).join('');
+/** @param {TreeId} treeId @returns {RemoteTreeKey} */
+const hexKey = (treeId) => /** @type {RemoteTreeKey} */ (
+  Array.from(treeId, (byte) => byte.toString(16).padStart(2, '0')).join('')
+);
+
+// Real account trees use their UUID as the local doc id and every tree-route id (main.js owns that invariant).
+/** @param {DocId} docId @returns {TreeUuid} */
+const treeUuid = (docId) => /** @type {TreeUuid} */ (/** @type {unknown} */ (docId));
+
+/** @param {number} value @returns {KeyringRevision} */
+const keyringRevision = (value) => /** @type {KeyringRevision} */ (value);
+
+/** @param {string} value @returns {TreeObjectKey} */
+const treeObjectKey = (value) => /** @type {TreeObjectKey} */ (value);
 
 // OPE-407 durable create-tree marker (native mirror of the web worker's IndexedDB marker): this device
 // PROVISIONED a new tree whose server `trees` row may not exist yet. Set at provision, consumed on the first
 // sync tick that reaches the server. Durable via the webview's localStorage so an offline provision that RESTARTS
 // before it ever synced still mints the tree on a later tick rather than 404ing forever. A JOINing member never
 // sets it (it adopts a tree the owner already created), so a member never calls createTree — no 403 to swallow.
+/** @param {DocId} docId */
 const NEEDS_TREE_KEY = (docId) => `openom:${docId}:needs-create-tree`;
 const lstore = () => { try { return globalThis.localStorage ?? null; } catch { return null; } };
 
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** @param {unknown} error @param {string} code @returns {error is Record<string, unknown>} */
+function hasErrorCode(error, code) {
+  return isRecord(error) && error.code === code;
+}
+
+/** @param {unknown} error */
+function isConflictError(error) {
+  return isRecord(error) && error.name === 'ConflictError';
+}
+
+/** @param {unknown} value @returns {Uint8Array} */
+function decodedBytes(value) {
+  if (!Array.isArray(value) || !value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) {
+    throw new Error('stored native bytes are malformed');
+  }
+  return Uint8Array.from(value);
+}
+
+/** @param {string} raw @returns {NativeMintRecord} */
+function parseMintRecord(raw) {
+  const value = /** @type {unknown} */ (JSON.parse(raw));
+  if (!isRecord(value)) throw new Error('stored invite mint record is malformed');
+  const role = value.role;
+  const engine = value.engine;
+  if (
+    typeof value.inviteId !== 'string'
+    || typeof value.uuid !== 'string'
+    || (role !== 'owner' && role !== 'co-owner' && role !== 'maintainer' && role !== 'editor' && role !== 'viewer')
+    || (engine !== 'chain' && engine !== 'dag')
+    || !Number.isSafeInteger(value.expiry)
+    || (value.recipientPin !== null && typeof value.recipientPin !== 'string')
+    || !Array.isArray(value.signerIds)
+    || !value.signerIds.every((memberId) => typeof memberId === 'string')
+  ) {
+    throw new Error('stored invite mint record is malformed');
+  }
+  return {
+    inviteId: /** @type {InviteId} */ (value.inviteId),
+    uuid: /** @type {TreeUuid} */ (value.uuid),
+    role,
+    engine,
+    sMacClaim: decodedBytes(value.sMacClaim),
+    expiry: Number(value.expiry),
+    recipientPin: value.recipientPin,
+    signerIds: /** @type {MemberId[]} */ (value.signerIds),
+  };
+}
+
+/** @param {string} raw @returns {MembershipSummary} */
+function parseMembershipSummary(raw) {
+  const value = /** @type {unknown} */ (JSON.parse(raw));
+  if (!isRecord(value) || !Array.isArray(value.members) || !Array.isArray(value.basis)) {
+    throw new Error('native membership summary is malformed');
+  }
+  const members = value.members.map((item) => {
+    if (!isRecord(item) || typeof item.memberId !== 'string' || !Number.isSafeInteger(item.role)) {
+      throw new Error('native membership summary is malformed');
+    }
+    return { memberId: /** @type {MemberId} */ (item.memberId), role: Number(item.role) };
+  });
+  if (!value.basis.every((item) => typeof item === 'string')) {
+    throw new Error('native membership summary is malformed');
+  }
+  return { members, basis: /** @type {string[]} */ (value.basis) };
+}
+
+/** @returns {NativeAppCoreService} */
 export function createNativeAppCore() {
   /**
    * @param {import('./types/nativeCommands.js').NativeCommand} cmd
@@ -54,10 +186,13 @@ export function createNativeAppCore() {
     // wasm worker throws (via makeError), so the gate's rollback/tamper/wrong-passphrase distinctions and the
     // sync driver's retriable/auth classification survive on native (design-review C1). Anything else falls
     // through to the generic normalizer.
+    /** @type {unknown} */
     let parsed = null;
     if (typeof raw === 'string') { try { parsed = JSON.parse(raw); } catch { parsed = null; } }
     else if (raw && typeof raw === 'object') parsed = raw;
-    if (parsed && typeof parsed.code === 'string') throw makeError(parsed.code, { cause: parsed.message });
+    if (isRecord(parsed) && typeof parsed.code === 'string') {
+      throw makeError(parsed.code, { cause: parsed.message });
+    }
     throw normalizeUnknown(raw);
   });
   const call = /** @type {import('./types/nativeCommands.js').NativeInvoke} */ (
@@ -66,12 +201,19 @@ export function createNativeAppCore() {
 
   // Per-doc network transport (set by attachTransport) + the doc→treeKey map (the remote keyspace prefix,
   // recorded whenever a doc is opened) + a single-flight sync guard + the once-per-session create-tree gate.
+  /** @type {Map<DocId, AppCoreTransport>} */
   const transports = new Map();
+  /** @type {Map<DocId, RemoteTreeKey>} */
   const treeKeys = new Map();
+  /** @type {Map<DocId, TreeId>} */
   const treeIds = new Map(); // doc → the RAW 16 tree-id bytes (keyring-before-data needs them, not just the hex key)
+  /** @type {Map<DocId, boolean>} */
   const syncing = new Map();
+  /** @type {Set<DocId>} */
   const treeEnsured = new Set();
+  /** @type {Map<DocId, string>} */
   const reportedFrontier = new Map(); // last pull-frontier reported per doc (change-guard for the GC telemetry)
+  /** @param {DocId} docId @param {TreeId} treeId */
   const remember = (docId, treeId) => {
     treeKeys.set(docId, hexKey(treeId));
     treeIds.set(docId, treeId);
@@ -79,9 +221,13 @@ export function createNativeAppCore() {
 
   // The create-tree marker, localStorage-backed with an in-memory fallback so create-tree is never silently
   // disabled when storage is unavailable (private mode) — the fallback still gives within-session retry.
+  /** @type {Set<DocId>} */
   const needsTreeMem = new Set();
+  /** @param {DocId} docId */
   const markNeedsCreateTree = (docId) => { needsTreeMem.add(docId); try { lstore()?.setItem(NEEDS_TREE_KEY(docId), '1'); } catch { /* no storage */ } };
+  /** @param {DocId} docId */
   const needsCreateTree = (docId) => { if (needsTreeMem.has(docId)) return true; try { return lstore()?.getItem(NEEDS_TREE_KEY(docId)) === '1'; } catch { return false; } };
+  /** @param {DocId} docId */
   const clearNeedsCreateTree = (docId) => { needsTreeMem.delete(docId); try { lstore()?.removeItem(NEEDS_TREE_KEY(docId)); } catch { /* best-effort */ } };
 
   // Owner-local DURABLE invite mint records (invite model v3), keyed by invite_id in the webview's localStorage —
@@ -91,20 +237,28 @@ export function createNativeAppCore() {
   // `s_mac_claim` is a secret (it forges that invite's claim MAC), so localStorage holds the ciphertext (as a
   // JSON byte array), never the plaintext. NEVER sent to the host over the wire in the clear or to the server.
   // Mirrors the web worker's IndexedDB mint record — different store (main thread), same purpose.
+  /** @param {InviteId} inviteId */
   const MINT_KEY = (inviteId) => `openom:invite-mint:${inviteId}`;
+  /** @param {DocId} docId @param {NativeMintRecord} rec */
   const saveMintRecord = async (docId, rec) => {
     const plaintext = new TextEncoder().encode(JSON.stringify({ ...rec, sMacClaim: Array.from(rec.sMacClaim) }));
-    const sealed = u8(await call('core_seal_app_secret', { doc: docId, bytes: bytes(plaintext) }));
+    const sealed = u8(await call('core_seal_app_secret', {
+      doc: docId,
+      bytes: bytes(/** @type {AppSecretPlaintextBytes} */ (plaintext)),
+    }));
     try { lstore()?.setItem(MINT_KEY(rec.inviteId), JSON.stringify(Array.from(sealed))); } catch { /* no storage */ }
   };
+  /** @param {DocId} docId @param {InviteId} inviteId @returns {Promise<NativeMintRecord|null>} */
   const loadMintRecord = async (docId, inviteId) => {
     let raw;
     try { raw = lstore()?.getItem(MINT_KEY(inviteId)); } catch { return null; }
     if (!raw) return null;
-    const plaintext = u8(await call('core_open_app_secret', { doc: docId, sealed: JSON.parse(raw) }));
-    const o = JSON.parse(new TextDecoder().decode(plaintext));
-    return { ...o, sMacClaim: Uint8Array.from(o.sMacClaim) };
+    const stored = /** @type {unknown} */ (JSON.parse(raw));
+    const sealed = /** @type {AppSecretEnvelopeBytes} */ (decodedBytes(stored));
+    const plaintext = u8(await call('core_open_app_secret', { doc: docId, sealed: bytes(sealed) }));
+    return parseMintRecord(new TextDecoder().decode(plaintext));
   };
+  /** @param {InviteId} inviteId */
   const deleteMintRecord = (inviteId) => { try { lstore()?.removeItem(MINT_KEY(inviteId)); } catch { /* best-effort */ } };
 
   // Publish a membership change to the server (OPE-433/434, review C2): the KEYRING channel (the crypto
@@ -115,25 +269,28 @@ export function createNativeAppCore() {
   // generation retry and the PULL side (keyring-before-data adoption on sync) are runtime-verified follow-ups
   // tracked on OPE-433/434.
   // Byte-array equality (the server's served raw keyring bytes vs our retained body — both plain number arrays).
-  const u8eq = (a, b) => !!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]);
+  /** @param {Uint8Array|null|undefined} a @param {Uint8Array} b */
+  const u8eq = (a, b) => !!a && a.length === b.length && a.every((value, index) => value === b[index]);
 
   // Publish this device's produced CHAIN keyring TAIL: walk server-head+1 .. local-head and PUT each wrapped
   // revision in ascending single-hop order (the server admits only revision == head+1, so a single-head PUT
   // can't bridge a >1 gap, and a solo tree's genesis must land before any share can be verified). Idempotent: a
   // 409 whose served bytes equal ours is benign (already admitted), differing bytes are a fork (surfaced).
+  /** @param {DocId} docId */
   async function publishKeyringTail(docId) {
     const transport = transports.get(docId);
+    if (!transport) return;
     const localHead = await call('core_keyring_head', { doc: docId }); // chain-only; a dag call rejects → caught by caller
     if (localHead === 0) return;
-    const serverHead = (await transport.readKeyring(docId, localHead)).head ?? 0;
+    const serverHead = (await transport.readKeyring(treeUuid(docId), keyringRevision(localHead))).head ?? 0;
     for (let rev = serverHead + 1; rev <= localHead; rev += 1) {
       const { update, body } = await call('core_keyring_publish_payload_at', { doc: docId, revision: rev });
       try {
-        await transport.putKeyring(docId, new Uint8Array(update));
+        await transport.putKeyring(treeUuid(docId), update);
       } catch (e) {
-        if (e?.name === 'ConflictError') {
-          const served = (await transport.readKeyring(docId, rev)).revisions?.[0]?.bytes;
-          if (served && u8eq(Array.from(served), body)) continue; // already admitted with our bytes — benign
+        if (isConflictError(e)) {
+          const served = (await transport.readKeyring(treeUuid(docId), keyringRevision(rev))).revisions?.[0]?.bytes;
+          if (served && u8eq(served, body)) continue; // already admitted with our bytes — benign
           throw makeError('keyring_verify_failed', { cause: `keyring fork at revision ${rev}` });
         }
         throw e;
@@ -144,12 +301,19 @@ export function createNativeAppCore() {
   // Assert the advisory /access summary under the server's CAS on `generation` (getAccess → PUT → retry-on-409),
   // via the SAME shared helper the web worker uses (membershipSummary.js) — not the naive no-generation PUT that
   // 409s on every push after the first.
+  /** @param {DocId} docId */
   async function pushAdvisory(docId) {
     const transport = transports.get(docId);
-    const s = JSON.parse(await call('core_membership_summary', { doc: docId }));
-    await pushMembershipSummary(transport, docId, { view: s.members, basis: s.basis });
+    if (!transport) return;
+    const summary = parseMembershipSummary(await call('core_membership_summary', { doc: docId }));
+    await pushMembershipSummary(
+      transport,
+      treeUuid(docId),
+      { view: summary.members, basis: summary.basis },
+    );
   }
 
+  /** @param {DocId} docId @param {boolean} advisoryFirst */
   async function publishAfterMembership(docId, advisoryFirst) {
     const transport = transports.get(docId);
     if (!transport) return; // local-only: nothing to publish
@@ -163,6 +327,7 @@ export function createNativeAppCore() {
     }
   }
 
+  /** @type {NativeAppCoreService} */
   const api = {
     // --- session lifecycle (host owns the DEK; no engine arg — the host picks it) ---
     ping: () => Promise.resolve(true), // the native host is in-process; always alive
@@ -182,7 +347,7 @@ export function createNativeAppCore() {
     accountAcknowledgeBackup: ({ expected, checkpoint }) =>
       call('account_acknowledge_backup', { expected, checkpoint }),
     accountAdoptCandidate: ({ expectedMemberId, keystore, credential, binding, checkpoint }) => {
-      if (credential && typeof credential.passphrase === 'string') {
+      if ('passphrase' in credential) {
         return call('account_adopt_candidate', {
           expectedMemberId,
           candidate: bytes(keystore),
@@ -191,11 +356,7 @@ export function createNativeAppCore() {
           checkpoint,
         });
       }
-      if (
-        credential
-        && typeof credential.recoveryCode === 'string'
-        && typeof credential.newPassphrase === 'string'
-      ) {
+      if ('recoveryCode' in credential) {
         return call('account_adopt_recovery_candidate', {
           expectedMemberId,
           candidate: bytes(keystore),
@@ -277,13 +438,13 @@ export function createNativeAppCore() {
       if (!sealed || sealed.length === 0) return null;
       const transport = transports.get(docId);
       if (!transport) throw makeError('internal', { cause: `proposeEdit: no transport attached for ${docId}` });
-      return transport.createProposal(treeKeys.get(docId), sealed);
+      return transport.createProposal(treeUuid(docId), sealed);
     },
     /** Maintainer: the open proposals to review, as [{ id, proposer, sizeBytes, createdAt, expiresAt }]. */
     async pendingProposals(docId) {
       const transport = transports.get(docId);
       if (!transport) return [];
-      const list = await transport.listProposals(treeKeys.get(docId));
+      const list = await transport.listProposals(treeUuid(docId));
       return list.map(({ id, proposer, sizeBytes, createdAt, expiresAt }) => ({
         id, proposer, sizeBytes, createdAt, expiresAt,
       }));
@@ -294,11 +455,11 @@ export function createNativeAppCore() {
     async approveProposal(docId, proposalId) {
       const transport = transports.get(docId);
       if (!transport) throw makeError('internal', { cause: `approveProposal: no transport attached for ${docId}` });
-      const treeKey = treeKeys.get(docId);
-      const p = (await transport.listProposals(treeKey)).find((x) => x.id === proposalId);
+      const tree = treeUuid(docId);
+      const p = (await transport.listProposals(tree)).find((x) => x.id === proposalId);
       if (!p) throw makeError('internal', { cause: `approveProposal: proposal ${proposalId} not found` });
       const committed = await call('core_approve_proposal', { doc: docId, proposal: bytes(p.payload) });
-      await transport.deleteProposal(treeKey, proposalId);
+      await transport.deleteProposal(tree, proposalId);
       return committed;
     },
 
@@ -306,7 +467,7 @@ export function createNativeAppCore() {
     async rejectProposal(docId, proposalId) {
       const transport = transports.get(docId);
       if (!transport) throw makeError('internal', { cause: `rejectProposal: no transport attached for ${docId}` });
-      return transport.deleteProposal(treeKeys.get(docId), proposalId);
+      await transport.deleteProposal(treeUuid(docId), proposalId);
     },
 
     /** The change-history activity feed: per-change records `{ author, createdAt, replica, counter, size,
@@ -315,15 +476,22 @@ export function createNativeAppCore() {
       const transport = transports.get(docId);
       if (!transport) return { entries: [], nextCursor: null };
       const treeKey = treeKeys.get(docId);
-      const feed = await transport.getHistory(treeKey, opts);
+      if (!treeKey) throw makeError('internal', { cause: `history: no tree key for ${docId}` });
+      const feed = await transport.getHistory(treeUuid(docId), opts);
       const entries = [];
       for (const e of feed.entries) {
         let ops = null;
         let viewable = false;
         try {
-          const sealed = u8(await transport.blobGet(`${treeKey}/log/${e.replica}/${e.counter}`));
+          const sealed = await transport.blobGet(
+            treeObjectKey(`${treeKey}/log/${e.replica}/${e.counter}`),
+          );
           if (sealed && sealed.length) {
-            ops = JSON.parse(await call('core_open_history_delta', { doc: docId, envelope: bytes(sealed) }));
+            const envelope = /** @type {HistoryDeltaEnvelopeBytes} */ (/** @type {unknown} */ (sealed));
+            ops = JSON.parse(await call('core_open_history_delta', {
+              doc: docId,
+              envelope: bytes(envelope),
+            }));
             viewable = true;
           }
         } catch {
@@ -356,11 +524,11 @@ export function createNativeAppCore() {
 
     // --- membership / sharing (owner + member) ---
     provisionMember: async (passphrase) => {
-      let account;
+      let recoveryCode = /** @type {RecoveryCode} */ ('');
       try {
-        account = await api.accountUnlock(passphrase);
+        await api.accountUnlock(passphrase);
       } catch {
-        account = await api.accountCreate(passphrase);
+        recoveryCode = (await api.accountCreate(passphrase)).recoveryCode;
       }
       const m = await api.accountPublicIdentity();
       const authorPublicKey = u8(m.authorPublicKey);
@@ -369,7 +537,7 @@ export function createNativeAppCore() {
       return {
         memberId: await call('core_derive_member_id', { authorPublicKey: bytes(authorPublicKey) }),
         kdfParams: null, authorPublicKey, hpkePublicKey: u8(m.hpkePublicKey),
-        recoveryCode: account?.recoveryCode ?? '',
+        recoveryCode,
       };
     },
     // Owner: mint a v3 share invite. The host supplies the engine pin (core_invite_material); the mint-time signer
@@ -377,10 +545,10 @@ export function createNativeAppCore() {
     // builds the short link + authenticated metadata; the record is persisted durably.
     async inviteMember(docId, { role, recipientPin = null, ttlMs, base }) {
       const material = await call('core_invite_material', { doc: docId }); // { engine, pin }
-      const summary = JSON.parse(await call('core_membership_summary', { doc: docId }));
+      const summary = parseMembershipSummary(await call('core_membership_summary', { doc: docId }));
       const mintSigners = signerIds(summary.members);
       const minted = await mintInvite({
-        uuid: docId, role, engine: material.engine, pin: u8(material.pin), recipientPin,
+        uuid: treeUuid(docId), role, engine: material.engine, pin: u8(material.pin), recipientPin,
         ...(ttlMs ? { ttlMs } : {}), ...(base ? { base } : {}),
       });
       await saveMintRecord(docId, { ...minted.record, signerIds: mintSigners });
@@ -394,7 +562,7 @@ export function createNativeAppCore() {
       const record = await loadMintRecord(docId, inviteId);
       if (!record) throw makeError('internal', { cause: 'no local mint record for this invite — admit on the minting device' });
       if (Date.now() > record.expiry) throw makeError('internal', { cause: 'invite expired' });
-      const summary = JSON.parse(await call('core_membership_summary', { doc: docId }));
+      const summary = parseMembershipSummary(await call('core_membership_summary', { doc: docId }));
       if (!signersRetained(record.signerIds, summary.members)) {
         throw makeError('internal', { cause: 'a signer was removed since mint — cancel and re-invite' });
       }
@@ -403,7 +571,8 @@ export function createNativeAppCore() {
       // never trust the claim's id (the host re-derives it too; identical single source as the worker).
       await api.addMember(docId, {
         passphrase, treeId, ownerMemberId,
-        newMemberId: await call('core_derive_member_id', { authorPublicKey: claim.authorPublicKey }), role: record.role,
+        newMemberId: await call('core_derive_member_id', { authorPublicKey: bytes(claim.authorPublicKey) }),
+        role: record.role,
         memberAuthorPublic: claim.authorPublicKey, memberHpkePublic: claim.hpkePublicKey,
       });
       deleteMintRecord(inviteId);
@@ -447,15 +616,20 @@ export function createNativeAppCore() {
         return Promise.reject(makeError('internal', { cause: `joinAsMember: no transport attached for ${docId}` }));
       }
       if (engine === 'dag') {
+        if (!pin) return Promise.reject(makeError('invalid_request', { cause: 'dag invite pin is required' }));
         // Dag: the highest served revision is the self-contained anchor; the host verifies it against the OOB pin
         // (the v3 dag pin) and unlocks. No genesis-walk framing.
-        const { revisions } = await transport.readKeyring(docId, 1);
+        const { revisions } = await transport.readKeyring(treeUuid(docId), keyringRevision(1));
         if (!revisions || revisions.length === 0) {
           return Promise.reject(makeError('internal', { cause: 'no keyring anchor to verify' }));
         }
-        const anchor = revisions[revisions.length - 1].bytes;
+        const anchor = revisions.at(-1)?.bytes;
+        if (!anchor) return Promise.reject(makeError('internal', { cause: 'no keyring anchor to verify' }));
         const out = await call('core_join_dag_anchor', {
-          doc: docId, treeId: bytes(treeId), anchor: bytes(anchor), pin: bytes(u8(pin)),
+          doc: docId, treeId: bytes(treeId), anchor: bytes(anchor),
+          pin: bytes(/** @type {import('./types/domain.js').DagAnchorPinBytes} */ (
+            /** @type {unknown} */ (pin)
+          )),
         });
         await call('core_bootstrap', { doc: docId });
         return out;
@@ -465,10 +639,16 @@ export function createNativeAppCore() {
       if (pin !== undefined) {
         const p = u8(pin);
         if (p.length !== 36) return Promise.reject(makeError('internal', { cause: 'chain invite pin must be 36 bytes' }));
-        pinnedRevision = new DataView(p.buffer, p.byteOffset, 4).getUint32(0, false);
-        pinnedHash = p.slice(4);
+        pinnedRevision = keyringRevision(new DataView(p.buffer, p.byteOffset, 4).getUint32(0, false));
+        pinnedHash = /** @type {KeyringHashBytes} */ (p.slice(4));
       }
-      const { revisions } = await transport.readKeyring(docId, 1); // the full walk from genesis (rev 1)
+      if (pinnedRevision === undefined || pinnedHash === undefined) {
+        return Promise.reject(makeError('invalid_request', { cause: 'chain invite pin is required' }));
+      }
+      const { revisions } = await transport.readKeyring(
+        treeUuid(docId),
+        keyringRevision(1),
+      ); // the full walk from genesis (rev 1)
       const hops = frameHops((revisions ?? []).map((r) => r.bytes));
       const out = await call('core_join_as_member', {
         doc: docId, treeId: bytes(treeId), hops: bytes(hops), pinnedRevision, pinnedHash: bytes(pinnedHash),
@@ -483,12 +663,15 @@ export function createNativeAppCore() {
       try {
         localHead = await call('core_keyring_head', { doc: docId });
       } catch (err) {
-        if (err?.code === 'internal' && String(err.cause).includes('chain-only')) {
+        if (hasErrorCode(err, 'internal') && String(err.cause).includes('chain-only')) {
           return { changed: false };
         }
         throw err;
       }
-      const walk = await transport.readKeyring(docId, localHead + 1);
+      const walk = await transport.readKeyring(
+        treeUuid(docId),
+        keyringRevision(localHead + 1),
+      );
       const successors = (walk.revisions ?? []).filter((revision) => revision.revision > localHead);
       if (successors.length === 0) return { changed: false };
       const hops = frameHops(successors.map((revision) => revision.bytes));
@@ -527,7 +710,7 @@ export function createNativeAppCore() {
         // Idempotent for the owner (a returning device re-POSTs and gets a 2xx no-op).
         if (!treeEnsured.has(docId)) {
           if (needsCreateTree(docId)) {
-            await transport.createTree(docId);
+            await transport.createTree(treeUuid(docId));
             clearNeedsCreateTree(docId);
           }
           treeEnsured.add(docId);
@@ -542,7 +725,10 @@ export function createNativeAppCore() {
           const treeId = treeIds.get(docId);
           if (treeId) {
             const localHead = await call('core_keyring_head', { doc: docId });
-            const walk = await transport.readKeyring(docId, localHead + 1);
+            const walk = await transport.readKeyring(
+              treeUuid(docId),
+              keyringRevision(localHead + 1),
+            );
             const serverHead = walk.head ?? 0;
             const successors = (walk.revisions ?? []).filter((r) => r.revision > localHead);
             if (successors.length) {
@@ -558,33 +744,34 @@ export function createNativeAppCore() {
           // data against a stale membership is exactly what keyring-before-data prevents — so re-throw and let the
           // tick report {state:'error'}. A network error, or the dag engine (keyring_head / core_sync_keyring
           // reject dag), is benign — swallow and proceed.
-          if (err?.code === 'keyring_verify_failed' || err?.code === 'revision_rollback') throw err;
+          if (hasErrorCode(err, 'keyring_verify_failed') || hasErrorCode(err, 'revision_rollback')) throw err;
           console.warn('[openom] native keyring-before-data (best-effort)', err);
         }
         const localPrefix = `${docId}/`;
-        const remotePrefix = `${treeKey}/`;
+        const remotePrefix = /** @type {RemoteTreeKey} */ (`${treeKey}/`);
         // PULL: list the shared remote, re-keyed into the core's local namespace. The core decides which objects
         // we still need to FETCH (OPE-464): immutable log objects we already pulled are skipped so we don't
         // re-download the whole retained log each tick. `present` = the full LIST so the core's upload-diff never
         // re-pushes a log object the remote already holds but we chose not to re-download.
         const listed = await transport.blobList(remotePrefix);
-        const present = listed.map(({ key }) => localPrefix + key.slice(remotePrefix.length));
+        const present = listed.map(({ key }) => treeObjectKey(localPrefix + key.slice(remotePrefix.length)));
         const toFetch = new Set(await call('core_plan_fetch', { doc: docId, keys: present }));
+        /** @type {import('./types/nativeCommands.js').NativeStoredObject[]} */
         const remote = [];
         for (const { key } of listed) {
-          const localKey = localPrefix + key.slice(remotePrefix.length);
+          const localKey = treeObjectKey(localPrefix + key.slice(remotePrefix.length));
           if (!toFetch.has(localKey)) continue;
           const b = await transport.blobGet(key);
-          if (b) remote.push([localKey, Array.from(b)]);
+          if (b) remote.push([localKey, bytes(b)]);
         }
         // The core owns the whole keyspace + head-monotonicity decision; this is a dumb ferry.
         const { uploads, covered } = await call('core_sync', { doc: docId, remote, present, compactK });
         // PUSH: re-key each upload back to the shared namespace; the CORE decided pointer; the snapshot carries
         // the covered header (a well-known object key — the one key the worker itself checks, for the header).
         for (const o of uploads) {
-          const remoteKey = remotePrefix + o.key.slice(localPrefix.length);
+          const remoteKey = treeObjectKey(remotePrefix + o.key.slice(localPrefix.length));
           const coveredHeader = o.key.endsWith('/snapshot') ? covered : undefined;
-          await transport.blobPut(remoteKey, new Uint8Array(o.bytes), o.pointer, coveredHeader);
+          await transport.blobPut(remoteKey, o.bytes, o.pointer, coveredHeader);
         }
         // Report the pull frontier for GC gate-2 liveness (OPE-409): change-guarded + best-effort — a failure
         // NEVER fails the tick, the floor just stays conservatively low for this member without the report.
@@ -592,7 +779,7 @@ export function createNativeAppCore() {
           const frontier = await call('core_pull_frontier', { doc: docId });
           const sig = JSON.stringify(frontier);
           if (sig !== '{}' && sig !== reportedFrontier.get(docId)) {
-            await transport.putFrontier(treeKey, frontier);
+            await transport.putFrontier(treeUuid(docId), frontier);
             reportedFrontier.set(docId, sig);
           }
         } catch { /* advisory telemetry — swallow; gate 2 stays conservative without it */ }

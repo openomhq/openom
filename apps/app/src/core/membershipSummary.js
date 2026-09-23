@@ -18,19 +18,34 @@
 // `coversBasis` and `refresh` are engine seams (the coverage check is `check_floor` on the dag, a revision
 // compare on the chain); they're injected so this orchestration is engine-agnostic and unit-testable.
 
+/** @typedef {import('./types/domain.js').TreeUuid} TreeUuid */
+/** @typedef {import('./types/domain.js').MemberId} MemberId */
+/** @typedef {import('./types/appCoreApi.js').MembershipSummaryMember} MembershipSummaryMember */
+/** @typedef {import('./types/appCoreApi.js').StoredMembershipSummary} StoredMembershipSummary */
+/** @typedef {import('./types/appCoreApi.js').MembershipSummaryPutResult} MembershipSummaryPutResult */
+
+/** @typedef {{view: ReadonlyArray<MembershipSummaryMember>, basis: ReadonlyArray<string>}} MembershipSummary */
+/** @typedef {{
+ *   getAccess: (treeId: TreeUuid) => import('./types/appCoreApi.js').Awaitable<StoredMembershipSummary|null>,
+ *   putAccess: (treeId: TreeUuid, body: {
+ *     basis: ReadonlyArray<string>, expectedGeneration: number|null,
+ *     members: ReadonlyArray<MembershipSummaryMember>
+ *   }) => import('./types/appCoreApi.js').Awaitable<MembershipSummaryPutResult>
+ * }} MembershipSummaryTransport */
+/** @typedef {{
+ *   coversBasis?: (storedBasis: ReadonlyArray<string>) => boolean|Promise<boolean>,
+ *   refresh?: () => Promise<MembershipSummary>,
+ *   maxAttempts?: number
+ * }} MembershipSummaryOptions */
+
 /**
  * Assert `current` = `{ view: [{memberId, role}], basis: string[] }` to `remote` for `treeId`.
  *
- * @param {{getAccess:Function, putAccess:Function}} remote  a RemoteStore (or a stand-in)
- * @param {string} treeId
- * @param {{view: Array<{memberId:string, role:number}>, basis: string[]}} current
- * @param {object} [opts]
- * @param {(storedBasis: string[]) => (boolean|Promise<boolean>)} [opts.coversBasis]  does our trust state
- *        cover the stored basis? (absent ⇒ assume covered — no staleness guard)
- * @param {() => Promise<{view, basis}>} [opts.refresh]  pull the keyring + recompute the view (called at
- *        most once, when we're behind)
- * @param {number} [opts.maxAttempts=3]  CAS retries before giving up
- * @returns {Promise<{generation:number|null, unchanged:boolean}>}
+ * @param {MembershipSummaryTransport} remote a RemoteStore or a compatible transport
+ * @param {TreeUuid} treeId
+ * @param {MembershipSummary} current
+ * @param {MembershipSummaryOptions} [opts]
+ * @returns {Promise<MembershipSummaryPutResult>}
  */
 export async function pushMembershipSummary(remote, treeId, current, opts = {}) {
   const { coversBasis, refresh, maxAttempts = 3 } = opts;
@@ -53,12 +68,17 @@ export async function pushMembershipSummary(remote, treeId, current, opts = {}) 
 
     try {
       return await remote.putAccess(treeId, { basis, expectedGeneration: expected, members: view });
-    } catch (e) {
+    } catch (/** @type {unknown} */ e) {
       // A concurrent push advanced the generation — re-GET (next loop) and retry. Any other error propagates.
-      if (e && e.name === 'ConflictError' && attempt < maxAttempts - 1) continue;
+      if (isConflictError(e) && attempt < maxAttempts - 1) continue;
       throw e;
     }
   }
   // Unreachable: the loop either returns or throws.
   throw new Error('pushMembershipSummary: exhausted retries');
+}
+
+/** @param {unknown} error */
+function isConflictError(error) {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'ConflictError';
 }

@@ -4,7 +4,28 @@
 // the JS WIRING (hop framing, walk-derived retention, fail-closed ordering). The worker (appCore.worker.js)
 // injects the wasm functions + the network transport + the keyring store; a test injects fakes.
 
+/** @typedef {import('./types/domain.js').AuthorPublicKeyBytes} AuthorPublicKeyBytes */
+/** @typedef {import('./types/domain.js').DagAnchorPinBytes} DagAnchorPinBytes */
+/** @typedef {import('./types/domain.js').DocId} DocId */
+/** @typedef {import('./types/domain.js').FramedKeyringHopsBytes} FramedKeyringHopsBytes */
+/** @typedef {import('./types/domain.js').KeyringEngine} KeyringEngine */
+/** @typedef {import('./types/domain.js').KeyringHashBytes} KeyringHashBytes */
+/** @typedef {import('./types/domain.js').KeyringRevision} KeyringRevision */
+/** @typedef {import('./types/domain.js').KeyringWatermarkBytes} KeyringWatermarkBytes */
+/** @typedef {import('./types/domain.js').ReplicaId} ReplicaId */
+/** @typedef {import('./types/domain.js').TreeId} TreeId */
+/** @typedef {import('./types/domain.js').TrustedSignersBytes} TrustedSignersBytes */
+/** @typedef {import('./types/sharing.js').JoinChainDeps} JoinChainDeps */
+/** @typedef {import('./types/sharing.js').JoinDagDeps} JoinDagDeps */
+/** @typedef {import('./types/sharing.js').PublishChainDeps} PublishChainDeps */
+/** @typedef {import('./types/sharing.js').PublishDagDeps} PublishDagDeps */
+/** @typedef {import('./types/sharing.js').RestoreOwnerDeps} RestoreOwnerDeps */
+/** @typedef {import('./types/sharing.js').SyncChainDeps} SyncChainDeps */
+/** @typedef {import('./types/sharing.js').SyncDagDeps} SyncDagDeps */
+/** @typedef {import('./types/sharing.js').VerifiedSigner} VerifiedSigner */
+
 // [u32-be len][bytes]… — the wire shape the wasm's `split_length_prefixed` expects. Ascending, no gaps.
+/** @param {ReadonlyArray<Uint8Array>} revisions @returns {FramedKeyringHopsBytes} */
 export function frameHops(revisions) {
   let total = 0;
   for (const r of revisions) total += 4 + r.length;
@@ -17,10 +38,11 @@ export function frameHops(revisions) {
     out.set(r, off);
     off += r.length;
   }
-  return out;
+  return /** @type {FramedKeyringHopsBytes} */ (out);
 }
 
 // The inverse of frameHops — split a `[u32-be len][bytes]…` buffer (the walk's per-revision bodies) back out.
+/** @param {Uint8Array} buf @returns {Uint8Array[]} */
 export function unframe(buf) {
   const out = [];
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -36,33 +58,70 @@ export function unframe(buf) {
   return out;
 }
 
+/** @param {string} hex @returns {AuthorPublicKeyBytes} */
 function hexToBytes(hex) {
   if (hex.length % 2 !== 0) throw new Error('odd-length signer hex');
   if (!/^[0-9a-fA-F]*$/.test(hex)) throw new Error('non-hex character in signer key');
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i += 1) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return out;
+  return /** @type {AuthorPublicKeyBytes} */ (out);
 }
 
 // Concatenate a signer set's 32-byte author keys into the `trustedSigners` blob `unlockAsMember` expects —
 // author keys only; the wasm derives roles/member-ids from the verified keyring itself.
+/** @param {ReadonlyArray<VerifiedSigner>} signers @returns {TrustedSignersBytes} */
 function concatSigners(signers) {
   const out = new Uint8Array(signers.length * 32);
   signers.forEach((s, i) => {
     if (s.authorPublicKey.length !== 32) throw new Error('signer author key is not 32 bytes');
     out.set(s.authorPublicKey, i * 32);
   });
-  return out;
+  return /** @type {TrustedSignersBytes} */ (out);
 }
 
+/** @returns {ReplicaId} */
 function freshReplicaId() {
   const id = new Uint8Array(16);
   crypto.getRandomValues(id);
-  return id;
+  return /** @type {ReplicaId} */ (id);
+}
+
+/** @param {number} value @returns {KeyringRevision} */
+function keyringRevision(value) {
+  return /** @type {KeyringRevision} */ (value);
+}
+
+/** @param {unknown} error */
+function errorMessage(error) {
+  if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+  return String(error);
+}
+
+/** @param {unknown} error */
+function isConflictError(error) {
+  return !!error && typeof error === 'object' && 'name' in error && error.name === 'ConflictError';
+}
+
+/** @param {string} json @returns {VerifiedSigner[]} */
+function parseVerifiedSigners(json) {
+  const parsed = /** @type {unknown} */ (JSON.parse(json));
+  if (!Array.isArray(parsed)) throw new Error('verified signer list is not an array');
+  return parsed.map((value) => {
+    if (!value || typeof value !== 'object') throw new Error('verified signer is not an object');
+    const signer = /** @type {Record<string, unknown>} */ (value);
+    if (typeof signer.memberId !== 'string' || typeof signer.authorPublicKey !== 'string') {
+      throw new Error('verified signer has malformed fields');
+    }
+    return {
+      memberId: /** @type {import('./types/domain.js').MemberId} */ (signer.memberId),
+      authorPublicKey: hexToBytes(signer.authorPublicKey),
+    };
+  });
 }
 
 /** A member-join failed terminally (bad walk / pin / account unlock) — nothing was persisted. */
 export class JoinError extends Error {
+  /** @param {string} message */
   constructor(message) {
     super(message);
     this.name = 'JoinError';
@@ -70,6 +129,7 @@ export class JoinError extends Error {
 }
 
 // The revision encoded in the first 4 bytes of a chain watermark (revision‖key_id‖H(DEK), big-endian).
+/** @param {KeyringWatermarkBytes | null | undefined} watermark */
 export function chainRevision(watermark) {
   if (!watermark || watermark.length < 4) return 0;
   return new DataView(watermark.buffer, watermark.byteOffset, 4).getUint32(0, false);
@@ -82,12 +142,16 @@ export function chainRevision(watermark) {
  * its WALK-DERIVED number and advance the head. A no-op when there's nothing newer. `deps`: { wasm:
  * { syncKeyring, unwrapChainKeyring }, transport: { readKeyring }, keyringStore }. Returns { revision, changed }.
  */
+/**
+ * @param {SyncChainDeps} deps
+ * @param {{ docId: DocId, treeId: TreeId }} options
+ */
 export async function syncKeyring(deps, { docId, treeId }) {
   const { wasm, transport, keyringStore } = deps;
-  const anchor = (await keyringStore.head(docId))?.bytes;
-  if (!anchor) throw new Error('no local keyring to sync onto');
-  const since = (await keyringStore.head(docId)).revision;
-  const { revisions } = await transport.readKeyring(docId, since + 1);
+  const local = await keyringStore.head(docId);
+  if (!local) throw new Error('no local keyring to sync onto');
+  const { bytes: anchor, revision: since } = local;
+  const { revisions } = await transport.readKeyring(docId, keyringRevision(since + 1));
   const successors = (revisions ?? []).filter((r) => r.revision > since);
   if (successors.length === 0) return { revision: since, changed: false };
 
@@ -96,7 +160,13 @@ export async function syncKeyring(deps, { docId, treeId }) {
   // The verified run must sit contiguously on our anchor (no gap) — else the server served a non-adjacent run.
   if (headRev - successors.length !== since) throw new KeyringForkError(headRev);
   for (let i = 0; i < successors.length; i += 1) {
-    await keyringStore.save(docId, since + 1 + i, wasm.unwrapChainKeyring(successors[i].bytes));
+    const successor = successors[i];
+    if (!successor) throw new Error('verified keyring successor is missing');
+    await keyringStore.save(
+      docId,
+      keyringRevision(since + 1 + i),
+      wasm.unwrapChainKeyring(successor.bytes),
+    );
   }
   await keyringStore.saveHead(docId, 'chain', change.keyring);
   return { revision: headRev, changed: true };
@@ -104,6 +174,7 @@ export async function syncKeyring(deps, { docId, treeId }) {
 
 /** The server holds a keyring that forks off our produced tail (a 409 whose bytes differ from ours). */
 export class KeyringForkError extends Error {
+  /** @param {number} revision */
   constructor(revision) {
     super(`keyring fork at revision ${revision}`);
     this.name = 'KeyringForkError';
@@ -117,6 +188,10 @@ export class KeyringForkError extends Error {
  * self-contained anchor. `openOwner` then binds the verified head to the restored account before anything
  * is persisted. The head record is the commit marker and lands last, so a failed write is safely retriable.
  */
+/**
+ * @param {RestoreOwnerDeps} deps
+ * @param {{ treeId: TreeId, docId: DocId, engine: KeyringEngine }} options
+ */
 export async function restoreOwnerTree(deps, { treeId, docId, engine }) {
   const {
     wasm, transport, keyringStore, openOwner, persistWatermark,
@@ -125,21 +200,26 @@ export async function restoreOwnerTree(deps, { treeId, docId, engine }) {
   if (await keyringStore.loadHead(docId)) {
     throw new Error('tree already present locally — use open, not restore');
   }
-  const { revisions } = await transport.readKeyring(docId, 1);
+  const { revisions } = await transport.readKeyring(docId, keyringRevision(1));
   if (!revisions || revisions.length === 0) throw new Error('no remote keyring to restore');
 
   let head;
+  /** @type {import('./types/domain.js').KeyringBytes[]} */
   let retained = [];
   if (engine === 'chain') {
-    const genesis = wasm.unwrapChainKeyring(revisions[0].bytes);
+    const genesisRevision = revisions[0];
+    if (!genesisRevision) throw new Error('remote keyring genesis is missing');
+    const genesis = wasm.unwrapChainKeyring(genesisRevision.bytes);
     const walk = wasm.verifyKeyringWalk(
       treeId,
       frameHops(revisions.map((revision) => revision.bytes)),
-      1,
+      keyringRevision(1),
       wasm.keyringHash(genesis),
     );
     try {
-      retained = unframe(walk.bodiesFramed);
+      retained = /** @type {import('./types/domain.js').KeyringBytes[]} */ (
+        /** @type {unknown} */ (unframe(walk.bodiesFramed))
+      );
       if (retained.length !== walk.revision) {
         throw new Error('verified keyring walk returned a mismatched revision count');
       }
@@ -148,7 +228,9 @@ export async function restoreOwnerTree(deps, { treeId, docId, engine }) {
       walk.free?.();
     }
   } else if (engine === 'dag') {
-    head = wasm.unwrapDagKeyring(revisions[revisions.length - 1].bytes);
+    const latest = revisions.at(-1);
+    if (!latest) throw new Error('remote keyring anchor is missing');
+    head = wasm.unwrapDagKeyring(latest.bytes);
   } else {
     throw new Error(`unknown keyring engine: ${engine}`);
   }
@@ -156,7 +238,13 @@ export async function restoreOwnerTree(deps, { treeId, docId, engine }) {
   const opened = await openOwner(engine, head);
   try {
     for (let index = 0; index < retained.length; index += 1) {
-      await keyringStore.save(docId, index + 1, retained[index]);
+      const retainedBody = retained[index];
+      if (!retainedBody) throw new Error('verified retained keyring is missing');
+      await keyringStore.save(
+        docId,
+        keyringRevision(index + 1),
+        /** @type {import('./types/domain.js').KeyringBytes} */ (retainedBody),
+      );
     }
     await persistWatermark(opened.watermark);
     await keyringStore.saveHead(docId, engine, head);
@@ -167,9 +255,10 @@ export async function restoreOwnerTree(deps, { treeId, docId, engine }) {
   return { opened, revision: retained.length };
 }
 
+/** @param {Uint8Array | null | undefined} a @param {Uint8Array} b */
 function bytesEqual(a, b) {
   if (!a || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  for (let i = 0; i < a.length; i += 1) if ((a[i] ?? -1) !== (b[i] ?? -2)) return false;
   return true;
 }
 
@@ -180,23 +269,24 @@ function bytesEqual(a, b) {
  * a fork. Idempotent + safe to retry. `deps`: { wasm: { wrapChainKeyringUpdate }, transport: { readKeyring,
  * putKeyring }, keyringStore }. Returns the local head revision published to.
  */
+/** @param {PublishChainDeps} deps @param {{ docId: DocId }} options */
 export async function publishKeyring(deps, { docId }) {
   const { wasm, transport, keyringStore } = deps;
   const localHead = (await keyringStore.head(docId))?.revision ?? 0;
   if (localHead === 0) return { head: 0 };
   // The server's current keyring head (0 if none yet); probe from localHead so we don't refetch history.
-  let head = (await transport.readKeyring(docId, localHead)).head ?? 0;
+  let head = Number((await transport.readKeyring(docId, keyringRevision(localHead))).head ?? 0);
   while (head < localHead) {
     const rev = head + 1;
-    const bytes = await keyringStore.at(docId, rev);
+    const bytes = await keyringStore.at(docId, keyringRevision(rev));
     if (!bytes) throw new Error(`keyring retention gap at revision ${rev}`);
     const update = wasm.wrapChainKeyringUpdate(bytes);
     try {
       await transport.putKeyring(docId, update);
       head = rev;
     } catch (e) {
-      if (e?.name === 'ConflictError') {
-        const served = (await transport.readKeyring(docId, rev)).revisions?.[0]?.bytes;
+      if (isConflictError(e)) {
+        const served = (await transport.readKeyring(docId, keyringRevision(rev))).revisions?.[0]?.bytes;
         if (served && bytesEqual(served, bytes)) {
           head = rev; // benign: this revision was already admitted with identical bytes
           continue;
@@ -219,6 +309,11 @@ export async function publishKeyring(deps, { docId }) {
  *           verifyFingerprint? }. `opts`: { treeId(bytes), treeUuid(server id), docId, pinnedRevision,
  *           pinnedHash(bytes), fp?, engine? }.
  */
+/**
+ * @param {JoinChainDeps} deps
+ * @param {{ treeId: TreeId, docId: DocId, pinnedRevision: KeyringRevision,
+ *   pinnedHash: KeyringHashBytes, fp?: string, engine?: KeyringEngine }} opts
+ */
 export async function joinAsMember(deps, opts) {
   const { wasm, transport, keyringStore, verifyFingerprint } = deps;
   const {
@@ -231,7 +326,7 @@ export async function joinAsMember(deps, opts) {
   if (await keyringStore.load(docId)) throw new JoinError('tree already present locally — use sync, not join');
 
   // The server addresses a tree's keyring channel by the same id as its delta log (docId).
-  const { revisions } = await transport.readKeyring(docId, 1);
+  const { revisions } = await transport.readKeyring(docId, keyringRevision(1));
   if (!revisions || revisions.length === 0) throw new JoinError('no keyring history to verify');
 
   // 1. Verify the walk from genesis, bound to the invite's (revision, hash) prefix pin. Any invalid transition
@@ -240,12 +335,9 @@ export async function joinAsMember(deps, opts) {
   try {
     walk = wasm.verifyKeyringWalk(treeId, frameHops(revisions.map((r) => r.bytes)), pinnedRevision, pinnedHash);
   } catch (e) {
-    throw new JoinError(e?.message ?? String(e));
+    throw new JoinError(errorMessage(e));
   }
-  const signers = JSON.parse(walk.signersJson).map((s) => ({
-    memberId: s.memberId,
-    authorPublicKey: hexToBytes(s.authorPublicKey),
-  }));
+  const signers = parseVerifiedSigners(walk.signersJson);
   // 2. Optional out-of-band signer-fingerprint cross-check (anti-substitution defense-in-depth over the pin).
   if (verifyFingerprint && fp !== undefined && !(await verifyFingerprint(signers, fp))) {
     throw new JoinError('signer fingerprint does not match the invite');
@@ -262,13 +354,19 @@ export async function joinAsMember(deps, opts) {
       engine, walk.headKeyring, treeId, concatSigners(signers), freshReplicaId(), walk.revision, docId,
     );
   } catch (e) {
-    throw new JoinError(e?.message ?? String(e));
+    throw new JoinError(errorMessage(e));
   }
   // 5. Retain every RAW revision under its WALK-DERIVED number (never the server's unverified label), save the
   //    head. A store failure here frees the just-created handle so no DEK-holder leaks.
   try {
     for (let i = 0; i < bodies.length; i += 1) {
-      await keyringStore.save(docId, i + 1, bodies[i]);
+      const body = bodies[i];
+      if (!body) throw new Error('verified keyring body is missing');
+      await keyringStore.save(
+        docId,
+        keyringRevision(i + 1),
+        /** @type {import('./types/domain.js').KeyringBytes} */ (body),
+      );
     }
     await keyringStore.saveHead(docId, engine, walk.headKeyring);
   } catch (e) {
@@ -294,32 +392,40 @@ export async function joinAsMember(deps, opts) {
  * { readKeyring }, keyringStore }. `opts`: { treeId(bytes), docId, pin(bytes) }. Returns the wasm `OpenResult`
  * (its handle is the ready member core).
  */
+/**
+ * @param {JoinDagDeps} deps
+ * @param {{ treeId: TreeId, docId: DocId, pin: DagAnchorPinBytes }} opts
+ */
 export async function joinDagAnchor(deps, opts) {
   const { wasm, transport, keyringStore } = deps;
   const { treeId, docId, pin } = opts;
   if (await keyringStore.load(docId)) throw new JoinError('tree already present locally — use sync, not join');
 
-  const { revisions } = await transport.readKeyring(docId, 1);
+  const { revisions } = await transport.readKeyring(docId, keyringRevision(1));
   if (!revisions || revisions.length === 0) throw new JoinError('no keyring anchor to verify');
   // Self-contained anchor: the HIGHEST served revision is the full current membership history.
-  const anchor = wasm.unwrapDagKeyring(revisions[revisions.length - 1].bytes);
+  const latest = revisions.at(-1);
+  if (!latest) throw new JoinError('no keyring anchor to verify');
+  const anchor = wasm.unwrapDagKeyring(latest.bytes);
 
   // 1. Verify the served anchor against the OOB pin (throws on founder substitution / rollback / checkpoint).
   let verified;
   try {
     verified = wasm.verifyDagAnchor(anchor, treeId, pin); // { keyring, watermark }
   } catch (e) {
-    throw new JoinError(e?.message ?? String(e));
+    throw new JoinError(errorMessage(e));
   }
   // 2. Unlock as the member against the VERIFIED anchor (own-key anti-substitution). A "not a member" error
   //    here is the normal pre-admit "waiting for the owner to approve" state.
   let res;
   try {
     res = wasm.unlockAsMember(
-      'dag', verified.keyring, treeId, new Uint8Array(0), freshReplicaId(), 0, docId,
+      'dag', verified.keyring, treeId,
+      /** @type {TrustedSignersBytes} */ (new Uint8Array(0)),
+      freshReplicaId(), keyringRevision(0), docId,
     );
   } catch (e) {
-    throw new JoinError(e?.message ?? String(e));
+    throw new JoinError(errorMessage(e));
   }
   // 3. Persist the verified anchor as head (persist-last; free the handle if the store write fails).
   try {
@@ -340,18 +446,22 @@ export async function joinDagAnchor(deps, opts) {
  * the next server revision. A dag anchor is self-contained, so one PUT carries the whole membership history.
  * `deps`: { wasm: { wrapDagKeyringUpdate }, transport: { readKeyring, putKeyring }, keyringStore }.
  */
+/** @param {PublishDagDeps} deps @param {{ docId: DocId, treeId: TreeId }} options */
 export async function publishDagAnchor(deps, { docId, treeId }) {
   const { wasm, transport, keyringStore } = deps;
   const head = await keyringStore.loadHead(docId);
   if (!head || (head.engine || 'dag') !== 'dag') return { head: 0 };
-  const remote = await transport.readKeyring(docId, 1);
+  const remote = await transport.readKeyring(docId, keyringRevision(1));
   const served = remote.revisions?.at(-1)?.bytes;
   if (served && bytesEqual(wasm.unwrapDagKeyring(served), head.bytes)) {
     return { head: remote.head ?? remote.revisions.length };
   }
   const serverHead = remote.head ?? 0;
   const revision = serverHead + 1;
-  await transport.putKeyring(docId, wasm.wrapDagKeyringUpdate(head.bytes, treeId, revision));
+  await transport.putKeyring(
+    docId,
+    wasm.wrapDagKeyringUpdate(head.bytes, treeId, keyringRevision(revision)),
+  );
   return { head: revision };
 }
 
@@ -363,13 +473,19 @@ export async function publishDagAnchor(deps, { docId, treeId }) {
  * `deps`: { wasm: { unwrapDagKeyring, dagAnchorPin, acceptRemoteDagAnchor }, transport: { readKeyring },
  * keyringStore }. Returns { changed, watermark? }.
  */
+/**
+ * @param {SyncDagDeps} deps
+ * @param {{ docId: DocId, treeId: TreeId, floor: KeyringWatermarkBytes }} options
+ */
 export async function syncDagAnchor(deps, { docId, treeId, floor }) {
   const { wasm, transport, keyringStore } = deps;
   const head = await keyringStore.loadHead(docId);
   if (!head || (head.engine || 'dag') !== 'dag') return { changed: false };
-  const { revisions } = await transport.readKeyring(docId, 1);
+  const { revisions } = await transport.readKeyring(docId, keyringRevision(1));
   if (!revisions || revisions.length === 0) return { changed: false };
-  const remote = wasm.unwrapDagKeyring(revisions[revisions.length - 1].bytes);
+  const latest = revisions.at(-1);
+  if (!latest) return { changed: false };
+  const remote = wasm.unwrapDagKeyring(latest.bytes);
   // The pin's founder identity comes from our TRUSTED local anchor (verified at join); the floor is our
   // persisted watermark. acceptRemoteDagAnchor throws on a rollback below the floor or a founder swap.
   const pin = wasm.dagAnchorPin(head.bytes);

@@ -64,7 +64,15 @@ const jsStr = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 const rsStr = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
 function genJs(reg) {
-  const lines = [GUARD, '', '/** The closed error-code registry (domain/retriable/action/args) — the client + UI mirror. */'];
+  const lines = [
+    GUARD,
+    '',
+    '/** @typedef {{ name: string, type: string }} ErrorCodeArgument */',
+    '/** @typedef {{ domain: string, title: string, retriable: boolean, action: string|null, args: readonly ErrorCodeArgument[] }} ErrorCodeMetadata */',
+    '',
+    '/** The closed error-code registry (domain/retriable/action/args) — the client + UI mirror. */',
+    '/** @satisfies {Readonly<Record<string, ErrorCodeMetadata>>} */',
+  ];
   lines.push('export const ERROR_CODES = Object.freeze({');
   for (const [code, m] of Object.entries(reg.codes)) {
     const args = (m.args ?? []).map((a) => `{ name: '${a.name}', type: '${a.type}' }`).join(', ');
@@ -77,13 +85,14 @@ function genJs(reg) {
   lines.push('/** The Fluent key for a code: `error-${domain}-${code}`, kebab-cased (Fluent ids allow neither');
   lines.push(' *  dots nor a clean hierarchy), with a redundant leading `${domain}_` stripped from the code so');
   lines.push(' *  storage_quota (storage) -> `error-storage-quota`, below_gc_floor (sync) -> `error-sync-below-gc-floor`. */');
+  lines.push('/** @param {string} code */');
   lines.push('export function fluentKey(code) {');
-  lines.push('  const m = ERROR_CODES[code];');
+  lines.push('  const m = /** @type {Readonly<Record<string, ErrorCodeMetadata>>} */ (ERROR_CODES)[code];');
   lines.push('  if (!m) return \'error-generic\';');
   lines.push("  const tail = code.startsWith(`${m.domain}_`) ? code.slice(m.domain.length + 1) : code;");
   lines.push("  return `error-${m.domain}-${tail.replaceAll('_', '-')}`;");
   lines.push('}', '');
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
 }
 
 function genRust(reg) {
@@ -105,13 +114,22 @@ function genRust(reg) {
   lines.push('pub const ERROR_CODES: &[CodeMeta] = &[');
   for (const [code, m] of Object.entries(reg.codes)) {
     const action = m.action === null ? 'None' : `Some("${m.action}")`;
-    lines.push(`    CodeMeta { code: "${code}", domain: "${m.domain}", title: "${rsStr(m.title)}", retriable: ${m.retriable}, action: ${action} },`);
+    lines.push('    CodeMeta {');
+    lines.push(`        code: "${code}",`);
+    lines.push(`        domain: "${m.domain}",`);
+    lines.push(`        title: "${rsStr(m.title)}",`);
+    lines.push(`        retriable: ${m.retriable},`);
+    lines.push(`        action: ${action},`);
+    lines.push('    },');
   }
   lines.push('];', '');
   lines.push('/// The stable RFC 9457 `title` for a code (falls back to a generic label for an unknown code).');
   lines.push('#[must_use]');
   lines.push('pub fn title_for(code: &str) -> &\'static str {');
-  lines.push('    ERROR_CODES.iter().find(|m| m.code == code).map_or("Error", |m| m.title)');
+  lines.push('    ERROR_CODES');
+  lines.push('        .iter()');
+  lines.push('        .find(|m| m.code == code)');
+  lines.push('        .map_or("Error", |m| m.title)');
   lines.push('}', '');
   // Typed arg structs (A4) for codes that carry args.
   for (const [code, m] of Object.entries(reg.codes)) {
@@ -121,7 +139,7 @@ function genRust(reg) {
     for (const a of m.args) lines.push(`    pub ${a.name}: ${ARG_TYPES[a.type]},`);
     lines.push('}', '');
   }
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
 }
 
 function writeOrCheck(file, content, check) {
