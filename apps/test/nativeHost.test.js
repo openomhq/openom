@@ -58,4 +58,16 @@ describe('native host boundary', () => {
       issuer: 'issuer', subject: 'subject', timestamp: 1,
     })).rejects.toThrow('native host returned malformed registration proof');
   });
+
+  it('narrows DAG reconciliation outcomes and rejects unknown variants', async () => {
+    respondWith('localAhead');
+    await expect(invokeNative('core_sync_dag_anchor', {
+      doc: 'doc', treeId: [1], anchor: [2],
+    })).resolves.toBe('localAhead');
+
+    respondWith('serverWins');
+    await expect(invokeNative('core_sync_dag_anchor', {
+      doc: 'doc', treeId: [1], anchor: [2],
+    })).rejects.toThrow('native host returned malformed DAG keyring sync outcome');
+  });
 });

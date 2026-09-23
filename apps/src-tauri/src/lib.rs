@@ -5,8 +5,8 @@ use std::sync::Arc;
 use openom_app_core_host::{
     AccountAdopted, AccountBackupAcknowledged, AccountChanged, AccountIdentity, AccountOpened,
     AccountSnapshot, AccountStatus, AccountSyncState, AddedMember, AppCoreHost, BlobData, BlobMeta,
-    InviteMaterial, KeyringRevisionPayload, MemberToAdd, MemberUnlocked, Provisioned,
-    RemovedMember, RoleChanged, SyncOut, Unlocked,
+    DagKeyringSyncOutcome, InviteMaterial, KeyringRevisionPayload, MemberToAdd, MemberUnlocked,
+    Provisioned, RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -672,6 +672,20 @@ fn core_sync_keyring(
         .map_err(e)
 }
 
+/// Reconcile the latest served DAG anchor against native custody. The host alone classifies stale-local,
+/// unchanged, and verified-adopted states; the webview cannot supply or overwrite the local trust anchor.
+#[tauri::command]
+fn core_sync_dag_anchor(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    anchor: Vec<u8>,
+) -> Result<DagKeyringSyncOutcome, String> {
+    state
+        .sync_dag_anchor(&doc, &TreeId::new(tree_id), &anchor)
+        .map_err(e)
+}
+
 /// The current stored chain keyring revision (0 if none) — the webview fetches successors from `head + 1` to
 /// adopt on a sync tick.
 #[tauri::command]
@@ -688,6 +702,19 @@ fn core_keyring_publish_payload_at(
     revision: u32,
 ) -> Result<KeyringRevisionPayload, String> {
     state.keyring_publish_payload_at(&doc, revision).map_err(e)
+}
+
+/// The wrapped DAG `KeyringUpdate` (+ raw anchor for benign-409 comparison) for the next server revision.
+#[tauri::command]
+fn core_dag_keyring_publish_payload(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    revision: u32,
+) -> Result<KeyringRevisionPayload, String> {
+    state
+        .dag_keyring_publish_payload(&doc, &TreeId::new(tree_id), revision)
+        .map_err(e)
 }
 
 /// One sync tick against a remote snapshot the webview fetched: the host mirrors it into `doc`'s local store,
@@ -875,8 +902,10 @@ pub fn run() {
             core_approve_pending,
             core_discard_pending,
             core_sync_keyring,
+            core_sync_dag_anchor,
             core_keyring_head,
             core_keyring_publish_payload_at,
+            core_dag_keyring_publish_payload,
             core_sync,
             core_plan_fetch,
             blob_put,

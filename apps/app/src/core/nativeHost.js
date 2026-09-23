@@ -45,6 +45,7 @@
 /** @typedef {import('./types/nativeCommands.js').NativeCommand} NativeCommand */
 /** @typedef {import('./types/nativeCommands.js').NativeCommandParameters<NativeCommand>} AnyNativeCommandParameters */
 /** @typedef {import('./types/nativeCommands.js').NativeInviteMaterial} NativeInviteMaterial */
+/** @typedef {import('./types/nativeCommands.js').NativeDagKeyringSyncOutcome} NativeDagKeyringSyncOutcome */
 /** @typedef {import('./types/nativeCommands.js').NativeKeyringRevisionPayload} NativeKeyringRevisionPayload */
 /** @typedef {import('./types/nativeCommands.js').NativeRemovedMember} NativeRemovedMember */
 /** @typedef {import('./types/nativeCommands.js').NativeResultDecoders} NativeResultDecoders */
@@ -341,6 +342,15 @@ function decodeKeyringRevisionPayload(value) {
   };
 }
 
+/** @param {unknown} value @returns {NativeDagKeyringSyncOutcome} */
+function decodeDagKeyringSyncOutcome(value) {
+  const outcome = stringValue(value, 'DAG keyring sync outcome');
+  if (outcome !== 'unchanged' && outcome !== 'localAhead' && outcome !== 'adopted') {
+    malformed('DAG keyring sync outcome');
+  }
+  return outcome;
+}
+
 /** @param {unknown} value @returns {NativeSyncResult} */
 function decodeSyncResult(value) {
   const record = objectValue(value, 'sync result');
@@ -440,8 +450,10 @@ const RESULT_DECODERS = {
   core_approve_pending: (value) => booleanValue(value, 'approve-pending result'),
   core_discard_pending: (value) => booleanValue(value, 'discard-pending result'),
   core_sync_keyring: (value) => voidValue(value, 'sync-keyring result'),
+  core_sync_dag_anchor: decodeDagKeyringSyncOutcome,
   core_keyring_head: (value) => integerValue(value, 'keyring head'),
   core_keyring_publish_payload_at: decodeKeyringRevisionPayload,
+  core_dag_keyring_publish_payload: decodeKeyringRevisionPayload,
   core_sync: decodeSyncResult,
   core_plan_fetch: (value) => /** @type {TreeObjectKey[]} */ (
     stringArray(value, 'fetch plan')

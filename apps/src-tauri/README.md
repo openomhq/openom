@@ -57,6 +57,8 @@ plus their Rust-authenticated generation/hash, while candidate-adoption commands
 verify into temporary custody, retain displaced wrapped identity bytes, and persist before replacing the resident account. Sync-journal commands expose only non-secret record
 metadata and atomically checkpoint auth binding, operation-specific pending backup/revoke intent, and exact-version
 acknowledgement. Passphrase re-wraps journal backup intent; local recovery and root rotation journal revocation.
+Native DAG sync commands pass served anchors into Rust for verification, merge, atomic watermark persistence,
+and epoch activation; publication payloads are likewise framed from native custody rather than webview bytes.
 
 It is **not** where the logic or the tests live. Every `#[command]` here is a thin wrapper: it
 (de)serializes arguments, runs account create/unlock/recover/passphrase changes as `async` + `spawn_blocking`

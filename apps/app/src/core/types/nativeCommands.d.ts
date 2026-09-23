@@ -90,6 +90,8 @@ export interface NativeKeyringRevisionPayload {
   readonly body: KeyringBytes;
 }
 
+export type NativeDagKeyringSyncOutcome = 'unchanged' | 'localAhead' | 'adopted';
+
 export interface NativeUploadObject {
   readonly key: TreeObjectKey;
   readonly bytes: TreeObjectBytes;
@@ -315,9 +317,25 @@ export interface NativeCommandMap {
     };
     result: void;
   };
+  core_sync_dag_anchor: {
+    args: {
+      readonly doc: DocId;
+      readonly treeId: NativeBytes<TreeId>;
+      readonly anchor: NativeBytes<KeyringUpdateBytes>;
+    };
+    result: NativeDagKeyringSyncOutcome;
+  };
   core_keyring_head: { args: { readonly doc: DocId }; result: number };
   core_keyring_publish_payload_at: {
     args: { readonly doc: DocId; readonly revision: number };
+    result: NativeKeyringRevisionPayload;
+  };
+  core_dag_keyring_publish_payload: {
+    args: {
+      readonly doc: DocId;
+      readonly treeId: NativeBytes<TreeId>;
+      readonly revision: number;
+    };
     result: NativeKeyringRevisionPayload;
   };
   core_sync: {
