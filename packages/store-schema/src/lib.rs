@@ -1,8 +1,12 @@
 #![doc = include_str!("../README.md")]
 
+#[cfg(debug_assertions)]
 use std::ffi::OsString;
+#[cfg(debug_assertions)]
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(debug_assertions)]
+use std::path::PathBuf;
 
 use rusqlite::Connection;
 
@@ -169,6 +173,7 @@ fn create_fresh(conn: &Connection, version: i64, schema_sql: &str) -> Result<()>
 }
 
 /// Append a suffix to a path's filename without a lossy string round-trip (`vault.sqlite` → `vault.sqlite-wal`).
+#[cfg(debug_assertions)]
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s: OsString = path.as_os_str().to_owned();
     s.push(suffix);
@@ -176,6 +181,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// The `SQLite` file plus its `WAL` sidecars (`-wal`, `-shm`).
+#[cfg(debug_assertions)]
 fn db_and_sidecars(path: &Path) -> [PathBuf; 3] {
     [
         path.to_path_buf(),
@@ -186,6 +192,7 @@ fn db_and_sidecars(path: &Path) -> [PathBuf; 3] {
 
 /// Recreatable reset: delete the DB and its WAL sidecars (a stale `-wal` would otherwise replay old-schema
 /// frames onto the fresh file). Tolerant of already-absent files.
+#[cfg(debug_assertions)]
 fn reset_delete(path: &Path) -> Result<()> {
     for p in db_and_sidecars(path) {
         remove_if_present(&p)?;
@@ -196,6 +203,7 @@ fn reset_delete(path: &Path) -> Result<()> {
 /// Preserve reset: rename the DB to `{name}.bak-v{old}` (keeping only the newest such backup) and drop the WAL
 /// sidecars — after the connection closed, `SQLite` checkpointed the `WAL` into the main file, so the sidecars carry
 /// nothing worth keeping. The renamed file remains fully openable for manual recovery.
+#[cfg(debug_assertions)]
 fn reset_rename_bak(path: &Path, found: i64) -> Result<()> {
     prune_old_baks(path);
     let bak = with_suffix(path, &format!(".bak-v{found}"));
@@ -210,6 +218,7 @@ fn reset_rename_bak(path: &Path, found: i64) -> Result<()> {
 
 /// Delete every existing `{name}.bak-v*` beside `path` — we keep only the backup we are about to create, so
 /// backups never accumulate unbounded (this whole path is debug-only regardless).
+#[cfg(debug_assertions)]
 fn prune_old_baks(path: &Path) {
     let (Some(parent), Some(fname)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
     else {
@@ -230,6 +239,7 @@ fn prune_old_baks(path: &Path) {
     }
 }
 
+#[cfg(debug_assertions)]
 fn remove_if_present(p: &Path) -> Result<()> {
     match fs::remove_file(p) {
         Ok(()) => Ok(()),
