@@ -11,8 +11,9 @@ stored anchor disagreeing with its cursor. It's kept in its own
 file (`vault.sqlite`), separate from the doc/blob store, so copying or restoring the tree database can't drag
 the anti-rollback watermark backward with it.
 
-The profile account is one portable, explicitly revisioned record. It scopes the wrapped blob and effective
-generation floor to a stable `member_id`, and atomically carries the confirmed auth binding, acknowledged
+The profile account is one portable, explicitly revisioned record. It scopes each wrapped blob and effective
+generation floor to a stable `member_id`, retains inactive encrypted custody when another identity becomes active,
+and atomically carries the active identity's confirmed auth binding, acknowledged
 remote ETag/version, and pending backup intent. `SQLite` stores the complete record as one value and commits only
 the next expected record revision; that local revision is independent of the credential generation and every
 tree watermark. Auth bindings retain the token's issuer verbatim; an empty issuer is valid for the development
@@ -23,11 +24,11 @@ in-memory fake and, on Tauri, backs onto `SqliteVaultStore` (behind the `sqlite`
 
 | ID | Invariant | Why | Verified by |
 |---|---|---|---|
-| **VAULT-HOST-1** | A profile-account commit advances exactly one portable record revision and cannot lower the effective generation floor for the same identity. | Local CAS ordering must never become a credential rollback path. | `sqlite::tests::account_record_cas_rejects_conflicts_and_identity_scoped_floor_rollback` |
+| **VAULT-HOST-1** | A profile-account commit advances exactly one portable record revision, cannot drop or mutate inactive retained custody, and cannot lower any known identity's effective generation floor. | Local CAS ordering must never become a credential rollback, substitute dormant ciphertext, or orphan trees under a displaced identity. | `sqlite::tests::account_record_cas_rejects_conflicts_and_identity_scoped_floor_rollback` |
 | **VAULT-HOST-2** | `effective_floor` is at least the authenticated local blob generation, even when a persisted floor is lower. | Losing only the explicit floor must not make a surviving newer blob unusable or teach a lower floor. | `account_record_tests::effective_floor_self_heals_a_lower_persisted_value` |
-| **VAULT-HOST-3** | Replacing the stable identity replaces its floor and clears binding, acknowledgement, and pending state. | Sync metadata from one identity must never authorize or acknowledge another identity's backup. | `account_record_tests::a_different_identity_gets_its_own_floor_and_drops_remote_state` |
+| **VAULT-HOST-3** | Activating a different identity gives it an independently authenticated floor, clears prior remote metadata, and retains the displaced wrapped identity and floor. | Sync metadata must not cross identities, while adopting remote custody must not orphan trees under the prior member id. | `account_record_tests::a_different_identity_gets_its_own_floor_drops_remote_state_and_retains_custody` |
 | **VAULT-HOST-4** | The stored blob hash must equal SHA-256 of the exact wrapped account bytes. | A corrupted record must not associate backup acknowledgements with different ciphertext. | `account_record_tests::validation_rejects_a_blob_hash_for_different_wrapped_bytes` |
-| **VAULT-HOST-5** | A backup/revoke intent is pinned to the exact local version and confirmed binding; acknowledgement compare-clears only that intent, and a pending revoke cannot be downgraded to backup. | A stale response must never acknowledge newer custody, and revocation must win over an upload retry. | `account_record_tests::pending_backup_compare_and_clear_is_exact_and_revoke_wins` |
+| **VAULT-HOST-5** | A backup/revoke intent is pinned to the exact local version and confirmed binding; acknowledgement compare-clears only the uploaded replacement version, and a pending revoke cannot be downgraded to backup. | A stale response must never acknowledge newer custody, and credential rotation remains pending until its replacement blob is durable remotely. | `account_record_tests::pending_backup_compare_and_clear_is_exact_and_revoke_wins` |
 
 ## Scope
 

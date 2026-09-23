@@ -73,6 +73,12 @@ pub enum HostError {
     /// The native keyring/watermark store failed (I/O, CAS).
     #[error("keyring store: {0}")]
     Store(String),
+    /// Durable account-candidate persistence failed after credential verification.
+    #[error("account storage unavailable: {0}")]
+    AccountStorage(String),
+    /// A credential-authenticated candidate did not match the member id bound to the authenticated subject.
+    #[error("account identity conflict: {0}")]
+    IdentityConflict(String),
     /// No keyring is stored for this tree — the host can't unlock a tree it never provisioned/joined.
     #[error("no keyring stored for {0}")]
     NoKeyring(String),
@@ -91,6 +97,11 @@ pub enum HostError {
 pub fn error_code(err: &HostError) -> &'static str {
     match err {
         HostError::Vault(v) => openom_app_core::vault_error_code(v),
+        HostError::IdentityConflict(_) => openom_app_core::error_codes::IDENTITY_CONFLICT,
+        HostError::Store(message) if message.contains("account record conflict") => {
+            openom_app_core::error_codes::VERSION_CONFLICT
+        }
+        HostError::AccountStorage(_) => openom_app_core::error_codes::STORAGE_BLOCKED,
         HostError::Core(_)
         | HostError::Tree(_)
         | HostError::Store(_)
@@ -210,6 +221,7 @@ pub struct AccountSyncIdentity {
 pub struct AccountSyncRecord {
     pub revision: u64,
     pub identity: AccountSyncIdentity,
+    pub retained_identities: Vec<AccountSyncIdentity>,
     pub binding: Option<AccountSyncBinding>,
     pub acknowledged_backup: Option<AccountSyncCheckpoint>,
     pub pending_backup: Option<AccountSyncPending>,
@@ -479,15 +491,20 @@ impl<St: VaultStore> AppCoreHost<St> {
     }
 
     fn sync_record(record: &AccountRecord) -> AccountSyncRecord {
-        let identity = record.identity();
+        let sync_identity = |identity: &AccountIdentityRecord| AccountSyncIdentity {
+            member_id: identity.member_id().as_str().to_string(),
+            version: Self::sync_version(identity.version()),
+            floor: identity.persisted_floor().get(),
+            effective_floor: identity.effective_floor().get(),
+        };
         AccountSyncRecord {
             revision: record.revision().get(),
-            identity: AccountSyncIdentity {
-                member_id: identity.member_id().as_str().to_string(),
-                version: Self::sync_version(identity.version()),
-                floor: identity.persisted_floor().get(),
-                effective_floor: identity.effective_floor().get(),
-            },
+            identity: sync_identity(record.identity()),
+            retained_identities: record
+                .retained_identities()
+                .iter()
+                .map(sync_identity)
+                .collect(),
             binding: record.binding().map(Self::sync_binding),
             acknowledged_backup: record.acknowledged_backup().map(|checkpoint| {
                 AccountSyncCheckpoint {
@@ -572,10 +589,22 @@ impl<St: VaultStore> AppCoreHost<St> {
         current: Option<&AccountRecord>,
         handle: AccountHandle,
         recovery_code: String,
+        binding: AccountBinding,
+        checkpoint: AccountRemoteCheckpoint,
+        pending_kind: Option<PendingBackupKind>,
     ) -> Result<AccountAdopted, HostError> {
         let member_id = handle.member_id().to_string();
         let snapshot = Self::snapshot_wire(openom_app_core::account_snapshot(&handle));
-        self.persist_account_handle(current, &handle)?;
+        let next = Self::next_account_record(current, &handle)?
+            .finish_remote_adoption(binding, checkpoint, pending_kind)
+            .map_err(HostError::Store)?;
+        self.persist_account_record(current, &next)
+            .map_err(|error| match error {
+                HostError::Store(message) if !message.contains("account record conflict") => {
+                    HostError::AccountStorage(message)
+                }
+                other => other,
+            })?;
         self.lock_cores().clear();
         *self
             .account
@@ -818,23 +847,38 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// Returns [`HostError`] without changing resident custody when verification or persistence fails.
     pub fn account_adopt_candidate(
         &self,
+        expected_member_id: &AccountMemberId,
         candidate: &[u8],
         passphrase: &Passphrase,
+        binding: AccountBinding,
+        checkpoint: AccountRemoteCheckpoint,
     ) -> Result<AccountAdopted, HostError> {
         let _operation = self
             .account_ops
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let current = self.store.load_account().map_err(HostError::Store)?;
-        let floor = current
-            .as_ref()
-            .map_or(0, |record| record.identity().effective_floor().get());
+        let floor = current.as_ref().map_or(0, |record| {
+            record.floor_for_member(expected_member_id).get()
+        });
         let handle = openom_app_core::account_open_candidate(
             passphrase,
             candidate,
             openom_app_core::AccountGeneration::new(floor),
         )?;
-        self.commit_candidate(current.as_ref(), handle, String::new())
+        if handle.member_id() != expected_member_id.as_str() {
+            return Err(HostError::IdentityConflict(
+                "account candidate member id does not match the bound remote identity".into(),
+            ));
+        }
+        self.commit_candidate(
+            current.as_ref(),
+            handle,
+            String::new(),
+            binding,
+            checkpoint,
+            None,
+        )
     }
 
     /// Verify, rotate, and durably adopt a fetched account blob with a recovery credential.
@@ -844,25 +888,40 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// fails.
     pub fn account_adopt_recovery_candidate(
         &self,
+        expected_member_id: &AccountMemberId,
         candidate: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
+        binding: AccountBinding,
+        checkpoint: AccountRemoteCheckpoint,
     ) -> Result<AccountAdopted, HostError> {
         let _operation = self
             .account_ops
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let current = self.store.load_account().map_err(HostError::Store)?;
-        let floor = current
-            .as_ref()
-            .map_or(0, |record| record.identity().effective_floor().get());
+        let floor = current.as_ref().map_or(0, |record| {
+            record.floor_for_member(expected_member_id).get()
+        });
         let recovered = openom_app_core::account_recover_candidate(
             recovery_code,
             new_passphrase,
             candidate,
             openom_app_core::AccountGeneration::new(floor),
         )?;
-        self.commit_candidate(current.as_ref(), recovered.handle, recovered.recovery_code)
+        if recovered.handle.member_id() != expected_member_id.as_str() {
+            return Err(HostError::IdentityConflict(
+                "account candidate member id does not match the bound remote identity".into(),
+            ));
+        }
+        self.commit_candidate(
+            current.as_ref(),
+            recovered.handle,
+            recovered.recovery_code,
+            binding,
+            checkpoint,
+            Some(PendingBackupKind::Revoke),
+        )
     }
 
     /// Recover and rotate the singleton account, atomically persisting its new generation.
@@ -2596,14 +2655,31 @@ mod tests {
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::EngineKind;
     use openom_vault_host::{
-        AccountBackupVersion, AccountBinding, AccountGeneration, AccountRecordRevision,
-        AccountRemoteCheckpoint, PendingAccountBackup, PendingBackupKind,
+        AccountBackupVersion, AccountBinding, AccountBlobHash, AccountGeneration, AccountMemberId,
+        AccountRecordRevision, AccountRemoteCheckpoint, PendingAccountBackup, PendingBackupKind,
     };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     type Rows = HashMap<String, (Vec<u8>, Vec<u8>)>;
+
+    fn adoption_context(
+        member_id: &str,
+        version: openom_app_core::AccountBackupVersion,
+    ) -> (AccountMemberId, AccountBinding, AccountRemoteCheckpoint) {
+        let member_id = AccountMemberId::new(member_id);
+        let binding = AccountBinding::new("https://issuer", "subject", member_id.clone());
+        let version = AccountBackupVersion::new(
+            AccountGeneration::new(version.generation().get()),
+            AccountBlobHash::new(*version.blob_hash().as_bytes()),
+        );
+        (
+            member_id,
+            binding,
+            AccountRemoteCheckpoint::new("\"remote\"", Some(version)),
+        )
+    }
 
     /// An in-memory [`VaultStore`] fake — the same shape the durable `SQLite` impl backs.
     #[derive(Default)]
@@ -2663,6 +2739,9 @@ mod tests {
             });
             if account.revision() != required {
                 return Err("account record revision is not next".into());
+            }
+            if let Some(previous) = stored.as_ref() {
+                account.preserves_custody_from(previous)?;
             }
             *stored = Some(account.clone());
             Ok(())
@@ -2884,12 +2963,18 @@ mod tests {
         let remote_passphrase = Passphrase::new(b"remote profile passphrase".to_vec());
         let remote = openom_app_core::account_create(&remote_passphrase).unwrap();
         let remote_member = remote.handle.member_id().to_string();
+        let remote_version = openom_app_core::account_snapshot(&remote.handle).version();
+        let adoption = || adoption_context(&remote_member, remote_version);
         assert_ne!(local_member, remote_member);
 
+        let (expected_member, binding, checkpoint) = adoption();
         assert!(host
             .account_adopt_candidate(
+                &expected_member,
                 &remote.keystore,
-                &Passphrase::new(b"wrong passphrase".to_vec())
+                &Passphrase::new(b"wrong passphrase".to_vec()),
+                binding,
+                checkpoint,
             )
             .is_err());
         assert_eq!(
@@ -2898,13 +2983,43 @@ mod tests {
         );
         assert!(host.core("tree").is_some());
 
+        let (_, binding, checkpoint) = adoption();
+        let mismatch = match host.account_adopt_candidate(
+            &AccountMemberId::new("member-not-the-candidate"),
+            &remote.keystore,
+            &remote_passphrase,
+            binding,
+            checkpoint,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("mismatched candidate was accepted"),
+        };
+        assert!(
+            matches!(mismatch, HostError::IdentityConflict(_)),
+            "unexpected mismatch error: {mismatch:?}"
+        );
+        assert_eq!(super::error_code(&mismatch), "identity_conflict");
+        assert_eq!(
+            host.account_public_identity().unwrap().member_id,
+            local_member
+        );
+
         host.store()
             .fail_account_commit
             .store(true, Ordering::Relaxed);
-        assert!(matches!(
-            host.account_adopt_candidate(&remote.keystore, &remote_passphrase),
-            Err(HostError::Store(_))
-        ));
+        let (expected_member, binding, checkpoint) = adoption();
+        let commit_failure = match host.account_adopt_candidate(
+            &expected_member,
+            &remote.keystore,
+            &remote_passphrase,
+            binding,
+            checkpoint,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("injected commit failure was accepted"),
+        };
+        assert!(matches!(commit_failure, HostError::AccountStorage(_)));
+        assert_eq!(super::error_code(&commit_failure), "storage_blocked");
         assert_eq!(
             host.account_public_identity().unwrap().member_id,
             local_member
@@ -2914,14 +3029,24 @@ mod tests {
         host.store()
             .fail_account_commit
             .store(false, Ordering::Relaxed);
+        let (expected_member, binding, checkpoint) = adoption();
         let adopted = host
-            .account_adopt_candidate(&remote.keystore, &remote_passphrase)
+            .account_adopt_candidate(
+                &expected_member,
+                &remote.keystore,
+                &remote_passphrase,
+                binding,
+                checkpoint,
+            )
             .unwrap();
         assert_eq!(adopted.member_id, remote_member);
         assert_eq!(
             host.account_public_identity().unwrap().member_id,
             remote_member
         );
+        let sync = host.account_sync_state().unwrap().record.unwrap();
+        assert_eq!(sync.retained_identities.len(), 1);
+        assert_eq!(sync.retained_identities[0].member_id, local_member);
         assert!(host.core("tree").is_none());
         let snapshot = host.account_snapshot().unwrap();
         assert_eq!(snapshot.generation, adopted.generation);
@@ -2940,14 +3065,34 @@ mod tests {
         let remote_member = remote.handle.member_id().to_string();
         let old_recovery = RecoveryCode::new(remote.recovery_code);
         let new_passphrase = Passphrase::new(b"recovered profile passphrase".to_vec());
+        let remote_version = openom_app_core::account_snapshot(&remote.handle).version();
+        let (expected_member, binding, checkpoint) =
+            adoption_context(&remote_member, remote_version);
 
         let adopted = host
-            .account_adopt_recovery_candidate(&remote.keystore, &old_recovery, &new_passphrase)
+            .account_adopt_recovery_candidate(
+                &expected_member,
+                &remote.keystore,
+                &old_recovery,
+                &new_passphrase,
+                binding,
+                checkpoint,
+            )
             .unwrap();
 
         assert_eq!(adopted.member_id, remote_member);
         assert_eq!(adopted.generation, remote.generation.get() + 1);
         assert_ne!(adopted.recovery_code, old_recovery.expose());
+        assert_eq!(
+            host.account_sync_state()
+                .unwrap()
+                .record
+                .unwrap()
+                .pending_backup
+                .unwrap()
+                .kind,
+            PendingBackupKind::Revoke
+        );
         host.account_lock();
         assert!(host
             .account_recover(

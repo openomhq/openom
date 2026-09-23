@@ -1,4 +1,5 @@
 import {
+  assertAccountCustodyPreserved,
   decodeAccountRecord,
   encodeAccountRecord,
   validateAccountRecord,
@@ -35,6 +36,7 @@ class AccountRecordTransaction {
   async commit(next) {
     if (this.#committed) throw new Error('account record transaction already committed');
     await validateAccountRecord(next);
+    assertAccountCustodyPreserved(this.#record, next);
     const expectedRevision = this.#record?.revision ?? 0;
     if (next.revision !== expectedRevision + 1) {
       throw new Error('account record revision is not the next revision');

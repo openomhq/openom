@@ -413,17 +413,30 @@
         const source = spawnWorker(`candidate-source-${nonce}`);
         const passTarget = spawnWorker(`candidate-pass-${nonce}`);
         const recoveryTarget = spawnWorker(`candidate-recovery-${nonce}`);
+        const replacementTarget = spawnWorker(`candidate-replacement-${nonce}`);
         const passphrase = 'candidate source passphrase';
         const newPassphrase = 'candidate recovered passphrase';
-        await Promise.all([source.warm(), passTarget.warm(), recoveryTarget.warm()]);
+        await Promise.all([
+          source.warm(), passTarget.warm(), recoveryTarget.warm(), replacementTarget.warm(),
+        ]);
 
         const created = await source.accountCreate(passphrase);
         const sourceSnapshot = await source.accountSnapshot();
+        const binding = {
+          issuer: 'https://issuer.example', subject: 'candidate-subject', memberId: created.memberId,
+        };
+        const checkpoint = {
+          etag: '"candidate-v1"',
+          version: { generation: sourceSnapshot.generation, blobHash: sourceSnapshot.blobHash },
+        };
         let wrongRejected = false;
         try {
           await passTarget.accountAdoptCandidate({
+            expectedMemberId: created.memberId,
             keystore: sourceSnapshot.keystore,
             credential: { passphrase: 'wrong passphrase' },
+            binding,
+            checkpoint,
           });
         } catch {
           wrongRejected = true;
@@ -431,16 +444,31 @@
         const statusAfterWrong = await passTarget.accountStatus();
 
         const adopted = await passTarget.accountAdoptCandidate({
+          expectedMemberId: created.memberId,
           keystore: sourceSnapshot.keystore,
           credential: { passphrase },
+          binding,
+          checkpoint,
         });
         const passSnapshot = await passTarget.accountSnapshot();
 
         const recovered = await recoveryTarget.accountAdoptCandidate({
+          expectedMemberId: created.memberId,
           keystore: sourceSnapshot.keystore,
           credential: { recoveryCode: created.recoveryCode, newPassphrase },
+          binding,
+          checkpoint,
         });
         const recoverySnapshot = await recoveryTarget.accountSnapshot();
+        const displaced = await replacementTarget.accountCreate('displaced local passphrase');
+        await replacementTarget.accountAdoptCandidate({
+          expectedMemberId: created.memberId,
+          keystore: sourceSnapshot.keystore,
+          credential: { passphrase },
+          binding,
+          checkpoint,
+        });
+        const replacementSync = await replacementTarget.accountSyncState();
         await recoveryTarget.accountLock();
         let usedRecoveryRejected = false;
         try {
@@ -461,6 +489,8 @@
           adoptedHash: Array.from(passSnapshot.blobHash),
           recoveryHash: Array.from(recoverySnapshot.blobHash),
           recoveryCodeRotated: recovered.recoveryCode !== created.recoveryCode,
+          retainedMemberIds: replacementSync.record.retainedIdentities.map((identity) => identity.memberId),
+          displacedMemberId: displaced.memberId,
           wrongRejected,
           statusAfterWrong,
           usedRecoveryRejected,

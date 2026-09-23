@@ -54,6 +54,8 @@ import init, {
 import { IndexedDbStore } from './indexedDbStore.js';
 import {
   acknowledgeAccountBackup,
+  accountFloorForMember,
+  adoptRemoteAccountIdentity,
   confirmAccountBinding,
   createAccountRecord,
   effectiveAccountFloor,
@@ -614,6 +616,12 @@ function accountSyncView(record, storagePersistence) {
         floor: record.identity.floor,
         effectiveFloor: effectiveAccountFloor(record),
       },
+      retainedIdentities: record.retainedIdentities.map((identity) => ({
+        memberId: identity.memberId,
+        version: identity.version,
+        floor: identity.floor,
+        effectiveFloor: Math.max(identity.floor, identity.version.generation),
+      })),
       binding: record.binding,
       acknowledgedBackup: record.acknowledgedBackup,
       pendingBackup: record.pendingBackup,
@@ -864,11 +872,13 @@ const api = {
   },
 
   /** Verify a fetched account snapshot before replacing durable and resident custody. */
-  async accountAdoptCandidate({ keystore, credential }) {
+  async accountAdoptCandidate({
+    expectedMemberId, keystore, credential, binding, checkpoint,
+  }) {
     await ensureInit();
     return runAccountOperation(async (tx) => {
       const saved = tx.record();
-      const generationFloor = saved ? effectiveAccountFloor(saved) : 0;
+      const generationFloor = accountFloorForMember(saved, expectedMemberId);
       let candidate;
       let handle;
       try {
@@ -889,7 +899,27 @@ const api = {
           throw new Error('invalid account candidate credential');
         }
         handle = candidate.takeHandle();
-        const { committed, identity } = await commitAccountSnapshot(tx, saved, handle, candidate);
+        const identity = publicAccountIdentityFor(handle);
+        if (identity.memberId !== expectedMemberId) {
+          throw makeError('identity_conflict', {
+            cause: 'account candidate member id does not match the bound remote identity',
+          });
+        }
+        const next = await adoptRemoteAccountIdentity(
+          saved,
+          accountSnapshotInput(candidate, identity.memberId),
+          {
+            binding,
+            checkpoint,
+            pendingKind: credential.recoveryCode === undefined ? null : 'revoke',
+          },
+        );
+        let committed;
+        try {
+          committed = await tx.commit(next);
+        } catch (error) {
+          throw storageError(error);
+        }
         replaceAccount(handle, committed.identity.version);
         handle = null;
         return {

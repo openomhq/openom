@@ -202,11 +202,8 @@ impl VaultStore for SqliteVaultStore {
         if account.revision() != required_revision {
             return Err("account record revision is not the next revision".into());
         }
-        if current.as_ref().is_some_and(|stored| {
-            stored.identity().member_id() == account.identity().member_id()
-                && account.identity().effective_floor() < stored.identity().effective_floor()
-        }) {
-            return Err("account generation floor rollback".into());
+        if let Some(stored) = &current {
+            account.preserves_custody_from(stored)?;
         }
         let encoded = serde_json::to_vec(account).map_err(|error| error.to_string())?;
         tx.execute(
@@ -296,6 +293,28 @@ mod tests {
         store
             .commit_account(&replacement, Some(next.revision()))
             .unwrap();
+        assert_eq!(
+            replacement.retained_identities()[0].member_id().as_str(),
+            "member-a"
+        );
+        let mut dropped = serde_json::to_value(&replacement).unwrap();
+        dropped["revision"] = serde_json::json!(replacement.revision().get() + 1);
+        dropped["retainedIdentities"] = serde_json::json!([]);
+        let dropped: AccountRecord = serde_json::from_value(dropped).unwrap();
+        assert!(store
+            .commit_account(&dropped, Some(replacement.revision()))
+            .is_err());
+        let mut substituted = serde_json::to_value(&replacement).unwrap();
+        substituted["revision"] = serde_json::json!(replacement.revision().get() + 1);
+        let substituted_bytes = vec![99_u8; 8];
+        substituted["retainedIdentities"][0]["blob"]["keystore"] =
+            serde_json::json!(substituted_bytes);
+        substituted["retainedIdentities"][0]["blob"]["blobHash"] =
+            serde_json::json!(<[u8; 32]>::from(Sha256::digest([99_u8; 8])));
+        let substituted: AccountRecord = serde_json::from_value(substituted).unwrap();
+        assert!(store
+            .commit_account(&substituted, Some(replacement.revision()))
+            .is_err());
         assert_eq!(store.load_account().unwrap(), Some(replacement));
     }
 

@@ -82,7 +82,38 @@ and exposes its durable member ID only as the raw development bearer; it does no
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
 passphrase, snapshot, verified candidate adoption, rotate root, public identity, and registration proof), while
 keeping every secret handle in Rust/wasm. Candidate adoption verifies the fetched wrapped bytes before replacing
-the profile's persisted snapshot and resident account.
+the active persisted snapshot and resident account, while retaining displaced wrapped custody for its trees.
+
+### AccountSession local × remote classification
+
+Binding is default-deny. Local custody is `none`, `unbound` (unlocked without a server binding),
+or `bound` (`memberId` bound to the provider subject). Remote `/me` is `unregistered`,
+`bound-no-backup`, or `bound-with-backup`; `same`/`different` compares the applicable member
+identity, and is otherwise `n/a`.
+
+| Local | Remote `/me` | Relation | Automatic action |
+|---|---|---|---|
+| `none` | `unregistered` | `n/a` | Remain without local custody; no adoption. |
+| `none` | `bound-no-backup` | `n/a` | Park `identity_conflict`; no auto-adopt. |
+| `none` | `bound-with-backup` | `n/a` | Offer server restore; do not auto-adopt. |
+| `unbound` | `unregistered` | `n/a` | May register the local identity. |
+| `unbound` | `bound-no-backup` | `same` | Confirm the binding; backup remains available. |
+| `unbound` | `bound-no-backup` | `different` | Park machine-readable conflict; remote restore is impossible. |
+| `unbound` | `bound-with-backup` | `same` | Confirm the binding, then reconcile the verified backup. |
+| `unbound` | `bound-with-backup` | `different` | Offer explicit soft adoption; never auto-adopt. |
+| `bound` | `unregistered` | `n/a` | Park machine-readable conflict; no auto-adopt. |
+| `bound` | `bound-no-backup` | `same` | Confirm binding; otherwise park conflict. |
+| `bound` | `bound-no-backup` | `different` | Park machine-readable conflict; remote restore is impossible. |
+| `bound` | `bound-with-backup` | `same` | Reconcile; otherwise park conflict. |
+| `bound` | `bound-with-backup` | `different` | Offer explicit soft adoption; never auto-adopt. |
+
+Any differing or ambiguous relation parks a machine-readable conflict and never auto-adopts
+remote custody. Adoption is a soft replacement only: after verification, the remote record may
+become active while prior encrypted `{ memberId, blob, floor }` custody is retained and exposed
+only as non-secret state. Phase 2 has no account switcher or account-switching UI. Local recovery
+is distinct from server restore; a recovery restore remains pending until its CAS upload is
+acknowledged. A persisted local binding for another `{ issuer, subject }` is always ambiguous and
+parks a conflict regardless of the member-id relation.
 
 It is **not** a general-purpose SPA: there is no client-side router beyond the app's own
 `data-view` state, no CSS framework, and no dependency-injection container — `src/ui/dom.js`'s `h()`

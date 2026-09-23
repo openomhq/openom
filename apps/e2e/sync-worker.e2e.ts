@@ -148,6 +148,7 @@ test('app-core: account candidates verify before snapshot adoption', async ({ pa
   expect(result.recoveredGeneration).toBe(result.sourceGeneration + 1);
   expect(result.recoveryHash).not.toEqual(result.sourceHash);
   expect(result.recoveryCodeRotated).toBe(true);
+  expect(result.retainedMemberIds).toEqual([result.displacedMemberId]);
   expect(result.usedRecoveryRejected).toBe(true);
   expect(errors, 'no uncaught page errors').toEqual([]);
 });

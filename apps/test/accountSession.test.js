@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AccountSession } from '../app/src/core/accountSession.js';
+import { AccountSession, classifyAccountBindingState } from '../app/src/core/accountSession.js';
 import { makeError } from '../app/src/core/errorModel.js';
 
 const identity = (memberId = 'member-local') => ({
@@ -25,6 +25,7 @@ function record(memberId = 'member-local', overrides = {}) {
     binding: null,
     acknowledgedBackup: null,
     pendingBackup: null,
+    retainedIdentities: [],
     ...overrides,
   };
 }
@@ -57,6 +58,7 @@ function backend({ account = 'unlocked', initialRecord = record(), overrides = {
       return syncState();
     }),
     accountStageBackup: vi.fn(async ({ kind, binding }) => {
+      if (syncRecord.pendingBackup?.kind === 'revoke' && kind === 'backup') return syncState();
       syncRecord = {
         ...syncRecord,
         revision: syncRecord.revision + 1,
@@ -73,6 +75,34 @@ function backend({ account = 'unlocked', initialRecord = record(), overrides = {
         };
       }
       return { cleared, ...syncState() };
+    }),
+    accountAdoptCandidate: vi.fn(async ({ expectedMemberId, credential, binding, checkpoint }) => {
+      const previous = syncRecord;
+      const recovered = typeof credential?.recoveryCode === 'string';
+      const adoptedVersion = recovered
+        ? version(checkpoint.version.generation + 1, 11)
+        : checkpoint.version;
+      syncRecord = record(expectedMemberId, {
+        revision: (previous?.revision ?? 0) + 1,
+        identity: {
+          memberId: expectedMemberId,
+          version: adoptedVersion,
+          floor: adoptedVersion.generation,
+          effectiveFloor: adoptedVersion.generation,
+        },
+        retainedIdentities: previous && previous.identity.memberId !== expectedMemberId
+          ? [previous.identity, ...(previous.retainedIdentities ?? [])]
+          : (previous?.retainedIdentities ?? []),
+        binding,
+        acknowledgedBackup: checkpoint,
+        pendingBackup: recovered ? { kind: 'revoke', version: adoptedVersion, binding } : null,
+      });
+      return {
+        ...identity(expectedMemberId),
+        generation: adoptedVersion.generation,
+        blobHash: adoptedVersion.blobHash,
+        recoveryCode: recovered ? 'new-recovery' : '',
+      };
     }),
     ...overrides,
   };
@@ -106,14 +136,66 @@ function stateShape(overrides = {}) {
     auth: 'signedOut',
     account: 'none',
     binding: 'unbound',
+    syncDisposition: 'remote',
     pending: new Set(),
     conflict: null,
+    retainedIdentities: [],
     storagePersistence: 'granted',
     ...overrides,
   };
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe('AccountSession default-deny identity classification', () => {
+  const attempt = { issuer: 'https://issuer', subject: 'provider-sub' };
+  const binding = { ...attempt, memberId: 'member-local' };
+  const unbound = record();
+  const bound = record('member-local', { binding });
+  const noBackup = (memberId) => ({ memberId, keystore: null });
+  const withBackup = (memberId) => ({ memberId, keystore: new Uint8Array([1]) });
+  const cases = [
+    ['none / unregistered', null, null, { action: 'none' }],
+    ['none / bound without backup', null, noBackup('member-remote'), {
+      action: 'conflict', reason: 'remote_identity_without_backup',
+    }],
+    ['none / bound with backup', null, withBackup('member-remote'), {
+      action: 'conflict', reason: 'remote_restore_available',
+    }],
+    ['unbound / unregistered', unbound, null, { action: 'register' }],
+    ['unbound / same without backup', unbound, noBackup('member-local'), { action: 'reconcile' }],
+    ['unbound / different without backup', unbound, noBackup('member-remote'), {
+      action: 'conflict', reason: 'local_remote_identity_mismatch', restoreAvailable: false,
+    }],
+    ['unbound / same with backup', unbound, withBackup('member-local'), { action: 'reconcile' }],
+    ['unbound / different with backup', unbound, withBackup('member-remote'), {
+      action: 'conflict', reason: 'local_remote_identity_mismatch', restoreAvailable: true,
+    }],
+    ['bound / unregistered', bound, null, {
+      action: 'conflict', reason: 'registration_preconditions_ambiguous',
+    }],
+    ['bound / same without backup', bound, noBackup('member-local'), { action: 'reconcile' }],
+    ['bound / different without backup', bound, noBackup('member-remote'), {
+      action: 'conflict', reason: 'local_remote_identity_mismatch', restoreAvailable: false,
+    }],
+    ['bound / same with backup', bound, withBackup('member-local'), { action: 'reconcile' }],
+    ['bound / different with backup', bound, withBackup('member-remote'), {
+      action: 'conflict', reason: 'local_remote_identity_mismatch', restoreAvailable: true,
+    }],
+  ];
+
+  it.each(cases)('%s', (_name, local, remote, expected) => {
+    expect(classifyAccountBindingState({ record: local, attempt, remote })).toEqual(expected);
+  });
+
+  it('denies a persisted binding belonging to another provider subject', () => {
+    expect(classifyAccountBindingState({
+      record: bound,
+      attempt: { issuer: attempt.issuer, subject: 'other-subject' },
+      remote: withBackup('member-local'),
+    })).toEqual({ action: 'conflict', reason: 'local_auth_binding_mismatch' });
+  });
+});
 
 describe('AccountSession local custody and observable axes', () => {
   it('initializes custody and keeps provider auth independent', async () => {
@@ -690,5 +772,146 @@ describe('AccountSession registration and backup coordinator', () => {
     expect(remote.register).toHaveBeenCalledTimes(1);
     expect(remote.putKeystore).toHaveBeenCalledTimes(1);
     expect(session.state().binding).toBe('backedUp');
+  });
+});
+
+describe('AccountSession remote restore and conflict decisions', () => {
+  const remoteBackup = (overrides = {}) => ({
+    memberId: 'member-remote',
+    keystore: new Uint8Array([8, 8]),
+    generation: 1,
+    etag: '"remote-v1"',
+    ...overrides,
+  });
+
+  it('restores a bound backup into an empty profile without rotating it', async () => {
+    const core = backend({ account: 'none', initialRecord: null });
+    const remote = {
+      me: vi.fn(async () => remoteBackup()),
+      register: vi.fn(),
+      putKeystore: vi.fn(),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.restore({ passphrase: 'remote passphrase' })).resolves.toEqual({
+      memberId: 'member-remote',
+    });
+
+    expect(core.accountAdoptCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      expectedMemberId: 'member-remote',
+      credential: { passphrase: 'remote passphrase' },
+    }));
+    expect(remote.putKeystore).not.toHaveBeenCalled();
+    expect(session.state()).toMatchObject({
+      account: 'unlocked', memberId: 'member-remote', binding: 'backedUp', conflict: null,
+    });
+  });
+
+  it('preserves credential-verification errors without mutating empty custody', async () => {
+    const core = backend({
+      account: 'none',
+      initialRecord: null,
+      overrides: {
+        accountAdoptCandidate: vi.fn(async () => { throw makeError('wrong_passphrase'); }),
+      },
+    });
+    const remote = {
+      me: vi.fn(async () => remoteBackup()),
+      register: vi.fn(),
+      putKeystore: vi.fn(),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.restore({ passphrase: 'wrong' }))
+      .rejects.toMatchObject({ code: 'wrong_passphrase' });
+    expect(session.state().account).toBe('none');
+    expect(session.memberId()).toBeNull();
+    expect(remote.putKeystore).not.toHaveBeenCalled();
+  });
+
+  it('requires explicit adoption and retains displaced local custody', async () => {
+    const core = backend();
+    const remote = {
+      me: vi.fn(async () => remoteBackup()),
+      register: vi.fn(),
+      putKeystore: vi.fn(),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+
+    await expect(session.restore({ passphrase: 'remote passphrase' }))
+      .rejects.toMatchObject({ code: 'identity_conflict' });
+    expect(core.accountAdoptCandidate).not.toHaveBeenCalled();
+
+    await session.adoptRemoteIdentity({ passphrase: 'remote passphrase' });
+
+    expect(session.memberId()).toBe('member-remote');
+    expect(session.state().retainedIdentities).toEqual([
+      { memberId: 'member-local', generation: 1, floor: 1 },
+    ]);
+  });
+
+  it('resumes a pending recovery rotation without rotating the remote blob twice', async () => {
+    const core = backend({ account: 'none', initialRecord: null });
+    let uploadAttempts = 0;
+    const remoteState = remoteBackup();
+    const remote = {
+      me: vi.fn(async () => ({ ...remoteState })),
+      register: vi.fn(),
+      putKeystore: vi.fn(async (keystore, generation) => {
+        uploadAttempts += 1;
+        if (uploadAttempts === 1) throw makeError('request_failed');
+        remoteState.keystore = keystore;
+        remoteState.generation = generation;
+        remoteState.etag = '"remote-v2"';
+        return { generation, etag: remoteState.etag };
+      }),
+    };
+    const session = new AccountSession(core);
+    await session.initialize();
+    session.attachSync({ auth: auth(), remote });
+    const credential = { recoveryCode: 'old-recovery', newPassphrase: 'replacement passphrase' };
+
+    await expect(session.restore(credential)).resolves.toEqual({
+      memberId: 'member-remote',
+      recoveryCode: 'new-recovery',
+      pending: true,
+      uploadError: 'request_failed',
+    });
+    expect(session.state().pending).toEqual(new Set(['revoke']));
+
+    await expect(session.restore(credential)).resolves.toEqual({
+      memberId: 'member-remote', pending: false, resumed: true,
+    });
+    expect(core.accountAdoptCandidate).toHaveBeenCalledTimes(1);
+    expect(remote.putKeystore).toHaveBeenCalledTimes(2);
+    expect(session.state().pending).toEqual(new Set());
+    expect(session.state().binding).toBe('backedUp');
+  });
+
+  it('scopes keepLocalOffline to the current authenticated subject', async () => {
+    const provider = auth([
+      { accessToken: 'token-1', issuer: 'https://issuer', subject: 'provider-sub' },
+    ]);
+    const remote = {
+      me: vi.fn(async () => remoteBackup()),
+      register: vi.fn(),
+      putKeystore: vi.fn(),
+    };
+    const session = new AccountSession(backend());
+    await session.initialize();
+    session.attachSync({ auth: provider, remote });
+    await session.probe();
+
+    await session.keepLocalOffline();
+    expect(session.state()).toMatchObject({ syncDisposition: 'localOnly', conflict: null });
+
+    provider.setSignedIn(false);
+    expect(session.state().syncDisposition).toBe('remote');
   });
 });

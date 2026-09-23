@@ -28,6 +28,47 @@ async function blobHash(bytes) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
 }
 
+async function remoteMatchesCheckpoint(remote, checkpoint) {
+  if (!checkpoint || remote.etag !== checkpoint.etag) return false;
+  if (checkpoint.version === null) return remote.keystore === null;
+  if (remote.keystore === null || remote.generation !== checkpoint.version.generation) return false;
+  return bytesEqual(await blobHash(remote.keystore), checkpoint.version.blobHash);
+}
+
+/** Exhaustive default-deny classification before credential or backup-version verification. */
+export function classifyAccountBindingState({ record, attempt, remote }) {
+  const localMemberId = record?.identity.memberId ?? null;
+  const localBinding = record?.binding ?? null;
+  if (remote === null) {
+    if (record === null) return Object.freeze({ action: 'none' });
+    if (localBinding === null) return Object.freeze({ action: 'register' });
+    const sameSubject = localBinding.issuer === attempt.issuer
+      && localBinding.subject === attempt.subject;
+    return Object.freeze({
+      action: 'conflict',
+      reason: sameSubject ? 'registration_preconditions_ambiguous' : 'local_auth_binding_mismatch',
+    });
+  }
+  if (record === null) {
+    return Object.freeze({
+      action: 'conflict',
+      reason: remote.keystore === null ? 'remote_identity_without_backup' : 'remote_restore_available',
+    });
+  }
+  if (localBinding !== null
+    && (localBinding.issuer !== attempt.issuer || localBinding.subject !== attempt.subject)) {
+    return Object.freeze({ action: 'conflict', reason: 'local_auth_binding_mismatch' });
+  }
+  if (remote.memberId !== localMemberId) {
+    return Object.freeze({
+      action: 'conflict',
+      reason: 'local_remote_identity_mismatch',
+      restoreAvailable: remote.keystore !== null,
+    });
+  }
+  return Object.freeze({ action: 'reconcile' });
+}
+
 function cloneConflict(conflict) {
   return conflict === null ? null : Object.freeze({ ...conflict });
 }
@@ -37,6 +78,7 @@ function publicState(state) {
     ...state,
     pending: new Set(state.pending),
     conflict: cloneConflict(state.conflict),
+    retainedIdentities: Object.freeze(state.retainedIdentities.map((identity) => Object.freeze({ ...identity }))),
   });
 }
 
@@ -44,9 +86,11 @@ function sameState(left, right) {
   return left.auth === right.auth
     && left.account === right.account
     && left.binding === right.binding
+    && left.syncDisposition === right.syncDisposition
     && left.memberId === right.memberId
     && left.storagePersistence === right.storagePersistence
     && left.pending.join('|') === right.pending.join('|')
+    && JSON.stringify(left.retainedIdentities) === JSON.stringify(right.retainedIdentities)
     && JSON.stringify(left.conflict) === JSON.stringify(right.conflict);
 }
 
@@ -61,13 +105,16 @@ export class AccountSession {
   #authState = 'signedOut';
   #remoteProbe = null;
   #conflict = null;
+  #keptOfflineFor = null;
   #volatilePending = new Set();
   #state = Object.freeze({
     auth: 'signedOut',
     account: 'none',
     binding: 'unbound',
+    syncDisposition: 'remote',
     pending: Object.freeze([]),
     conflict: null,
+    retainedIdentities: Object.freeze([]),
     storagePersistence: 'unavailable',
   });
   #subs = new Set();
@@ -120,6 +167,7 @@ export class AccountSession {
     this.#authState = auth.subject() ? 'signedIn' : 'signedOut';
     this.#remoteProbe = null;
     this.#conflict = null;
+    this.#keptOfflineFor = null;
     this.#unsubscribeAuth = auth.onChange(() => this.#onAuthChange());
     this.#publish();
     return this.state();
@@ -206,6 +254,31 @@ export class AccountSession {
       () => { if (this.#enableSyncPromise === operation) this.#enableSyncPromise = null; },
     );
     return operation;
+  }
+
+  restore(credential) {
+    return this.#serialize(() => this.#restoreRemoteIdentity(credential, false));
+  }
+
+  adoptRemoteIdentity(credential) {
+    return this.#serialize(() => this.#restoreRemoteIdentity(credential, true));
+  }
+
+  keepLocalOffline() {
+    return this.#serialize(async () => {
+      const probe = await this.#probeRemote();
+      if (!this.#sync.record || this.#conflict === null) {
+        throw makeError('invalid_request', { cause: 'no local identity conflict to keep offline' });
+      }
+      this.#conflict = null;
+      this.#keptOfflineFor = {
+        issuer: probe.attempt.issuer,
+        subject: probe.attempt.subject,
+      };
+      this.#remoteProbe = null;
+      this.#publish();
+      return this.state();
+    });
   }
 
   dispose() {
@@ -341,6 +414,80 @@ export class AccountSession {
     throw makeError('version_conflict', { cause: 'account snapshot changed while staging backup' });
   }
 
+  async #restoreRemoteIdentity(credential, allowReplacement) {
+    this.#volatilePending.add('restore');
+    this.#publish();
+    try {
+      const probe = await this.#probeRemote({ forceRefresh: true });
+      if (probe.status !== 'registered') throw makeError('unregistered', { httpStatus: 403 });
+      if (probe.remote.keystore === null) {
+        throw makeError('invalid_request', { cause: 'the bound remote identity has no account backup' });
+      }
+      const durable = this.#sync.record;
+      const recoveryResume = typeof credential?.recoveryCode === 'string'
+        && durable?.identity.memberId === probe.remote.memberId
+        && durable.pendingBackup?.kind === 'revoke'
+        && bindingEqual(durable.pendingBackup.binding, this.#bindingFor(probe.attempt, probe.remote.memberId))
+        && await remoteMatchesCheckpoint(probe.remote, durable.acknowledgedBackup);
+      if (recoveryResume) {
+        try {
+          await this.#backup();
+          return { memberId: probe.remote.memberId, pending: false, resumed: true };
+        } catch (error) {
+          return {
+            memberId: probe.remote.memberId,
+            pending: true,
+            resumed: true,
+            uploadError: isAppError(error) ? error.code : 'unavailable',
+          };
+        }
+      }
+      const localMemberId = this.#localMemberId();
+      const differs = localMemberId !== null && localMemberId !== probe.remote.memberId;
+      if (differs !== allowReplacement) {
+        throw makeError('identity_conflict', {
+          cause: differs
+            ? 'explicit adoptRemoteIdentity is required to preserve local custody'
+            : 'adoptRemoteIdentity requires a differing local identity',
+        });
+      }
+      this.#assertAttemptStillCurrent(probe.attempt);
+      const remoteHash = await blobHash(probe.remote.keystore);
+      const binding = this.#bindingFor(probe.attempt, probe.remote.memberId);
+      const adopted = await this.#core.accountAdoptCandidate({
+        expectedMemberId: probe.remote.memberId,
+        keystore: probe.remote.keystore,
+        credential,
+        binding,
+        checkpoint: {
+          etag: probe.remote.etag,
+          version: { generation: probe.remote.generation, blobHash: remoteHash },
+        },
+      });
+      this.#setCustody('unlocked', adopted.memberId);
+      await this.#refreshLocalSync();
+      this.#remoteProbe = probe;
+      this.#conflict = null;
+      this.#publish();
+      if (!adopted.recoveryCode) return { memberId: adopted.memberId };
+      try {
+        await this.#backup();
+        return { memberId: adopted.memberId, recoveryCode: adopted.recoveryCode, pending: false };
+      } catch (error) {
+        await this.#refreshLocalSync();
+        return {
+          memberId: adopted.memberId,
+          recoveryCode: adopted.recoveryCode,
+          pending: true,
+          uploadError: isAppError(error) ? error.code : 'unavailable',
+        };
+      }
+    } finally {
+      this.#volatilePending.delete('restore');
+      this.#publish();
+    }
+  }
+
   async #surfaceBackupConflict(error, probe) {
     let remote = null;
     try {
@@ -401,31 +548,36 @@ export class AccountSession {
   async #acceptRegisteredProbe(probe) {
     const localMemberId = this.#localMemberId();
     const localBinding = this.#sync.record?.binding ?? null;
-    let conflict = null;
-    if (localMemberId === null) {
-      conflict = {
-        code: 'identity_conflict', reason: 'remote_identity_without_local_account',
-        remoteMemberId: probe.remote.memberId,
-      };
-    } else if (probe.remote.memberId !== localMemberId) {
-      conflict = {
-        code: 'identity_conflict', reason: 'local_remote_identity_mismatch',
-        localMemberId, remoteMemberId: probe.remote.memberId,
-      };
-    } else if (localBinding !== null
-      && (localBinding.issuer !== probe.attempt.issuer || localBinding.subject !== probe.attempt.subject)) {
-      conflict = { code: 'identity_conflict', reason: 'local_auth_binding_mismatch', localMemberId };
+    const classification = classifyAccountBindingState({
+      record: this.#sync.record,
+      attempt: probe.attempt,
+      remote: probe.remote,
+    });
+    let conflict = classification.action === 'conflict' ? {
+      code: 'identity_conflict',
+      reason: classification.reason,
+      ...(localMemberId === null ? {} : { localMemberId }),
+      ...(probe.remote.memberId ? { remoteMemberId: probe.remote.memberId } : {}),
+      ...(classification.restoreAvailable === undefined
+        ? {}
+        : { restoreAvailable: classification.restoreAvailable }),
+    } : null;
+    if (classification.action === 'conflict') {
+      // Default-deny classification completes before any remote generation/hash is considered.
     } else if (probe.remote.keystore !== null) {
       const local = this.#sync.record.identity;
       const remoteHash = await blobHash(probe.remote.keystore);
-      if (probe.remote.generation < local.effectiveFloor) {
+      const pendingFromCheckpoint = this.#sync.record.pendingBackup !== null
+        && versionEqual(this.#sync.record.pendingBackup.version, local.version)
+        && await remoteMatchesCheckpoint(probe.remote, this.#sync.record.acknowledgedBackup);
+      if (!pendingFromCheckpoint && probe.remote.generation < local.effectiveFloor) {
         conflict = {
           code: 'account_backup_rollback', reason: 'remote_generation_below_local_floor',
           localGeneration: local.effectiveFloor,
           remoteGeneration: probe.remote.generation,
         };
-      } else if (probe.remote.generation !== local.version.generation
-        || !bytesEqual(remoteHash, local.version.blobHash)) {
+      } else if (!pendingFromCheckpoint && (probe.remote.generation !== local.version.generation
+        || !bytesEqual(remoteHash, local.version.blobHash))) {
         conflict = {
           code: 'account_backup_precondition_failed', reason: 'remote_backup_requires_verification',
           localGeneration: local.version.generation,
@@ -450,12 +602,17 @@ export class AccountSession {
   }
 
   #acceptUnregisteredProbe(probe) {
-    const binding = this.#sync.record?.binding ?? null;
+    const classification = classifyAccountBindingState({
+      record: this.#sync.record,
+      attempt: probe.attempt,
+      remote: null,
+    });
     this.#remoteProbe = probe;
-    this.#conflict = binding !== null
-      && (binding.issuer !== probe.attempt.issuer || binding.subject !== probe.attempt.subject)
-      ? { code: 'identity_conflict', reason: 'local_auth_binding_mismatch', localMemberId: this.#localMemberId() }
-      : null;
+    this.#conflict = classification.action !== 'conflict' ? null : {
+      code: 'identity_conflict',
+      reason: classification.reason,
+      localMemberId: this.#localMemberId(),
+    };
     this.#publish();
   }
 
@@ -538,6 +695,7 @@ export class AccountSession {
     this.#authState = this.#auth?.subject() ? 'signedIn' : 'signedOut';
     this.#remoteProbe = null;
     this.#conflict = null;
+    this.#keptOfflineFor = null;
     this.#publish();
   }
 
@@ -552,6 +710,7 @@ export class AccountSession {
   #clearRemoteContext() {
     this.#remoteProbe = null;
     this.#conflict = null;
+    this.#keptOfflineFor = null;
     this.#publish();
   }
 
@@ -602,8 +761,14 @@ export class AccountSession {
       auth: this.#authState,
       account: this.#account,
       binding: this.#bindingState(),
+      syncDisposition: this.#keptOfflineFor === null ? 'remote' : 'localOnly',
       pending: Object.freeze(this.#pending()),
       conflict: this.#conflict,
+      retainedIdentities: Object.freeze((this.#sync.record?.retainedIdentities ?? []).map((identity) => ({
+        memberId: identity.memberId,
+        generation: identity.version.generation,
+        floor: identity.effectiveFloor,
+      }))),
       storagePersistence: this.#sync.storagePersistence,
       ...(this.#memberId ? { memberId: this.#memberId } : {}),
     };

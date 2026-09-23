@@ -69,6 +69,15 @@ function clonePending(pending) {
   };
 }
 
+function cloneIdentity(identity, name = 'identity') {
+  return {
+    memberId: identity.memberId,
+    keystore: cloneBytes(identity.keystore, `${name}.keystore`),
+    version: cloneVersion(identity.version),
+    floor: identity.floor,
+  };
+}
+
 function bindingEqual(left, right) {
   return left !== null
     && right !== null
@@ -86,12 +95,15 @@ function pendingEqual(left, right) {
 }
 
 function immutableRecord(record) {
-  const identity = Object.freeze({
-    memberId: record.identity.memberId,
-    keystore: cloneBytes(record.identity.keystore, 'identity.keystore'),
-    version: Object.freeze(cloneVersion(record.identity.version)),
-    floor: record.identity.floor,
-  });
+  const freezeIdentity = (value, name) => {
+    const identity = cloneIdentity(value, name);
+    Object.freeze(identity.version);
+    return Object.freeze(identity);
+  };
+  const identity = freezeIdentity(record.identity, 'identity');
+  const retainedIdentities = Object.freeze(record.retainedIdentities.map(
+    (retained, index) => freezeIdentity(retained, `retainedIdentities[${index}]`),
+  ));
   const binding = cloneBinding(record.binding);
   const checkpoint = cloneCheckpoint(record.acknowledgedBackup);
   const pending = clonePending(record.pendingBackup);
@@ -106,6 +118,7 @@ function immutableRecord(record) {
   return Object.freeze({
     revision: record.revision,
     identity,
+    retainedIdentities,
     binding,
     acknowledgedBackup: checkpoint,
     pendingBackup: pending,
@@ -117,17 +130,23 @@ function recordFromJson(value) {
   const binding = nullableProperty(value, 'binding');
   const acknowledgedBackup = nullableProperty(value, 'acknowledgedBackup');
   const pendingBackup = nullableProperty(value, 'pendingBackup');
+  const retainedIdentities = nullableProperty(value, 'retainedIdentities');
+  if (!Array.isArray(retainedIdentities)) fail('retainedIdentities must be an array');
+  const identityFromJson = (identity, name) => ({
+    memberId: identity?.memberId,
+    keystore: bytesFromJson(identity?.blob?.keystore, `${name}.blob.keystore`),
+    version: {
+      generation: identity?.blob?.generation,
+      blobHash: bytesFromJson(identity?.blob?.blobHash, `${name}.blob.blobHash`),
+    },
+    floor: identity?.floor,
+  });
   return {
     revision: value.revision,
-    identity: {
-      memberId: value.identity.memberId,
-      keystore: bytesFromJson(value.identity.blob?.keystore, 'identity.blob.keystore'),
-      version: {
-        generation: value.identity.blob?.generation,
-        blobHash: bytesFromJson(value.identity.blob?.blobHash, 'identity.blob.blobHash'),
-      },
-      floor: value.identity.floor,
-    },
+    identity: identityFromJson(value.identity, 'identity'),
+    retainedIdentities: retainedIdentities.map(
+      (identity, index) => identityFromJson(identity, `retainedIdentities[${index}]`),
+    ),
     binding,
     acknowledgedBackup: acknowledgedBackup === null ? null : {
       ...acknowledgedBackup,
@@ -148,17 +167,19 @@ function recordFromJson(value) {
 
 function recordToJson(record) {
   const version = (value) => ({ generation: value.generation, blobHash: Array.from(value.blobHash) });
+  const identity = (value) => ({
+    memberId: value.memberId,
+    blob: {
+      keystore: Array.from(value.keystore),
+      generation: value.version.generation,
+      blobHash: Array.from(value.version.blobHash),
+    },
+    floor: value.floor,
+  });
   return {
     revision: record.revision,
-    identity: {
-      memberId: record.identity.memberId,
-      blob: {
-        keystore: Array.from(record.identity.keystore),
-        generation: record.identity.version.generation,
-        blobHash: Array.from(record.identity.version.blobHash),
-      },
-      floor: record.identity.floor,
-    },
+    identity: identity(record.identity),
+    retainedIdentities: record.retainedIdentities.map(identity),
     binding: record.binding === null ? null : { ...record.binding },
     acknowledgedBackup: record.acknowledgedBackup === null ? null : {
       etag: record.acknowledgedBackup.etag,
@@ -191,6 +212,18 @@ async function sha256(bytes) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
 }
 
+async function validateIdentity(identity, name) {
+  if (!isObject(identity)) fail(`${name} must be an object`);
+  nonemptyString(identity.memberId, `${name}.memberId`);
+  if (!(identity.keystore instanceof Uint8Array)) fail(`${name}.keystore must be a Uint8Array`);
+  validateVersion(identity.version, `${name}.version`);
+  safeNonnegative(identity.floor, `${name}.floor`);
+  const actualHash = await sha256(identity.keystore);
+  if (!bytesEqual(actualHash, identity.version.blobHash)) {
+    fail(`${name}.version.blobHash does not match ${name}.keystore`);
+  }
+}
+
 /** Returns true only when a generation and exact wrapped-blob digest match. */
 export function sameAccountVersion(left, right) {
   return isObject(left)
@@ -206,18 +239,52 @@ export function effectiveAccountFloor(record) {
   return Math.max(record.identity.floor, record.identity.version.generation);
 }
 
+/** Returns the authenticated floor already held for a member, or zero for a genuinely new identity. */
+export function accountFloorForMember(record, memberId) {
+  if (!record) return 0;
+  const identity = record.identity.memberId === memberId
+    ? record.identity
+    : record.retainedIdentities.find((candidate) => candidate.memberId === memberId);
+  return identity ? Math.max(identity.floor, identity.version.generation) : 0;
+}
+
+function allIdentities(record) {
+  return [record.identity, ...record.retainedIdentities];
+}
+
+/** Refuses any record transition that drops custody or lowers a known identity's authenticated floor. */
+export function assertAccountCustodyPreserved(previous, next) {
+  if (!previous) return;
+  for (const identity of allIdentities(previous)) {
+    const becomesActive = next.identity.memberId === identity.memberId;
+    const replacement = becomesActive
+      ? next.identity
+      : next.retainedIdentities.find((candidate) => candidate.memberId === identity.memberId);
+    if (!replacement) fail(`transition drops custody for ${identity.memberId}`);
+    const previousFloor = Math.max(identity.floor, identity.version.generation);
+    const nextFloor = Math.max(replacement.floor, replacement.version.generation);
+    if (nextFloor < previousFloor) fail(`transition lowers generation floor for ${identity.memberId}`);
+    if (!becomesActive && (replacement.floor !== identity.floor
+      || !sameAccountVersion(replacement.version, identity.version)
+      || !bytesEqual(replacement.keystore, identity.keystore))) {
+      fail(`transition mutates retained custody for ${identity.memberId}`);
+    }
+  }
+}
+
 /** Validates an in-memory typed record and returns an immutable, detached clone. */
 export async function validateAccountRecord(record) {
   if (!isObject(record) || !isObject(record.identity)) fail('must be an object with identity');
   safePositive(record.revision, 'revision');
   const { identity } = record;
-  nonemptyString(identity.memberId, 'identity.memberId');
-  if (!(identity.keystore instanceof Uint8Array)) fail('identity.keystore must be a Uint8Array');
-  validateVersion(identity.version, 'identity.version');
-  safeNonnegative(identity.floor, 'identity.floor');
-
-  const actualHash = await sha256(identity.keystore);
-  if (!bytesEqual(actualHash, identity.version.blobHash)) fail('identity.version.blobHash does not match identity.keystore');
+  await validateIdentity(identity, 'identity');
+  if (!Array.isArray(record.retainedIdentities)) fail('retainedIdentities must be an array');
+  const memberIds = new Set([identity.memberId]);
+  for (const [index, retained] of record.retainedIdentities.entries()) {
+    await validateIdentity(retained, `retainedIdentities[${index}]`);
+    if (memberIds.has(retained.memberId)) fail('identity member ids must be unique');
+    memberIds.add(retained.memberId);
+  }
 
   if (record.binding !== null) validateBinding(record.binding, identity.memberId, 'binding');
   if (record.acknowledgedBackup !== null) {
@@ -260,26 +327,35 @@ export async function createAccountRecord(snapshot) {
   return validateAccountRecord({
     revision: 1,
     identity: identityFromSnapshot(snapshot),
+    retainedIdentities: [],
     binding: null,
     acknowledgedBackup: null,
     pendingBackup: null,
   });
 }
 
-/** Replaces custody at the next portable revision, retaining only valid same-identity metadata. */
+/** Replaces active custody while retaining every displaced wrapped identity and its scoped floor. */
 export async function replaceAccountIdentity(record, snapshot) {
   const current = await validateAccountRecord(record);
   if (current.revision === Number.MAX_SAFE_INTEGER) fail('revision is exhausted');
   const sameIdentity = current.identity.memberId === snapshot?.memberId;
-  if (sameIdentity && snapshot.generation < effectiveAccountFloor(current)) fail('identity generation rolls back');
+  const knownFloor = accountFloorForMember(current, snapshot?.memberId);
+  if (snapshot.generation < knownFloor) fail('identity generation rolls back');
   const identity = identityFromSnapshot(
     snapshot,
-    sameIdentity
-      ? Math.max(effectiveAccountFloor(current), snapshot.generation)
-      : snapshot.generation,
+    Math.max(knownFloor, snapshot.generation),
   );
+  const retainedIdentities = sameIdentity
+    ? current.retainedIdentities
+    : [
+      ...current.retainedIdentities.filter((retained) => retained.memberId !== identity.memberId),
+      current.identity,
+    ];
   let pendingBackup = null;
-  if (sameIdentity && current.pendingBackup?.kind === 'revoke') {
+  if (sameIdentity && current.binding !== null
+    && !sameAccountVersion(current.identity.version, identity.version)) {
+    pendingBackup = { kind: 'revoke', version: identity.version, binding: current.binding };
+  } else if (sameIdentity && current.pendingBackup?.kind === 'revoke') {
     pendingBackup = { ...current.pendingBackup, version: identity.version };
   } else if (sameIdentity && current.pendingBackup !== null
     && sameAccountVersion(current.pendingBackup.version, identity.version)) {
@@ -288,9 +364,38 @@ export async function replaceAccountIdentity(record, snapshot) {
   return validateAccountRecord({
     revision: current.revision + 1,
     identity,
+    retainedIdentities,
     binding: sameIdentity ? current.binding : null,
     acknowledgedBackup: sameIdentity ? current.acknowledgedBackup : null,
     pendingBackup,
+  });
+}
+
+/** Atomically activates verified remote custody with its binding/checkpoint and optional rotation intent. */
+export async function adoptRemoteAccountIdentity(record, snapshot, {
+  binding,
+  checkpoint,
+  pendingKind = null,
+}) {
+  const replaced = record
+    ? await replaceAccountIdentity(record, snapshot)
+    : await createAccountRecord(snapshot);
+  validateBinding(binding, replaced.identity.memberId, 'binding');
+  if (!isObject(checkpoint)) fail('adoption checkpoint must be an object');
+  nonemptyString(checkpoint.etag, 'adoption checkpoint.etag');
+  if (checkpoint.version !== null) validateVersion(checkpoint.version, 'adoption checkpoint.version');
+  if (pendingKind !== null && pendingKind !== 'revoke') {
+    fail('recovery adoption pending kind must be revoke');
+  }
+  return validateAccountRecord({
+    ...replaced,
+    binding,
+    acknowledgedBackup: checkpoint,
+    pendingBackup: pendingKind === null ? null : {
+      kind: pendingKind,
+      version: replaced.identity.version,
+      binding,
+    },
   });
 }
 
@@ -336,13 +441,9 @@ export async function acknowledgeAccountBackup(record, expected, checkpoint) {
   const current = await validateAccountRecord(record);
   if (!pendingEqual(current.pendingBackup, expected)) return null;
   const acknowledgedBackup = checkpoint === null ? null : cloneCheckpoint(checkpoint);
-  if (expected.kind === 'backup') {
-    if (acknowledgedBackup?.version === null
-      || !sameAccountVersion(acknowledgedBackup?.version, expected.version)) {
-      fail('backup acknowledgement version does not match pending backup');
-    }
-  } else if (acknowledgedBackup?.version !== null) {
-    fail('revoke acknowledgement must carry no remote version');
+  if (acknowledgedBackup?.version === null
+    || !sameAccountVersion(acknowledgedBackup?.version, expected.version)) {
+    fail('backup acknowledgement version does not match pending backup');
   }
   if (current.revision === Number.MAX_SAFE_INTEGER) fail('revision is exhausted');
   return validateAccountRecord({

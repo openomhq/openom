@@ -188,13 +188,22 @@ fn account_acknowledge_backup(
 #[tauri::command]
 async fn account_adopt_candidate(
     state: State<'_, Host>,
+    expected_member_id: String,
     candidate: Vec<u8>,
     passphrase: String,
+    binding: AccountBinding,
+    checkpoint: AccountRemoteCheckpoint,
 ) -> Result<AccountAdopted, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.account_adopt_candidate(&candidate, &Passphrase::new(passphrase.into_bytes()))
-            .map_err(e)
+        host.account_adopt_candidate(
+            &openom_vault_host::AccountMemberId::new(expected_member_id),
+            &candidate,
+            &Passphrase::new(passphrase.into_bytes()),
+            binding,
+            checkpoint,
+        )
+        .map_err(e)
     })
     .await
     .map_err(join_err)?
@@ -203,16 +212,22 @@ async fn account_adopt_candidate(
 #[tauri::command]
 async fn account_adopt_recovery_candidate(
     state: State<'_, Host>,
+    expected_member_id: String,
     candidate: Vec<u8>,
     recovery_code: String,
     new_passphrase: String,
+    binding: AccountBinding,
+    checkpoint: AccountRemoteCheckpoint,
 ) -> Result<AccountAdopted, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         host.account_adopt_recovery_candidate(
+            &openom_vault_host::AccountMemberId::new(expected_member_id),
             &candidate,
             &RecoveryCode::new(recovery_code),
             &Passphrase::new(new_passphrase.into_bytes()),
+            binding,
+            checkpoint,
         )
         .map_err(e)
     })

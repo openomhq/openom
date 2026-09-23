@@ -49,12 +49,12 @@ The Tauri v2 native shell: it builds the desktop app and the Android app around 
 handlers. Its managed `Arc<AppCoreHost<SqliteVaultStore>>` owns one unlocked profile account and all live tree
 cores. The custody boundary is the reason this crate exists as a distinct native shell: account secrets and
 tree DEKs remain inside Rust and **never cross the `invoke` boundary into the webview**. `vault.sqlite` stores
-one identity-scoped, revisioned account record plus per-tree keyrings/watermarks, separately from each tree's local
+one revisioned account record with active and retained identity-scoped custody plus per-tree keyrings/watermarks, separately from each tree's local
 blob directory so restoring tree data cannot silently roll back the custody floor.
 The `account_status` command reports `none` / `locked` / `unlocked`; `account_lock` drops all live trees and
 the resident account without deleting encrypted persistence. `account_snapshot` exposes only wrapped bytes
-plus their Rust-authenticated generation/hash, while candidate-adoption commands verify into temporary
-custody and persist before replacing the resident account. Sync-journal commands expose only non-secret record
+plus their Rust-authenticated generation/hash, while candidate-adoption commands pin the expected remote member id,
+verify into temporary custody, retain displaced wrapped identity bytes, and persist before replacing the resident account. Sync-journal commands expose only non-secret record
 metadata and atomically checkpoint auth binding, pending backup/revoke, and exact-version acknowledgement.
 
 It is **not** where the logic or the tests live. Every `#[command]` here is a thin wrapper: it

@@ -179,11 +179,14 @@ export function createNativeAppCore() {
     accountStageBackup: ({ kind, binding }) => call('account_stage_backup', { kind, binding }),
     accountAcknowledgeBackup: ({ expected, checkpoint }) =>
       call('account_acknowledge_backup', { expected, checkpoint }),
-    accountAdoptCandidate: ({ keystore, credential }) => {
+    accountAdoptCandidate: ({ expectedMemberId, keystore, credential, binding, checkpoint }) => {
       if (credential && typeof credential.passphrase === 'string') {
         return call('account_adopt_candidate', {
+          expectedMemberId,
           candidate: bytes(keystore),
           passphrase: credential.passphrase,
+          binding,
+          checkpoint,
         });
       }
       if (
@@ -192,9 +195,12 @@ export function createNativeAppCore() {
         && typeof credential.newPassphrase === 'string'
       ) {
         return call('account_adopt_recovery_candidate', {
+          expectedMemberId,
           candidate: bytes(keystore),
           recoveryCode: credential.recoveryCode,
           newPassphrase: credential.newPassphrase,
+          binding,
+          checkpoint,
         });
       }
       return Promise.reject(makeError('invalid_request', { cause: 'invalid account candidate credential' }));

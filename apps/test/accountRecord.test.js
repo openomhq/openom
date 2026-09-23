@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   acknowledgeAccountBackup,
+  accountFloorForMember,
+  assertAccountCustodyPreserved,
   confirmAccountBinding,
   createAccountRecord,
   decodeAccountRecord,
@@ -72,13 +74,16 @@ describe('account record codec', () => {
 
     const changedVersion = await replaceAccountIdentity(confirmed, await snapshot('member-a', 2, new Uint8Array([8])));
     expect(changedVersion.acknowledgedBackup).toEqual(confirmed.acknowledgedBackup);
-    expect(changedVersion.pendingBackup).toBeNull();
+    expect(changedVersion.pendingBackup).toMatchObject({
+      kind: 'revoke', version: changedVersion.identity.version,
+    });
 
     const different = await replaceAccountIdentity(confirmed, await snapshot('member-b', 0, new Uint8Array([4])));
     expect(different.identity.floor).toBe(0);
     expect(different.binding).toBeNull();
     expect(different.acknowledgedBackup).toBeNull();
     expect(different.pendingBackup).toBeNull();
+    expect(different.retainedIdentities.map((identity) => identity.memberId)).toEqual(['member-a']);
   });
 
   it('keeps record revision, credential generation, and version equality distinct', async () => {
@@ -89,6 +94,33 @@ describe('account record codec', () => {
     expect([initial.identity.version.generation, rewrapped.identity.version.generation, rotated.identity.version.generation]).toEqual([4, 4, 5]);
     expect(sameAccountVersion(initial.identity.version, rewrapped.identity.version)).toBe(false);
     expect(sameAccountVersion(rewrapped.identity.version, rewrapped.identity.version)).toBe(true);
+  });
+
+  it('keeps displaced custody and its floor when identities become active again', async () => {
+    const first = await createAccountRecord(await snapshot('member-a', 8));
+    const second = await replaceAccountIdentity(first, await snapshot('member-b', 1, new Uint8Array([4])));
+    expect(accountFloorForMember(second, 'member-a')).toBe(8);
+    await expect(replaceAccountIdentity(second, await snapshot('member-a', 7, new Uint8Array([5]))))
+      .rejects.toThrow('rolls back');
+
+    const restored = await replaceAccountIdentity(second, await snapshot('member-a', 9, new Uint8Array([6])));
+    expect(restored.identity.memberId).toBe('member-a');
+    expect(restored.retainedIdentities.map((identity) => identity.memberId)).toEqual(['member-b']);
+    expect(() => assertAccountCustodyPreserved(second, {
+      ...restored, retainedIdentities: [],
+    })).toThrow('drops custody for member-b');
+
+    const substituted = await snapshot('member-a', 8, new Uint8Array([9]));
+    expect(() => assertAccountCustodyPreserved(second, {
+      ...second,
+      revision: second.revision + 1,
+      retainedIdentities: [{
+        memberId: substituted.memberId,
+        keystore: substituted.keystore,
+        version: { generation: substituted.generation, blobHash: substituted.blobHash },
+        floor: substituted.generation,
+      }],
+    })).toThrow('mutates retained custody for member-a');
   });
 
   it('rejects malformed remote metadata and JSON byte arrays', async () => {
@@ -158,8 +190,10 @@ describe('account record codec', () => {
     })).resolves.toBeNull();
 
     const acknowledged = await acknowledgeAccountBackup(revoke, revoke.pendingBackup, {
-      etag: '"empty"', version: null,
+      etag: '"stored"', version: revoke.identity.version,
     });
-    expect(acknowledged.acknowledgedBackup).toEqual({ etag: '"empty"', version: null });
+    expect(acknowledged.acknowledgedBackup).toEqual({
+      etag: '"stored"', version: revoke.identity.version,
+    });
   });
 });
