@@ -667,7 +667,9 @@ fn core_sync_keyring(
     tree_id: Vec<u8>,
     hops: Vec<u8>,
 ) -> Result<(), String> {
-    state.sync_keyring(&doc, &tree_id, &hops).map_err(e)
+    state
+        .sync_keyring(&doc, &TreeId::new(tree_id), &hops)
+        .map_err(e)
 }
 
 /// The current stored chain keyring revision (0 if none) — the webview fetches successors from `head + 1` to
