@@ -67,7 +67,7 @@ import { AccountRecordCoordinator } from './accountRecordStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
 import {
   joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl,
-  joinDagAnchor, publishDagAnchor, syncDagAnchor, chainRevision,
+  joinDagAnchor, publishDagAnchor, syncDagAnchor, chainRevision, restoreOwnerTree,
 } from './sharing.js';
 import { mint as mintInvite, verifyClaim as verifyInviteClaim, signerIds, signersRetained } from './invite.js';
 import { pushMembershipSummary } from './membershipSummary.js';
@@ -303,7 +303,14 @@ async function publishMembership(docId, engine, treeId) {
     );
   } else if (engine === 'dag') {
     await publishDagAnchor(
-      { wasm: { wrapDagKeyringUpdate: wasmWrapDagKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
+      {
+        wasm: {
+          wrapDagKeyringUpdate: wasmWrapDagKeyringUpdate,
+          unwrapDagKeyring: wasmUnwrapDagKeyring,
+        },
+        transport: transportFor(docId),
+        keyringStore: keyringStore(),
+      },
       { docId, treeId },
     );
   }
@@ -1735,6 +1742,52 @@ const api = {
     await ensureInit();
     return openStoredTree({ treeId, docId, engine });
   },
+
+  /** Verify and restore a founder-owned tree's remote keyring onto a fresh device, then open it. */
+  async restoreTree({ treeId, docId, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const transport = transportFor(docId);
+    if (!transport) throw new Error('tree restore needs an attached transport');
+    let restored;
+    try {
+      restored = await restoreOwnerTree({
+        wasm: {
+          unwrapChainKeyring: wasmUnwrapKeyring,
+          verifyKeyringWalk: wasmVerifyKeyringWalk,
+          keyringHash: wasmKeyringHash,
+          unwrapDagKeyring: wasmUnwrapDagKeyring,
+        },
+        transport,
+        keyringStore: keyringStore(),
+        openOwner: (resolvedEngine, head) => wasmUnlockTree(
+          requireAccount(), resolvedEngine, treeId, freshReplica(), head, docId,
+        ),
+        persistWatermark: (watermark) => saveWatermark(docId, watermark),
+      }, { treeId, docId, engine });
+    } catch (error) {
+      throw vaultError(error);
+    }
+    const opened = restored.opened;
+    let openedCore = null;
+    try {
+      openedCore = new Core(opened.takeHandle(), docId, true, treeId, engine);
+      await installMembership(openedCore, docId, engine, (await keyringStore().loadHead(docId)).bytes);
+      await hydrate(openedCore);
+      cores.set(docId, openedCore);
+      return {
+        didKey: opened.didKey,
+        needsReseal: opened.needsReseal,
+        needsBackfill: opened.needsBackfill,
+        needsRrkBackfill: opened.needsRrkBackfill,
+        writeEpochUnreachable: opened.writeEpochUnreachable,
+      };
+    } catch (error) {
+      openedCore?.handle.free();
+      throw error;
+    } finally {
+      opened.free();
+    }
+  },
 };
 
 async function runTick(c) {
@@ -1758,6 +1811,10 @@ async function runTick(c) {
         // hex — both parse to one Postgres UUID (main.js derives docId = treeIdToUuid(treeId bytes)). So
         // createTree(docId) mints the SAME server tree the blob pushes target.
         await transport.createTree(c.docId);
+        // The account backup alone cannot reopen a tree on a fresh device: its DEK lives in this signed,
+        // account-addressed keyring. Publish genesis before clearing the durable create marker so a crash
+        // retries both steps; chain and DAG publication are idempotent.
+        await publishMembership(c.docId, c.engine, c.treeId);
         await clearNeedsCreateTree(c.docId);
       }
       c.treeEnsured = true; // reached only if createTree didn't throw (or wasn't needed)

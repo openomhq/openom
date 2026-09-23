@@ -29,6 +29,21 @@ function jsonRes({ status = 200, json = {} as any } = {}) {
 // here through a surviving method — blobGet for GETs, putKeyring for PUTs. (The V1 snapshot / V2 delta-log methods
 // that used to vehicle these were removed; the blob quartet + keyring + access + invites are the live surface.)
 describe('RemoteStore', () => {
+  it('binds the browser default fetch to its global receiver', async () => {
+    const fetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation');
+      return Promise.resolve(res({ status: 200 }));
+    });
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const store = new RemoteStore({ baseUrl: 'http://x' });
+      await store.blobGet('t/x');
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('fetches the bearer PER REQUEST from the AuthSession seam (never captured at construction)', async () => {
     const fetch = vi.fn(async () => res({ status: 200 }));
     // A seam whose token rotates between calls — a construction-time token would strand the second.

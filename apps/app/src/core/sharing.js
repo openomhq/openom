@@ -111,6 +111,62 @@ export class KeyringForkError extends Error {
   }
 }
 
+/**
+ * Restore a founder-owned tree onto a fresh device from the server's untrusted keyring channel.
+ * Chain verifies the complete signed walk from its self-authenticating genesis; DAG resolves the latest
+ * self-contained anchor. `openOwner` then binds the verified head to the restored account before anything
+ * is persisted. The head record is the commit marker and lands last, so a failed write is safely retriable.
+ */
+export async function restoreOwnerTree(deps, { treeId, docId, engine }) {
+  const {
+    wasm, transport, keyringStore, openOwner, persistWatermark,
+    freeOpened = (opened) => opened?.free?.(),
+  } = deps;
+  if (await keyringStore.loadHead(docId)) {
+    throw new Error('tree already present locally — use open, not restore');
+  }
+  const { revisions } = await transport.readKeyring(docId, 1);
+  if (!revisions || revisions.length === 0) throw new Error('no remote keyring to restore');
+
+  let head;
+  let retained = [];
+  if (engine === 'chain') {
+    const genesis = wasm.unwrapChainKeyring(revisions[0].bytes);
+    const walk = wasm.verifyKeyringWalk(
+      treeId,
+      frameHops(revisions.map((revision) => revision.bytes)),
+      1,
+      wasm.keyringHash(genesis),
+    );
+    try {
+      retained = unframe(walk.bodiesFramed);
+      if (retained.length !== walk.revision) {
+        throw new Error('verified keyring walk returned a mismatched revision count');
+      }
+      head = walk.headKeyring;
+    } finally {
+      walk.free?.();
+    }
+  } else if (engine === 'dag') {
+    head = wasm.unwrapDagKeyring(revisions[revisions.length - 1].bytes);
+  } else {
+    throw new Error(`unknown keyring engine: ${engine}`);
+  }
+
+  const opened = await openOwner(engine, head);
+  try {
+    for (let index = 0; index < retained.length; index += 1) {
+      await keyringStore.save(docId, index + 1, retained[index]);
+    }
+    await persistWatermark(opened.watermark);
+    await keyringStore.saveHead(docId, engine, head);
+  } catch (error) {
+    freeOpened(opened);
+    throw error;
+  }
+  return { opened, revision: retained.length };
+}
+
 function bytesEqual(a, b) {
   if (!a || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
@@ -288,7 +344,12 @@ export async function publishDagAnchor(deps, { docId, treeId }) {
   const { wasm, transport, keyringStore } = deps;
   const head = await keyringStore.loadHead(docId);
   if (!head || (head.engine || 'dag') !== 'dag') return { head: 0 };
-  const serverHead = (await transport.readKeyring(docId, 1)).head ?? 0;
+  const remote = await transport.readKeyring(docId, 1);
+  const served = remote.revisions?.at(-1)?.bytes;
+  if (served && bytesEqual(wasm.unwrapDagKeyring(served), head.bytes)) {
+    return { head: remote.head ?? remote.revisions.length };
+  }
+  const serverHead = remote.head ?? 0;
   const revision = serverHead + 1;
   await transport.putKeyring(docId, wasm.wrapDagKeyringUpdate(head.bytes, treeId, revision));
   return { head: revision };

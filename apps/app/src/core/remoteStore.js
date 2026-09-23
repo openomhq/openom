@@ -94,10 +94,12 @@ export class RemoteStore {
    *   construction) so the long-lived publishKeyring / summary closures that hold this store
    *   keep working across token expiry — caching + refresh live BEHIND the seam.
    */
-  constructor({ baseUrl, fetch = globalThis.fetch, auth = null }) {
+  constructor({ baseUrl, fetch = null, auth = null }) {
     if (!baseUrl) throw new Error('RemoteStore needs a baseUrl');
     this.#baseUrl = baseUrl.replace(/\/$/, '');
-    this.#fetch = fetch;
+    // Window.fetch requires its Window receiver in some browsers. Binding only the default preserves
+    // injected test/server functions exactly while keeping the production browser path callable.
+    this.#fetch = fetch ?? globalThis.fetch.bind(globalThis);
     // Normalize the seam to a `getAccessToken(opts) => Promise<string>` (or null for no-auth).
     if (typeof auth === 'function') this.#getAccessToken = auth;
     else if (auth && typeof auth.getAccessToken === 'function') this.#getAccessToken = (o) => auth.getAccessToken(o);
@@ -287,10 +289,11 @@ export class RemoteStore {
 
   /**
    * Publish a produced keyring revision so peers can pull + verify it. `updateBytes` is the RAW
-   * `KeyringUpdate` protobuf (from the vault's `wrapChainKeyringUpdate`) — sent as opaque binary; the
+   * `KeyringUpdate` protobuf (from the vault's chain-revision or DAG-anchor wrapper) — sent as opaque binary; the
    * server `KeyringUpdate::decode`s it, dispatches to the engine verifier, and admits. The server keys
-   * storage on the VERIFIED position, so this needs no CAS token: a stale/forked candidate is rejected as
-   * a 409 (ConflictError → the caller pulls the newer head, re-produces, retries). Returns the server's
+   * chain storage on the verified revision; DAG's outer slot is constrained to exactly server-head + 1
+   * under the tree lock. A stale/forked candidate is rejected as a 409 (ConflictError → the caller pulls
+   * the newer head, re-produces, retries). Returns the server's
    * accepted `{ revision }`.
    */
   async putKeyring(id, updateBytes) {

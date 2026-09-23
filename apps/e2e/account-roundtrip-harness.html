@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>openom account round-trip harness</title></head>
+<body>
+  <output id="status">booting</output>
+  <script type="module">
+    import * as Comlink from '../app/src/vendor/comlink.js';
+    import { composeAccountSession } from '../app/src/core/accountComposition.js';
+    import { appCoreWorker, remoteTransport } from '../app/src/core/appCoreClient.js';
+    import { RemoteStore } from '../app/src/core/remoteStore.js';
+    import { TreeLibrary } from '../app/src/core/library.js';
+    import { ensureTreeIdentity } from '../app/src/core/treeId.js';
+
+    class FixedDevAuth {
+      #subject = null;
+      #subscribers = new Set();
+
+      subject() { return this.#subject; }
+      async getAccessToken() {
+        if (!this.#subject) throw new Error('test provider is signed out');
+        return this.#subject;
+      }
+      async registrationAttempt() {
+        const accessToken = await this.getAccessToken();
+        return { accessToken, issuer: '', subject: this.#subject };
+      }
+      onChange(callback) {
+        this.#subscribers.add(callback);
+        return () => this.#subscribers.delete(callback);
+      }
+      capabilities() { return { canRegister: true, canLogin: true, sync: true }; }
+      signIn(subject) {
+        this.#subject = subject;
+        for (const callback of this.#subscribers) callback();
+      }
+      dispose() { this.#subscribers.clear(); }
+    }
+
+    const serverUrl = new URL(location.href).searchParams.get('server') ?? 'http://localhost:6060';
+    const worker = appCoreWorker();
+    await worker.warm();
+    let provider;
+    const composition = await composeAccountSession(worker, {
+      createAuth: () => (provider = new FixedDevAuth()),
+      createRemote: (auth) => new RemoteStore({ baseUrl: serverUrl, auth }),
+    });
+    const { account, remote } = composition;
+
+    async function attachTree(docId) {
+      await worker.attachTransport(docId, Comlink.proxy(remoteTransport(remote)));
+    }
+
+    async function requireSync(docId) {
+      const result = await worker.syncNow(docId);
+      if (result?.state !== 'ok') {
+        throw new Error(`tree sync failed: ${JSON.stringify(result)}`);
+      }
+    }
+
+    window.accountAcceptance = {
+      async createAndBackup({ passphrase, engine, given }) {
+        const created = await account.createAccount(passphrase);
+        provider.signIn(created.memberId);
+        await account.enableSync();
+
+        const identity = await ensureTreeIdentity(created.memberId);
+        const provisioned = await worker.provisionTree({
+          treeId: identity.bytes,
+          docId: identity.uuid,
+          engine,
+        });
+        await attachTree(identity.uuid);
+        const tree = await new TreeLibrary(worker).open(identity.uuid, provisioned.didKey);
+        await tree.createPerson({ given, surname: `${engine}-restored` });
+        await requireSync(identity.uuid);
+
+        return {
+          memberId: created.memberId,
+          treeId: [...identity.bytes],
+          docId: identity.uuid,
+          personName: `${given} ${engine}-restored`,
+          accountState: {
+            auth: account.state().auth,
+            binding: account.state().binding,
+            pending: [...account.state().pending],
+          },
+        };
+      },
+
+      async restoreAndOpen({ subject, passphrase, engine, treeId, docId }) {
+        provider.signIn(subject);
+        const restored = await account.restore({ passphrase });
+        await attachTree(docId);
+        await worker.restoreTree({ treeId: new Uint8Array(treeId), docId, engine });
+        await requireSync(docId);
+        const tree = await new TreeLibrary(worker).open(docId);
+        return {
+          memberId: restored.memberId,
+          people: tree.allPeople().map((person) => `${person.given} ${person.surname}`.trim()),
+          accountState: {
+            auth: account.state().auth,
+            binding: account.state().binding,
+            pending: [...account.state().pending],
+          },
+        };
+      },
+    };
+    document.querySelector('#status').textContent = 'ready';
+  </script>
+</body>
+</html>

@@ -3,8 +3,11 @@
 // Adversarially covers: walk-derived retention (never the server's label), fail-closed ordering (a walk / pin
 // / account unlock failure persists NOTHING), handle-free on a post-unlock store failure, the already-present
 // guard, and the fingerprint cross-check.
-import { describe, it, expect } from 'vitest';
-import { joinAsMember, publishKeyring, syncKeyring, frameHops, unframe, JoinError, KeyringForkError } from '../app/src/core/sharing.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  joinAsMember, publishDagAnchor, publishKeyring, restoreOwnerTree, syncKeyring,
+  frameHops, unframe, JoinError, KeyringForkError,
+} from '../app/src/core/sharing.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 
 const treeId = new Uint8Array(16).fill(0xaa);
@@ -129,6 +132,67 @@ describe('joinAsMember wiring', () => {
   });
 });
 
+describe('restoreOwnerTree wiring', () => {
+  it('verifies and opens a chain walk before committing its retained keyrings and head', async () => {
+    const calls = [];
+    const keyringStore = memoryKeyringStore();
+    const originalSave = keyringStore.save.bind(keyringStore);
+    const originalSaveHead = keyringStore.saveHead.bind(keyringStore);
+    keyringStore.save = async (...args) => { calls.push(`save:${args[1]}`); return originalSave(...args); };
+    keyringStore.saveHead = async (...args) => { calls.push('head'); return originalSaveHead(...args); };
+    const opened = { watermark: new Uint8Array([7]), free() {} };
+    const wasm = {
+      unwrapChainKeyring: (bytes) => bytes,
+      keyringHash: () => new Uint8Array(32).fill(4),
+      verifyKeyringWalk: () => ({
+        revision: 2, headKeyring: REV2, bodiesFramed: frameHops([REV1, REV2]), free() {},
+      }),
+    };
+
+    const restored = await restoreOwnerTree({
+      wasm,
+      transport: transport(revs),
+      keyringStore,
+      openOwner: async () => { calls.push('open'); return opened; },
+      persistWatermark: async () => { calls.push('watermark'); },
+    }, { treeId, docId: 'k1', engine: 'chain' });
+
+    expect(restored).toEqual({ opened, revision: 2 });
+    expect(calls).toEqual(['open', 'save:1', 'save:2', 'watermark', 'head']);
+    expect([...(await keyringStore.at('k1', 1))]).toEqual([...REV1]);
+    expect((await keyringStore.loadHead('k1')).engine).toBe('chain');
+  });
+
+  it('persists nothing when account-bound owner open rejects the remote head', async () => {
+    const keyringStore = memoryKeyringStore();
+    await expect(restoreOwnerTree({
+      wasm: {
+        unwrapDagKeyring: (bytes) => bytes,
+      },
+      transport: transport([{ revision: 1, bytes: REV1 }]),
+      keyringStore,
+      openOwner: async () => { throw new Error('remote founder does not match account'); },
+      persistWatermark: async () => {},
+    }, { treeId, docId: 'k1', engine: 'dag' })).rejects.toThrow(/does not match/);
+    expect(await keyringStore.loadHead('k1')).toBeNull();
+  });
+
+  it('frees the opened owner core when the head commit fails', async () => {
+    const keyringStore = memoryKeyringStore();
+    keyringStore.saveHead = async () => { throw new Error('head store down'); };
+    const opened = { watermark: new Uint8Array([7]), free: vi.fn() };
+    await expect(restoreOwnerTree({
+      wasm: { unwrapDagKeyring: (bytes) => bytes },
+      transport: transport([{ revision: 1, bytes: REV1 }]),
+      keyringStore,
+      openOwner: async () => opened,
+      persistWatermark: async () => {},
+    }, { treeId, docId: 'k1', engine: 'dag' })).rejects.toThrow(/head store down/);
+    expect(opened.free).toHaveBeenCalledTimes(1);
+    expect(await keyringStore.loadHead('k1')).toBeNull();
+  });
+});
+
 // A publish transport that records PUTs and reports a server head; putKeyring throws a ConflictError when the
 // revision is already present, mimicking the server's 409.
 function publishTransport(serverHead = 0, presentBytes = {}) {
@@ -188,6 +252,28 @@ describe('publishKeyring wiring', () => {
     await expect(
       publishKeyring({ wasm: wrapWasm, transport, keyringStore }, { docId: 'k1' }),
     ).rejects.toBeInstanceOf(KeyringForkError);
+  });
+});
+
+describe('publishDagAnchor wiring', () => {
+  it('does not append another server revision when the exact anchor already landed', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.saveHead('k1', 'dag', REV2);
+    const transport = {
+      readKeyring: async () => ({ revisions: [{ revision: 3, bytes: REV2 }], head: 3 }),
+      putKeyring: vi.fn(),
+    };
+    const result = await publishDagAnchor({
+      wasm: {
+        unwrapDagKeyring: (bytes) => bytes,
+        wrapDagKeyringUpdate: vi.fn(),
+      },
+      transport,
+      keyringStore,
+    }, { docId: 'k1', treeId });
+
+    expect(result).toEqual({ head: 3 });
+    expect(transport.putKeyring).not.toHaveBeenCalled();
   });
 });
 

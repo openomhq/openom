@@ -4,8 +4,8 @@ import * as Comlink from './vendor/comlink.js';
 import { createLockPolicy } from './core/lockPolicy.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
-import { SessionController, DevAuth } from './core/session.js';
-import { AccountSession } from './core/accountSession.js';
+import { DevAuth } from './core/session.js';
+import { composeAccountSession } from './core/accountComposition.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
 import {
@@ -112,6 +112,9 @@ class App {
   remote = null;
   sync = null;
   syncStatus = null;
+  accountAuthState = 'signedOut';
+  unsubscribeAccount = null;
+  accountComposition = null;
   // The active real (lockable) sealer session, or null at the gate / in the demo. Auto-lock
   // and "Lock now" act on this; the demo never sets it (there'd be no keyring to re-unlock).
   sealer = null;
@@ -131,14 +134,16 @@ class App {
   }
 
   async bindAccountSession() {
-    this.auth?.dispose?.();
-    this.account?.dispose?.();
-    this.account = new AccountSession(this.worker);
-    await this.account.initialize();
-    this.auth = new SessionController(new DevAuth(this.account));
-    this.remote = this.serverUrl ? new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth }) : null;
-    this.account.attachSync({ auth: this.auth, remote: this.remote });
-    this.auth.onChange(() => this.onAuthChange());
+    this.unsubscribeAccount?.();
+    this.unsubscribeAccount = null;
+    this.accountComposition?.dispose();
+    this.accountComposition = await composeAccountSession(this.worker, {
+      createAuth: (account) => new DevAuth(account),
+      createRemote: (auth) => (this.serverUrl ? new RemoteStore({ baseUrl: this.serverUrl, auth }) : null),
+    });
+    ({ account: this.account, auth: this.auth, remote: this.remote } = this.accountComposition);
+    this.accountAuthState = this.account.state().auth;
+    this.unsubscribeAccount = this.account.onChange((state) => this.onAccountStateChange(state));
   }
 
   async boot() {
@@ -197,10 +202,14 @@ class App {
     return id;
   }
 
-  // Provider auth changes affect only remote connectivity. The local unlocked account remains usable offline.
-  onAuthChange() {
-    this.stopSync();
-    if (this.lockable && this.tree && this.auth.subject()) this.startSync();
+  // Facade auth changes affect only remote connectivity. The local unlocked account remains usable offline.
+  // Other account-state changes only re-render; `main.js` never interprets provider subjects or binding state.
+  onAccountStateChange(state) {
+    if (state.auth !== this.accountAuthState) {
+      this.accountAuthState = state.auth;
+      this.stopSync();
+      if (this.lockable && this.tree && state.auth === 'signedIn') this.startSync();
+    }
     this.render();
   }
 
@@ -454,7 +463,7 @@ class App {
   // A RemoteStore for the active backend+provider session, or null when local-only. Built on demand (stateless, per-request
   // auth), exactly like startSync's.
   #membershipRemote() {
-    if (!this.serverUrl || !this.auth.subject()) return null;
+    if (!this.serverUrl || this.account.state().auth !== 'signedIn') return null;
     return this.remote;
   }
 
@@ -559,7 +568,7 @@ class App {
   startSync() {
     this.stopSync();
     if (!this.lockable || !this.tree || !this.realDoc) return; // only the real, lockable tree syncs
-    if (!this.serverUrl || !this.auth.subject()) return; // no backend / no provider session → local-only
+    if (!this.serverUrl || this.account.state().auth !== 'signedIn') return; // no backend / provider session → local-only
     try {
       const remote = this.remote;
       // The worker calls the transport across Comlink; auth + serverUrl stay on the main thread.

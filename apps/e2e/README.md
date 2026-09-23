@@ -1,12 +1,13 @@
 # apps/e2e
 > one-line: the Playwright browser e2e suite
 **Status:** built · test harness · (no design ref)
-**Last updated:** 2026-08-25
+**Last updated:** 2026-09-23
 
 ## Run
 One-time: `cd apps && pnpm install --ignore-scripts && pnpm exec playwright install chromium`
-Then, from `apps/`: `pnpm test:e2e` (default — excludes `@integration`) or `pnpm test:e2e:full`
-(everything). Playwright starts `scripts/serve.mjs` itself; see `apps/playwright.config.js`.
+Then, from `apps/`: `pnpm test:e2e` (default — excludes `@integration`), `pnpm test:e2e:full`
+(everything), or `pnpm test:e2e:account` for the Docker-backed account acceptance. Playwright starts
+`scripts/serve.mjs` itself; the account runner also starts the real local server stack and waits for `/ready`.
 
 ```sh
 cd apps
@@ -30,9 +31,16 @@ pnpm test:e2e
 - `smoke.e2e.ts` (`@integration`, `test:e2e:full` only) — boots the whole app: welcome/demo gate,
   create → recovery code → onboarding → reload/unlock, change-passphrase, lock-now, and
   forgot-passphrase recovery.
+- `account-roundtrip.e2e.ts` + `account-roundtrip-harness.html` (`@integration`, dedicated
+  `test:e2e:account`) — uses the production account facade, worker, remote store, and tree projection
+  against the Docker server. Two isolated browser contexts prove register → backup → fresh-device restore
+  → same durable member ID → decrypted tree reopen for both chain and DAG. Its fixed dev-auth subject exists
+  only in the harness so the empty second context can authenticate before restoring custody; normal local
+  development continues to use production `DevAuth`.
 
 ## Conventions
 `.e2e.ts` = Playwright browser test (vitest only matches `*.test`/`*.spec`, so these are
 invisible to it). Specs live in `./e2e`; a matching `*-harness.html` loads just the WASM/worker
-under test with no app shell. Tests tagged `@integration` boot the full app and are excluded
-from the default `test:e2e` run.
+under test with no app shell. Tests tagged `@integration` are excluded from the default `test:e2e` run;
+most boot the full app, while the account round-trip intentionally uses a production-module harness to
+control two independent auth/storage contexts.

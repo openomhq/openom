@@ -7,7 +7,7 @@
 (the module-level `§`-refs — SERVER-DATA-FORMAT, the launch-gate design — live inline in the
 `core/` files they govern, not in one apps/app-level doc)
 
-**Last updated:** 2026-09-22
+**Last updated:** 2026-09-23
 
 ## Run / verify
 
@@ -69,8 +69,11 @@ live handle. Committed revisions cross tabs through `BroadcastChannel`; a peer d
 handles when their exact source blob is stale. Persistent-browser-storage requests are best-effort; only a
 confirmed remote backup supplies a redundant identity copy. A passphrase re-wrap commits `backup` intent, while
 local recovery or account-root rotation commits stronger `revoke` intent; neither can be downgraded before network
-I/O, and acknowledgement compare-clears only the exact uploaded blob version. `AccountSession` composes with provider auth and
-the account transport only after all three exist; its observable auth, custody, and binding axes remain independent.
+I/O, and acknowledgement compare-clears only the exact uploaded blob version. `accountComposition.js` is the
+production composition root: it initializes the sole `AccountSession`, wraps provider auth, constructs the
+account transport, and attaches them before exposing the unit. `main.js` observes only facade state/events and
+never interprets provider subjects or constructs a competing lifecycle. The facade's observable auth, custody,
+and binding axes remain independent.
 It probes `/me` before every binding decision, signs the exact pinned token claims for registration, and resumes an
 interrupted register-then-backup flow from durable binding/pending state. Account backup writes use the server's strong
 `ETag` with `If-Match`; reconciliation stays machine-readable in facade state and never silently adopts remote custody.
@@ -80,7 +83,10 @@ their durable pending state after upload failure, and coalesce retries through a
 initialization, auth changes, online or visible wakes, and tree-sync ticks without repeating credential rotation.
 Owned and joined trees both borrow that account handle;
 joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
-from a second persisted member credential. In development, the singleton `DevAuth` observes that account handle
+from a second persisted member credential. A first successful owner sync publishes the signed genesis keyring
+before clearing its durable create marker. On a fresh device, founder-tree restore verifies the complete chain
+walk or DAG anchor, binds it to the restored account, and only then commits the local keyring head and opens the
+tree. In development, the singleton `DevAuth` observes that account handle
 and exposes its durable member ID only as the raw development bearer; it does not own accounts.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
 passphrase, snapshot, verified candidate adoption, revoke credentials, public identity, and registration proof), while
@@ -134,6 +140,7 @@ src/core/              orchestration — no UI, no rendering.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
   accountRecord.js        validates/codecs the portable identity-scoped account record and its three counters.
   accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.
+  accountComposition.js   constructs the sole AccountSession + provider-auth + remote transport unit.
   accountSession.js       observable local/auth/binding facade; probes, registers, and CAS-backs up account custody.
   membership.js, sharing.js   resumable invite/claim orchestration and verified chain/DAG join bootstrap.
   store.js               DocStore contract: opaque-bytes persistence (memory / IndexedDB / Tauri).
