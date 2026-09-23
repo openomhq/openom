@@ -3995,6 +3995,19 @@ mod tests {
             publish.body,
             "the retry payload wraps the native anchor for the requested server slot"
         );
+        let malformed = openom_keyring_api::MembershipEnvelope::wrap(
+            EngineKind::Dag,
+            vec![0xde, 0xad, 0xbe, 0xef],
+        )
+        .encode();
+        assert!(carol_host
+            .sync_dag_anchor("t", &typed_tree_id, &malformed)
+            .is_err());
+        assert_eq!(
+            carol_host.store().load_keyring("t").unwrap().unwrap(),
+            removed.keyring,
+            "a malformed served anchor cannot replace native custody"
+        );
 
         std::fs::remove_dir_all(&dir_o).ok();
         std::fs::remove_dir_all(&dir_b).ok();

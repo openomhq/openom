@@ -97,12 +97,12 @@ initialization, auth changes, online or visible wakes, and tree-sync ticks witho
 Owned and joined trees both borrow that account handle;
 joined-tree reopen selects the founder or admitted-member path from the already-trusted keyring head rather than
 from a second persisted member credential. A first successful owner sync publishes the signed genesis keyring
-before clearing its durable create marker. Every shared-tree web tick then reconciles and republishes a locally
-newer chain tail or DAG anchor before transferring data; a failed membership upload aborts that tick so an
-attributed delta cannot outrun the authorization material needed to verify it. On a fresh device, founder-tree
-restore verifies the complete chain walk or DAG anchor, binds it to the restored account, and only then commits
-the local keyring head and opens the tree. In development, the singleton `DevAuth` observes that account handle
-and exposes its durable member ID only as the raw development bearer; it does not own accounts.
+before clearing its durable create marker. Every shared-tree web or native tick then reconciles and republishes
+a locally newer chain tail or DAG anchor before transferring data; a failed membership upload aborts that tick
+so an attributed delta cannot outrun the authorization material needed to verify it. On a fresh device,
+founder-tree restore verifies the complete chain walk or DAG anchor, binds it to the restored account, and only
+then commits the local keyring head and opens the tree. In development, the singleton `DevAuth` observes that
+account handle and exposes its durable member ID only as the raw development bearer; it does not own accounts.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
 passphrase, snapshot, verified candidate adoption, revoke credentials, public identity, and registration proof), while
 keeping every secret handle in Rust/wasm. Candidate adoption verifies the fetched wrapped bytes before replacing

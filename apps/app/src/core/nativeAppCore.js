@@ -12,9 +12,10 @@
 //    openTree does its import+bootstrap) — a no-op on a fresh provision.
 //
 // STATUS: the local-first lifecycle (provision/unlock/recover/change-passphrase + all claim edits + reads +
-// membership) is complete and matches the command surface. The sync path (attachTransport/syncNow) is a
-// best-effort port of the worker tick and is the runtime-iteration target — it is only reached when a managed
-// backend is configured (startSync() early-returns local-only), so it never blocks the local flow.
+// membership) is complete and matches the command surface. The sync path reconciles chain and DAG membership
+// before data transfer, while the broader native transport remains a runtime-iteration target. It is only
+// reached when a managed backend is configured (startSync() early-returns local-only), so it never blocks the
+// local flow.
 
 import { makeError, normalizeUnknown } from './errorModel.js';
 import { frameHops } from './sharing.js';
@@ -104,11 +105,6 @@ const lstore = () => { try { return globalThis.localStorage ?? null; } catch { r
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-/** @param {unknown} error @param {string} code @returns {error is Record<string, unknown>} */
-function hasErrorCode(error, code) {
-  return isRecord(error) && error.code === code;
 }
 
 /** @param {unknown} error */
@@ -207,6 +203,8 @@ export function createNativeAppCore() {
   const treeKeys = new Map();
   /** @type {Map<DocId, TreeId>} */
   const treeIds = new Map(); // doc → the RAW 16 tree-id bytes (keyring-before-data needs them, not just the hex key)
+  /** @type {Map<DocId, KeyringEngine>} */
+  const treeEngines = new Map();
   /** @type {Map<DocId, boolean>} */
   const syncing = new Map();
   /** @type {Set<DocId>} */
@@ -217,6 +215,14 @@ export function createNativeAppCore() {
   const remember = (docId, treeId) => {
     treeKeys.set(docId, hexKey(treeId));
     treeIds.set(docId, treeId);
+  };
+  /** @param {DocId} docId @returns {Promise<KeyringEngine>} */
+  const engineFor = async (docId) => {
+    const known = treeEngines.get(docId);
+    if (known) return known;
+    const material = await call('core_invite_material', { doc: docId });
+    treeEngines.set(docId, material.engine);
+    return material.engine;
   };
 
   // The create-tree marker, localStorage-backed with an in-memory fallback so create-tree is never silently
@@ -298,6 +304,92 @@ export function createNativeAppCore() {
     }
   }
 
+  // Publish the current native DAG anchor. A competing writer can win the target server slot between our read
+  // and PUT; on 409, re-read and let RUST classify/adopt that anchor before retrying. A matching/adopted latest
+  // anchor means the server already covers our custody; only `localAhead` emits another revision.
+  /** @param {DocId} docId @param {TreeId} treeId */
+  async function publishDagAnchor(docId, treeId) {
+    const transport = transports.get(docId);
+    if (!transport) return;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const walk = await transport.readKeyring(treeUuid(docId), keyringRevision(1));
+      const latest = walk.revisions?.at(-1);
+      if (latest) {
+        const outcome = await call('core_sync_dag_anchor', {
+          doc: docId, treeId: bytes(treeId), anchor: bytes(latest.bytes),
+        });
+        if (outcome !== 'localAhead') return;
+      }
+      const revision = keyringRevision((walk.head ?? 0) + 1);
+      const { update } = await call('core_dag_keyring_publish_payload', {
+        doc: docId, treeId: bytes(treeId), revision,
+      });
+      try {
+        await transport.putKeyring(treeUuid(docId), update);
+        return;
+      } catch (error) {
+        if (!isConflictError(error)) throw error;
+      }
+    }
+    throw makeError('keyring_verify_failed', { cause: 'DAG keyring publish did not converge after 3 conflicts' });
+  }
+
+  /** @param {DocId} docId @param {TreeId} treeId @returns {Promise<boolean>} */
+  async function reconcileDagMembership(docId, treeId) {
+    const transport = transports.get(docId);
+    if (!transport) return false;
+    const walk = await transport.readKeyring(treeUuid(docId), keyringRevision(1));
+    const latest = walk.revisions?.at(-1);
+    if (!latest) {
+      await publishDagAnchor(docId, treeId);
+      return true;
+    }
+    const outcome = await call('core_sync_dag_anchor', {
+      doc: docId, treeId: bytes(treeId), anchor: bytes(latest.bytes),
+    });
+    if (outcome === 'localAhead') {
+      await publishDagAnchor(docId, treeId);
+      return true;
+    }
+    return false;
+  }
+
+  /** @param {DocId} docId @param {TreeId} treeId @returns {Promise<boolean>} */
+  async function reconcileChainMembership(docId, treeId) {
+    const transport = transports.get(docId);
+    if (!transport) return false;
+    const localHead = await call('core_keyring_head', { doc: docId });
+    const walk = await transport.readKeyring(treeUuid(docId), keyringRevision(localHead + 1));
+    const serverHead = walk.head ?? 0;
+    const successors = (walk.revisions ?? []).filter((revision) => revision.revision > localHead);
+    if (successors.length) {
+      await call('core_sync_keyring', {
+        doc: docId, treeId: bytes(treeId), hops: bytes(frameHops(successors.map((revision) => revision.bytes))),
+      });
+      return false;
+    }
+    if (localHead > serverHead) {
+      await publishKeyringTail(docId);
+      return true;
+    }
+    return false;
+  }
+
+  /** @param {DocId} docId @param {TreeId} treeId @returns {Promise<boolean>} */
+  async function reconcileMembership(docId, treeId) {
+    return await engineFor(docId) === 'dag'
+      ? reconcileDagMembership(docId, treeId)
+      : reconcileChainMembership(docId, treeId);
+  }
+
+  /** @param {DocId} docId */
+  async function publishMembershipChannel(docId) {
+    const treeId = treeIds.get(docId);
+    if (!treeId) return;
+    if (await engineFor(docId) === 'dag') await publishDagAnchor(docId, treeId);
+    else await publishKeyringTail(docId);
+  }
+
   // Assert the advisory /access summary under the server's CAS on `generation` (getAccess → PUT → retry-on-409),
   // via the SAME shared helper the web worker uses (membershipSummary.js) — not the naive no-generation PUT that
   // 409s on every push after the first.
@@ -318,8 +410,8 @@ export function createNativeAppCore() {
     const transport = transports.get(docId);
     if (!transport) return; // local-only: nothing to publish
     try {
-      if (advisoryFirst) { await pushAdvisory(docId); await publishKeyringTail(docId); }
-      else { await publishKeyringTail(docId); await pushAdvisory(docId); }
+      if (advisoryFirst) { await pushAdvisory(docId); await publishMembershipChannel(docId); }
+      else { await publishMembershipChannel(docId); await pushAdvisory(docId); }
     } catch (err) {
       // The local keyring change stands (native custody is authoritative); the sync tick re-derives it from
       // local-head > server-head and retries — no durable flag needed.
@@ -399,6 +491,7 @@ export function createNativeAppCore() {
       transports.delete(docId);
       treeKeys.delete(docId);
       treeIds.delete(docId);
+      treeEngines.delete(docId);
       treeEnsured.delete(docId);
       reportedFrontier.delete(docId);
       return call('core_close', { doc: docId });
@@ -631,6 +724,7 @@ export function createNativeAppCore() {
             /** @type {unknown} */ (pin)
           )),
         });
+        treeEngines.set(docId, 'dag');
         await call('core_bootstrap', { doc: docId });
         return out;
       }
@@ -653,21 +747,23 @@ export function createNativeAppCore() {
       const out = await call('core_join_as_member', {
         doc: docId, treeId: bytes(treeId), hops: bytes(hops), pinnedRevision, pinnedHash: bytes(pinnedHash),
       });
+      treeEngines.set(docId, 'chain');
       await call('core_bootstrap', { doc: docId });
       return out;
     },
     async syncKeyring(docId, treeId) {
       const transport = transports.get(docId);
       if (!transport) return { changed: false };
-      let localHead;
-      try {
-        localHead = await call('core_keyring_head', { doc: docId });
-      } catch (err) {
-        if (hasErrorCode(err, 'internal') && String(err.cause).includes('chain-only')) {
-          return { changed: false };
-        }
-        throw err;
+      if (await engineFor(docId) === 'dag') {
+        const walk = await transport.readKeyring(treeUuid(docId), keyringRevision(1));
+        const latest = walk.revisions?.at(-1);
+        if (!latest) return { changed: false };
+        const outcome = await call('core_sync_dag_anchor', {
+          doc: docId, treeId: bytes(treeId), anchor: bytes(latest.bytes),
+        });
+        return { changed: outcome === 'adopted' };
       }
+      const localHead = await call('core_keyring_head', { doc: docId });
       const walk = await transport.readKeyring(
         treeUuid(docId),
         keyringRevision(localHead + 1),
@@ -690,11 +786,8 @@ export function createNativeAppCore() {
     // back and PUT it (the snapshot carries the covered GC header). Single-flight; failures degrade to
     // {state:'error'} (the driver treats that as offline), never a crash.
     //
-    // The tick keeps the keyring in sync BEFORE folding data (chain): if the server is ahead it adopts the
-    // successors (so arrivals verify against the current membership); if this device is ahead it republishes the
-    // missing tail + advisory — both derived from local-head vs server-head in one readKeyring, no marker. So a
-    // shared tree's members adopt rotations AND an owner's first-share / retried publish converge on sync, like
-    // the web. (Dag adoption on the tick is the anchor-merge path, not wired — a dag keyring call rejects, caught.)
+    // The tick reconciles membership BEFORE folding data on both engines: it adopts a verified newer remote or
+    // republishes locally-newer custody. A required keyring publication is a hard gate for the data channel.
     async syncNow(docId, compactK = 8) {
       const transport = transports.get(docId);
       const treeKey = treeKeys.get(docId);
@@ -715,37 +808,14 @@ export function createNativeAppCore() {
           }
           treeEnsured.add(docId);
         }
-        // KEYRING sync, derived from local-head vs server-head in ONE readKeyring (chain only — a dag call
-        // rejects, caught below). If the server is AHEAD: adopt its successors BEFORE folding data, so a shared
-        // tree's arrivals verify against the CURRENT membership (keyring-before-data). If WE are ahead (a produced
-        // revision the server hasn't seen — a first share, or an earlier publish that failed): republish the tail
-        // + advisory. Best-effort — a network error / dag never fails the data tick; a host VERIFICATION refusal
-        // does surface (below). A solo, in-sync tree no-ops.
-        try {
-          const treeId = treeIds.get(docId);
-          if (treeId) {
-            const localHead = await call('core_keyring_head', { doc: docId });
-            const walk = await transport.readKeyring(
-              treeUuid(docId),
-              keyringRevision(localHead + 1),
-            );
-            const serverHead = walk.head ?? 0;
-            const successors = (walk.revisions ?? []).filter((r) => r.revision > localHead);
-            if (successors.length) {
-              await call('core_sync_keyring', {
-                doc: docId, treeId: bytes(treeId), hops: bytes(frameHops(successors.map((s) => s.bytes))),
-              });
-            } else if (localHead > serverHead) {
-              await publishAfterMembership(docId, false); // keyring-first; publishAfterMembership swallows its own errors
+        const treeId = treeIds.get(docId);
+        if (treeId) {
+          const published = await reconcileMembership(docId, treeId);
+          if (published) {
+            try { await pushAdvisory(docId); } catch (error) {
+              console.warn('[openom] native membership advisory (best-effort)', error);
             }
           }
-        } catch (err) {
-          // A host VERIFICATION refusal (a forked / rolled-back / rogue-signer server run) must SURFACE — folding
-          // data against a stale membership is exactly what keyring-before-data prevents — so re-throw and let the
-          // tick report {state:'error'}. A network error, or the dag engine (keyring_head / core_sync_keyring
-          // reject dag), is benign — swallow and proceed.
-          if (hasErrorCode(err, 'keyring_verify_failed') || hasErrorCode(err, 'revision_rollback')) throw err;
-          console.warn('[openom] native keyring-before-data (best-effort)', err);
         }
         const localPrefix = `${docId}/`;
         const remotePrefix = /** @type {RemoteTreeKey} */ (`${treeKey}/`);

@@ -632,6 +632,9 @@ pub fn accept_remote_dag_anchor(
 /// # Errors
 /// Returns [`VaultError`] if either anchor is malformed or cannot be replayed.
 pub fn dag_anchor_covers(local: &[u8], candidate: &[u8]) -> Result<bool, VaultError> {
+    // `watermark` alone only decodes op ids; replay first so malformed DTOs, signatures, and engine actions
+    // cannot be mislabeled as a harmless stale server response.
+    dag_client::resolve(candidate).map_err(|e| err(e.to_string()))?;
     let candidate_floor = dag_client::watermark(candidate).map_err(|e| err(e.to_string()))?;
     match dag_client::check_floor(local, &candidate_floor) {
         Ok(()) => Ok(true),
