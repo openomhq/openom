@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>openom durable identity acceptance harness</title></head>
+<body>
+  <output id="status">booting</output>
+  <script type="module">
+    import * as Comlink from '../app/src/vendor/comlink.js';
+    import { composeAccountSession } from '../app/src/core/accountComposition.js';
+    import { appCoreWorker, remoteTransport } from '../app/src/core/appCoreClient.js';
+    import { RemoteStore } from '../app/src/core/remoteStore.js';
+    import { TreeLibrary } from '../app/src/core/library.js';
+    import { ensureTreeIdentity } from '../app/src/core/treeId.js';
+
+    class FixedJwtAuth {
+      #attempt = null;
+      #subscribers = new Set();
+
+      subject() { return this.#attempt?.subject ?? null; }
+      async getAccessToken() {
+        if (!this.#attempt) throw new Error('test provider is signed out');
+        return this.#attempt.accessToken;
+      }
+      async registrationAttempt() {
+        if (!this.#attempt) throw new Error('test provider is signed out');
+        return { ...this.#attempt };
+      }
+      onChange(callback) {
+        this.#subscribers.add(callback);
+        return () => this.#subscribers.delete(callback);
+      }
+      capabilities() { return { canRegister: false, canLogin: true, sync: true }; }
+      signIn(attempt) {
+        this.#attempt = { ...attempt };
+        for (const callback of this.#subscribers) callback();
+      }
+      dispose() { this.#subscribers.clear(); }
+    }
+
+    const serverUrl = new URL(location.href).searchParams.get('server') ?? 'http://localhost:6061';
+    const worker = appCoreWorker();
+    await worker.warm();
+    let provider;
+    const composition = await composeAccountSession(worker, {
+      createAuth: () => (provider = new FixedJwtAuth()),
+      createRemote: (auth) => new RemoteStore({ baseUrl: serverUrl, auth }),
+    });
+    const { account, remote } = composition;
+
+    async function attachTree(docId) {
+      await worker.attachTransport(docId, Comlink.proxy(remoteTransport(remote)));
+    }
+
+    async function requireSync(docId) {
+      const result = await worker.syncNow(docId);
+      if (result?.state !== 'ok') throw new Error(`tree sync failed: ${JSON.stringify(result)}`);
+    }
+
+    function accountState() {
+      const state = account.state();
+      return { auth: state.auth, binding: state.binding, pending: [...state.pending] };
+    }
+
+    async function people(docId, createdBy) {
+      const tree = await new TreeLibrary(worker).open(docId, createdBy);
+      return tree.allPeople().map((person) => `${person.given} ${person.surname}`.trim());
+    }
+
+    window.durableIdentityAcceptance = {
+      async signUpFirst({ auth, passphrase, given }) {
+        const created = await account.createAccount(passphrase);
+        const identity = await ensureTreeIdentity(created.memberId);
+        const hadTreeBeforeRegister = await worker.hasKeyring(identity.uuid);
+        provider.signIn(auth);
+        await account.enableSync();
+        const hadTreeAfterRegister = await worker.hasKeyring(identity.uuid);
+        const registeredState = accountState();
+
+        const provisioned = await worker.provisionTree({
+          treeId: identity.bytes,
+          docId: identity.uuid,
+          engine: 'dag',
+        });
+        await attachTree(identity.uuid);
+        const tree = await new TreeLibrary(worker).open(identity.uuid, provisioned.didKey);
+        await tree.createPerson({ given, surname: 'signup-first' });
+        await requireSync(identity.uuid);
+
+        return {
+          memberId: created.memberId,
+          ownerMemberId: provisioned.memberId,
+          authSubject: auth.subject,
+          hadTreeBeforeRegister,
+          hadTreeAfterRegister,
+          registeredState,
+          syncedState: accountState(),
+          people: await people(identity.uuid, provisioned.didKey),
+        };
+      },
+
+      async localFirstThenSignUpAndRotate({ auth, passphrase, changedPassphrase, recoveredPassphrase, given }) {
+        const created = await account.createAccount(passphrase);
+        const identity = await ensureTreeIdentity(created.memberId);
+        const provisioned = await worker.provisionTree({
+          treeId: identity.bytes,
+          docId: identity.uuid,
+          engine: 'dag',
+        });
+        const tree = await new TreeLibrary(worker).open(identity.uuid, provisioned.didKey);
+        await tree.createPerson({ given, surname: 'local-first' });
+        const pinBeforeSignUp = [...await worker.dagAnchorPin(identity.uuid)];
+
+        provider.signIn(auth);
+        await account.enableSync();
+        const identityAfterSignUp = await account.publicIdentity();
+        const pinAfterSignUp = [...await worker.dagAnchorPin(identity.uuid)];
+        await attachTree(identity.uuid);
+        await requireSync(identity.uuid);
+
+        await account.changePassphrase(passphrase, changedPassphrase);
+        const identityAfterPassphraseChange = await account.publicIdentity();
+        const pinAfterPassphraseChange = [...await worker.dagAnchorPin(identity.uuid)];
+        await account.lock();
+        let oldPassphraseRejected = false;
+        try {
+          await account.unlock(passphrase);
+        } catch {
+          oldPassphraseRejected = true;
+        }
+        await account.unlock(changedPassphrase);
+        const openedAfterPassphraseChange = await worker.openTree({
+          treeId: identity.bytes,
+          docId: identity.uuid,
+          engine: 'dag',
+        });
+
+        await account.lock();
+        const recovered = await account.recover(created.recoveryCode, recoveredPassphrase);
+        const identityAfterRecovery = await account.publicIdentity();
+        const openedAfterRecovery = await worker.openTree({
+          treeId: identity.bytes,
+          docId: identity.uuid,
+          engine: 'dag',
+        });
+        const pinAfterRecovery = [...await worker.dagAnchorPin(identity.uuid)];
+        await attachTree(identity.uuid);
+        await requireSync(identity.uuid);
+
+        return {
+          memberIds: [
+            created.memberId,
+            provisioned.memberId,
+            identityAfterSignUp.memberId,
+            identityAfterPassphraseChange.memberId,
+            identityAfterRecovery.memberId,
+            recovered.memberId,
+          ],
+          didKeys: [
+            provisioned.didKey,
+            openedAfterPassphraseChange.didKey,
+            openedAfterRecovery.didKey,
+          ],
+          pins: [pinBeforeSignUp, pinAfterSignUp, pinAfterPassphraseChange, pinAfterRecovery],
+          authSubject: auth.subject,
+          oldPassphraseRejected,
+          finalState: accountState(),
+          people: await people(identity.uuid, openedAfterRecovery.didKey),
+        };
+      },
+    };
+    document.querySelector('#status').textContent = 'ready';
+  </script>
+</body>
+</html>

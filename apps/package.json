@@ -16,6 +16,7 @@
     "test:e2e": "playwright test --grep-invert @integration",
     "test:e2e:full": "playwright test",
     "test:e2e:account": "node ../scripts/account-acceptance.mjs",
+    "test:e2e:durable-identity": "node ../scripts/durable-identity-acceptance.mjs",
     "typecheck": "node ../scripts/typecheck.mjs",
     "check:locales": "node scripts/check-locales.mjs",
     "serve": "node scripts/serve.mjs",

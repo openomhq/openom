@@ -1,13 +1,15 @@
 # apps/e2e
 > one-line: the Playwright browser e2e suite
 **Status:** built · test harness · (no design ref)
-**Last updated:** 2026-09-23
+**Last updated:** 2026-09-24
 
 ## Run
 One-time: `cd apps && pnpm install --ignore-scripts && pnpm exec playwright install chromium`
 Then, from `apps/`: `pnpm test:e2e` (default — excludes `@integration`), `pnpm test:e2e:full`
 (everything), or `pnpm test:e2e:account` for the Docker-backed account acceptance. Playwright starts
 `scripts/serve.mjs` itself; the account runner also starts the real local server stack and waits for `/ready`.
+Run `pnpm test:e2e:durable-identity` for the OPE-547 DAG acceptance against an ephemeral
+`AUTH=jwt` / HS256 server on port 6061; it leaves the ordinary development server untouched.
 
 ```sh
 cd apps
@@ -39,6 +41,12 @@ pnpm test:e2e
   → same durable member ID → decrypted tree reopen for both chain and DAG. Its fixed dev-auth subject exists
   only in the harness so the empty second context can authenticate before restoring custody; normal local
   development continues to use production `DevAuth`.
+- `durable-identity.e2e.ts` + `durable-identity-harness.html` (`@integration`, dedicated
+  `test:e2e:durable-identity`) — runs the DAG engine against a Docker server in real `AUTH=jwt` mode with
+  self-minted HS256 tokens whose provider subject deliberately differs from the durable member ID. It proves
+  both onboarding orders (register before the first tree, or register after an offline local tree), verifies
+  the latter does not change the owner or DAG anchor, and checks passphrase change and recovery preserve the
+  identity, keyring, and tree contents.
 
 ## Conventions
 `.e2e.ts` = Playwright browser test (vitest only matches `*.test`/`*.spec`, so these are
