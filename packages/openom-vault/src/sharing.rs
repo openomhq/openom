@@ -622,6 +622,24 @@ pub fn accept_remote_dag_anchor(
     })
 }
 
+/// Whether `local` causally contains every frontier operation in `candidate`.
+///
+/// This is the safe stale-remote discriminator for a durable local DAG mutation whose network publication did
+/// not land: a candidate that is wholly covered by the trusted local closure may be republished over, while an
+/// incomparable candidate must still enter [`accept_remote_dag_anchor`] and fail closed if it omits the local
+/// anti-rollback floor.
+///
+/// # Errors
+/// Returns [`VaultError`] if either anchor is malformed or cannot be replayed.
+pub fn dag_anchor_covers(local: &[u8], candidate: &[u8]) -> Result<bool, VaultError> {
+    let candidate_floor = dag_client::watermark(candidate).map_err(|e| err(e.to_string()))?;
+    match dag_client::check_floor(local, &candidate_floor) {
+        Ok(()) => Ok(true),
+        Err(dag_client::ClientError::RolledBack(_)) => Ok(false),
+        Err(error) => Err(err(error.to_string())),
+    }
+}
+
 /// Frame a full dag anchor as the wire `KeyringUpdate` the server's keyring channel accepts — the dag mirror
 /// of [`wrap_chain_keyring_update`]. A dag anchor carries no revision of its own, so the caller supplies the
 /// target server slot (`revision` = server-head + 1) and the `tree_id` as routing hints.

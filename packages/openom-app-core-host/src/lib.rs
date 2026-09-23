@@ -255,14 +255,23 @@ pub struct MemberAccount {
     pub hpke_public_key: Vec<u8>,
 }
 
-/// One chain keyring revision's publish payload (see [`AppCoreHost::keyring_publish_payload_at`]): the wrapped
-/// `KeyringUpdate` the webview PUTs, plus the raw keyring state it compares against the server's served bytes to
-/// distinguish a benign already-admitted revision from a fork.
+/// One keyring publication payload: the wrapped `KeyringUpdate` the webview PUTs, plus the raw keyring state it
+/// compares against the server's served bytes to distinguish a benign already-admitted revision from a fork.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyringRevisionPayload {
     pub update: Vec<u8>,
     pub body: Vec<u8>,
+}
+
+/// Native DAG reconciliation result. `LocalAhead` is returned only when the trusted local op closure
+/// cryptographically covers the served remote frontier, so the caller may safely republish the local anchor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DagKeyringSyncOutcome {
+    Unchanged,
+    LocalAhead,
+    Adopted,
 }
 
 /// What the native invite MINT needs from the keyring so the webview's `invite.mint` (pure JS) stays
@@ -2055,6 +2064,91 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(())
     }
 
+    /// Reconcile one served DAG anchor against native custody. Exact equality is a no-op; a served anchor whose
+    /// frontier is wholly covered by the trusted local closure reports [`DagKeyringSyncOutcome::LocalAhead`]
+    /// so the webview can republish it; otherwise the remote anchor must verify, cover the persisted floor, and
+    /// merge through [`openom_vault::sharing::accept_remote_dag_anchor`]. An accepted merge atomically advances
+    /// keyring + watermark before the live core adopts any rotated epoch, refreshes §B3 membership, and authors
+    /// a self-heal cover.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::NoKeyring`] if the tree is not open/stored; [`HostError::Vault`] on
+    /// malformed, substituted, incomparable, or rolled-back anchors; [`HostError::Core`] on live activation;
+    /// [`HostError::Store`] on persistence failure or a non-DAG deployment.
+    pub fn sync_dag_anchor(
+        &self,
+        doc: &str,
+        tree_id: &TreeId,
+        remote_wrapped: &[u8],
+    ) -> Result<DagKeyringSyncOutcome, HostError> {
+        if self.engine != EngineKind::Dag {
+            return Err(HostError::Store("sync_dag_anchor is dag-only".into()));
+        }
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handle = self
+            .core(doc)
+            .ok_or_else(|| HostError::NoCore(doc.to_string()))?;
+        let mut guard = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let local = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let remote = openom_vault::sharing::unwrap_dag_keyring(remote_wrapped)?;
+        if remote == local {
+            return Ok(DagKeyringSyncOutcome::Unchanged);
+        }
+        if openom_vault::sharing::dag_anchor_covers(&local, &remote)? {
+            return Ok(DagKeyringSyncOutcome::LocalAhead);
+        }
+
+        let floor = self.store.watermark(doc).map_err(HostError::Store)?;
+        let pin = openom_vault::sharing::dag_anchor_pin(&local)?;
+        let accepted = openom_vault::sharing::accept_remote_dag_anchor(
+            &local, &remote, tree_id, &pin, &floor,
+        )?;
+        if accepted.keyring == local {
+            return Ok(DagKeyringSyncOutcome::Unchanged);
+        }
+        self.store
+            .commit_keyring(doc, &accepted.keyring, &accepted.watermark)
+            .map_err(HostError::Store)?;
+        guard.adopt_epochs(&accepted.keyring)?;
+        let resolver = openom_vault::resolver_from(EngineKind::Dag, &accepted.keyring, &[])?;
+        guard.set_membership(resolver)?;
+        guard.author_cover()?;
+        Ok(DagKeyringSyncOutcome::Adopted)
+    }
+
+    /// Build the native DAG anchor publication for one server revision. Both the wrapped update and raw body
+    /// come from native custody; the webview supplies only the trusted tree id and server-selected next slot.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if no anchor is stored, [`HostError::Vault`] if framing fails, or
+    /// [`HostError::Store`] on a non-DAG deployment/store failure.
+    pub fn dag_keyring_publish_payload(
+        &self,
+        doc: &str,
+        tree_id: &TreeId,
+        revision: u32,
+    ) -> Result<KeyringRevisionPayload, HostError> {
+        if self.engine != EngineKind::Dag {
+            return Err(HostError::Store(
+                "dag_keyring_publish_payload is dag-only".into(),
+            ));
+        }
+        let body = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let update = openom_vault::sharing::wrap_dag_keyring_update(&body, tree_id, revision)?;
+        Ok(KeyringRevisionPayload { update, body })
+    }
+
     /// The opaque payload to PUT to the server's keyring channel for `doc` — the CURRENT stored keyring, wrapped
     /// as the wire `KeyringUpdate` on the chain, or the raw anchor on the dag. Read from native custody (never a
     /// webview-supplied keyring), so a compromised webview can only publish the head the host actually holds.
@@ -2664,9 +2758,13 @@ impl<St: VaultStore> AppCoreHost<St> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountRecord, AccountStatus, AppCoreHost, HostError, TreeId, VaultStore};
+    use super::{
+        AccountRecord, AccountStatus, AppCoreHost, DagKeyringSyncOutcome, HostError, TreeId,
+        VaultStore,
+    };
     use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::EngineKind;
+    use openom_protocol::Message;
     use openom_vault_host::{
         AccountBackupVersion, AccountBinding, AccountBlobHash, AccountGeneration, AccountMemberId,
         AccountRecordRevision, AccountRemoteCheckpoint, PendingAccountBackup, PendingBackupKind,
@@ -3774,6 +3872,133 @@ mod tests {
 
         std::fs::remove_dir_all(&dir_o).ok();
         std::fs::remove_dir_all(&dir_b).ok();
+    }
+
+    #[test]
+    fn a_dag_member_adopts_a_rotated_epoch_and_recovers_a_stale_remote() {
+        use super::MemberToAdd;
+        let (dir_o, dir_b, dir_c) = (temp_dir(), temp_dir(), temp_dir());
+        let owner_host = AppCoreHost::new(MemStore::default(), &dir_o, EngineKind::Dag);
+        let bob_host = AppCoreHost::new(MemStore::default(), &dir_b, EngineKind::Dag);
+        let carol_host = AppCoreHost::new(MemStore::default(), &dir_c, EngineKind::Dag);
+        let tree_id = [31u8; 16];
+        let typed_tree_id = TreeId::new(tree_id);
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let bob_pass = Passphrase::new(b"bob's own passphrase here".to_vec());
+        let carol_pass = Passphrase::new(b"carol's own passphrase".to_vec());
+
+        let bob_account = bob_host.provision_member(&bob_pass).unwrap();
+        let bob_id = openom_keyring_api::derive_member_id(&bob_account.author_public_key);
+        let carol_account = carol_host.provision_member(&carol_pass).unwrap();
+        let carol_id = openom_keyring_api::derive_member_id(&carol_account.author_public_key);
+        owner_host
+            .provision("t", &tree_id, "ignored", &owner_pass)
+            .unwrap();
+        let owner_id = owner_mid(&owner_host, "t");
+        owner_host
+            .add_member(
+                "t",
+                &tree_id,
+                &owner_id,
+                &owner_pass,
+                &MemberToAdd {
+                    member_id: bob_id.clone(),
+                    role: "maintainer".into(),
+                    author_public_key: bob_account.author_public_key,
+                    hpke_public_key: bob_account.hpke_public_key,
+                },
+            )
+            .unwrap();
+        let admitted = owner_host
+            .add_member(
+                "t",
+                &tree_id,
+                &owner_id,
+                &owner_pass,
+                &MemberToAdd {
+                    member_id: carol_id.clone(),
+                    role: "maintainer".into(),
+                    author_public_key: carol_account.author_public_key,
+                    hpke_public_key: carol_account.hpke_public_key,
+                },
+            )
+            .unwrap();
+        let admitted_served =
+            openom_keyring_api::MembershipEnvelope::wrap(EngineKind::Dag, admitted.keyring.clone())
+                .encode();
+        let pin = owner_host.invite_pin("t").unwrap();
+        carol_host
+            .join_dag_anchor(
+                "t",
+                &tree_id,
+                &carol_id,
+                &carol_pass,
+                &carol_account.kdf_params,
+                &admitted_served,
+                &pin,
+            )
+            .unwrap();
+
+        let removed = owner_host
+            .remove_member("t", &tree_id, &owner_id, &owner_pass, &bob_id)
+            .unwrap();
+        let removed_served =
+            openom_keyring_api::MembershipEnvelope::wrap(EngineKind::Dag, removed.keyring.clone())
+                .encode();
+        assert_eq!(
+            carol_host
+                .sync_dag_anchor("t", &typed_tree_id, &removed_served)
+                .unwrap(),
+            DagKeyringSyncOutcome::Adopted
+        );
+        assert_eq!(
+            carol_host.store().load_keyring("t").unwrap().unwrap(),
+            removed.keyring,
+            "the accepted anchor and its rotated epoch are native custody"
+        );
+
+        // The adopted epoch is live, not merely persisted: Carol can seal a post-rotation delta that the owner
+        // decrypts and folds. This exercises adopt_epochs + resolver refresh on the running native core.
+        carol_host
+            .assert_anchor("t", "pCarolAfterRotation", PERSON)
+            .unwrap();
+        carol_host.commit("t").unwrap();
+        let remote: Vec<_> = carol_host
+            .sync("t", &[], &[], 0)
+            .unwrap()
+            .uploads
+            .into_iter()
+            .map(|upload| (upload.key, upload.bytes))
+            .collect();
+        let present: Vec<_> = remote.iter().map(|(key, _)| key.clone()).collect();
+        owner_host.sync("t", &remote, &present, 0).unwrap();
+        assert!(owner_host
+            .project("t")
+            .unwrap()
+            .contains("pCarolAfterRotation"));
+
+        // A server still serving the pre-removal anchor is provably behind our local closure. Preserve local
+        // custody and ask the native tick to republish rather than misclassifying it as a fatal rollback.
+        assert_eq!(
+            carol_host
+                .sync_dag_anchor("t", &typed_tree_id, &admitted_served)
+                .unwrap(),
+            DagKeyringSyncOutcome::LocalAhead
+        );
+        let publish = carol_host
+            .dag_keyring_publish_payload("t", &typed_tree_id, 7)
+            .unwrap();
+        assert_eq!(publish.body, removed.keyring);
+        let update = openom_protocol::v1::KeyringUpdate::decode(publish.update.as_slice()).unwrap();
+        assert_eq!(
+            openom_vault::sharing::unwrap_dag_keyring(&update.payload).unwrap(),
+            publish.body,
+            "the retry payload wraps the native anchor for the requested server slot"
+        );
+
+        std::fs::remove_dir_all(&dir_o).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
+        std::fs::remove_dir_all(&dir_c).ok();
     }
 
     #[test]
