@@ -37,8 +37,8 @@ The generated `src/vendor/app-core/openom_app_core.d.ts` must exist first; build
 root with `node scripts/build-app-core.mjs` when the runner reports that it is missing. App-owned declarations
 under `src/core/types/` restore domain distinctions erased by wasm-bindgen; compile-only fixtures under
 `apps/typecheck/` prove that same-representation swaps remain checker errors. The shared app-core RPC
-contract models the production surface once for both the Comlink worker and native host; browser-only test and
-engine diagnostics live in a separate extension rather than becoming accidental native requirements.
+contract models the production surface once for both the Comlink worker and native host; browser-only extensions
+live separately rather than becoming accidental native requirements.
 
 Two things this app *depends on* but does not itself build:
 
@@ -149,6 +149,7 @@ src/main.js            wires the store stack, the sealer/vault, the lock policy,
 src/core/              orchestration — no UI, no rendering.
   types/                  branded values plus shared wasm, account-record, and app-core RPC contracts.
   wasmAppCore.js           checked anti-corruption layer: branded app values in, raw wasm-bindgen primitives out.
+  nativeHost.js            checked Tauri command boundary: typed payloads and fail-closed result codecs.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
   accountRecord.js        validates/codecs the portable identity-scoped account record and its three counters.
   accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.

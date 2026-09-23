@@ -39,6 +39,7 @@ const inner = [
   'corepack enable',
   'pnpm install --store-dir /pnpm-store --frozen-lockfile --config.confirmModulesPurge=false',
   'pnpm exec tsc --project tsconfig.main.json',
+  'pnpm exec tsc --project tsconfig.native.json',
   'pnpm exec tsc --project tsconfig.worker.json',
 ].join(' && ');
 

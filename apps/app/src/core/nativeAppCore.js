@@ -20,13 +20,9 @@ import { makeError, normalizeUnknown } from './errorModel.js';
 import { frameHops } from './sharing.js';
 import { mint as mintInvite, verifyClaim as verifyInviteClaim, signerIds, signersRetained } from './invite.js';
 import { pushMembershipSummary } from './membershipSummary.js';
+import { invokeNative, isNativeHost } from './nativeHost.js';
 
-const invoke = () => globalThis.__TAURI__?.core?.invoke;
-
-/** Is this a Tauri (native-host) runtime? */
-export function isNativeHost() {
-  return typeof globalThis.__TAURI__?.core?.invoke === 'function';
-}
+export { isNativeHost };
 
 // A Vec<u8> argument as the number array Tauri deserializes; passes strings/undefined through untouched.
 const bytes = (x) => (x == null ? x : Array.from(x));
@@ -46,21 +42,27 @@ const NEEDS_TREE_KEY = (docId) => `openom:${docId}:needs-create-tree`;
 const lstore = () => { try { return globalThis.localStorage ?? null; } catch { return null; } };
 
 export function createNativeAppCore() {
-  const call = (cmd, args) => {
-    const inv = invoke();
-    if (!inv) return Promise.reject(makeError('internal', { cause: 'native host unavailable (no __TAURI__.core.invoke)' }));
-    return inv(cmd, args).catch((raw) => {
-      // Tauri rejects our Err(String) with a structured {code,message} JSON — map it to the SAME AppError the
-      // wasm worker throws (via makeError), so the gate's rollback/tamper/wrong-passphrase distinctions and the
-      // sync driver's retriable/auth classification survive on native (design-review C1). Anything else falls
-      // through to the generic normalizer.
-      let parsed = null;
-      if (typeof raw === 'string') { try { parsed = JSON.parse(raw); } catch { parsed = null; } }
-      else if (raw && typeof raw === 'object') parsed = raw;
-      if (parsed && typeof parsed.code === 'string') throw makeError(parsed.code, { cause: parsed.message });
-      throw normalizeUnknown(raw);
-    });
-  };
+  /**
+   * @param {import('./types/nativeCommands.js').NativeCommand} cmd
+   * @param {unknown} [args]
+   * @returns {Promise<unknown>}
+   */
+  const callRaw = (cmd, args) => /** @type {(command: string, payload?: unknown) => Promise<unknown>} */ (
+    /** @type {unknown} */ (invokeNative)
+  )(cmd, args).catch((raw) => {
+    // Tauri rejects our Err(String) with a structured {code,message} JSON — map it to the SAME AppError the
+    // wasm worker throws (via makeError), so the gate's rollback/tamper/wrong-passphrase distinctions and the
+    // sync driver's retriable/auth classification survive on native (design-review C1). Anything else falls
+    // through to the generic normalizer.
+    let parsed = null;
+    if (typeof raw === 'string') { try { parsed = JSON.parse(raw); } catch { parsed = null; } }
+    else if (raw && typeof raw === 'object') parsed = raw;
+    if (parsed && typeof parsed.code === 'string') throw makeError(parsed.code, { cause: parsed.message });
+    throw normalizeUnknown(raw);
+  });
+  const call = /** @type {import('./types/nativeCommands.js').NativeInvoke} */ (
+    /** @type {unknown} */ (callRaw)
+  );
 
   // Per-doc network transport (set by attachTransport) + the doc→treeKey map (the remote keyspace prefix,
   // recorded whenever a doc is opened) + a single-flight sync guard + the once-per-session create-tree gate.
@@ -341,7 +343,7 @@ export function createNativeAppCore() {
     liveClaimsOf: (docId, target, predicate) =>
       call('core_live_claims_of', { doc: docId, target, predicate }),
     liveClaimsOfAny: (docId, target) => call('core_live_claims_of_any', { doc: docId, target }),
-    resolveId: (docId, anchor) => call('core_resolve_id', { doc: docId, anchor }),
+    resolveId: (docId, anchor) => call('core_resolve_id', { doc: docId, anchor }).then((id) => id ?? undefined),
     pendingCount: (docId) => call('core_pending_count', { doc: docId }),
     anomalies: (docId) => call('core_anomalies', { doc: docId }),
 
@@ -365,7 +367,7 @@ export function createNativeAppCore() {
       // SELF-CERT identity (OPE-543): the on-tree id derives from the author key IN RUST (core_derive_member_id)
       // — same single-source derivation as the worker's wasm `deriveMemberId`, never re-implemented in JS.
       return {
-        memberId: await call('core_derive_member_id', { authorPublicKey }),
+        memberId: await call('core_derive_member_id', { authorPublicKey: bytes(authorPublicKey) }),
         kdfParams: null, authorPublicKey, hpkePublicKey: u8(m.hpkePublicKey),
         recoveryCode: account?.recoveryCode ?? '',
       };
@@ -474,8 +476,25 @@ export function createNativeAppCore() {
       await call('core_bootstrap', { doc: docId });
       return out;
     },
-    syncKeyring: (docId, treeId, hops) =>
-      call('core_sync_keyring', { doc: docId, treeId: bytes(treeId), hops: bytes(hops) }),
+    async syncKeyring(docId, treeId) {
+      const transport = transports.get(docId);
+      if (!transport) return { changed: false };
+      let localHead;
+      try {
+        localHead = await call('core_keyring_head', { doc: docId });
+      } catch (err) {
+        if (err?.code === 'internal' && String(err.cause).includes('chain-only')) {
+          return { changed: false };
+        }
+        throw err;
+      }
+      const walk = await transport.readKeyring(docId, localHead + 1);
+      const successors = (walk.revisions ?? []).filter((revision) => revision.revision > localHead);
+      if (successors.length === 0) return { changed: false };
+      const hops = frameHops(successors.map((revision) => revision.bytes));
+      await call('core_sync_keyring', { doc: docId, treeId: bytes(treeId), hops: bytes(hops) });
+      return { changed: true };
+    },
 
     // --- sync (only reached when a managed backend is configured — startSync() is local-only otherwise) ---
     attachTransport(docId, transport) {

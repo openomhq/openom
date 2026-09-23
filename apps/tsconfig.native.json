@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "ESNext.Disposable", "DOM", "DOM.Iterable"]
+  },
+  "files": [
+    "app/src/core/types/domain.d.ts",
+    "app/src/core/types/contracts.d.ts",
+    "app/src/core/types/appCoreApi.d.ts",
+    "app/src/core/types/nativeCommands.d.ts",
+    "app/src/core/nativeHost.js",
+    "typecheck/native-boundary.check.js"
+  ]
+}

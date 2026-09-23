@@ -321,11 +321,6 @@ export interface AppCoreService {
     readonly docId: DocId;
     readonly engine?: KeyringEngine;
   }): Awaitable<TreeOpenResult>;
-  restoreTree(options: {
-    readonly treeId: TreeId;
-    readonly docId: DocId;
-    readonly engine?: KeyringEngine;
-  }): Awaitable<TreeOpenResult>;
   resetCore(docId: DocId): Awaitable<void>;
   close(docId: DocId): Awaitable<void>;
   setModerators(docId: DocId, dids: ReadonlyArray<DidKey>): Awaitable<void>;
@@ -429,6 +424,11 @@ export interface AppCoreService {
 }
 
 export interface WebAppCoreService extends AppCoreService {
+  restoreTree(options: {
+    readonly treeId: TreeId;
+    readonly docId: DocId;
+    readonly engine?: KeyringEngine;
+  }): Awaitable<TreeOpenResult>;
   setCompactK(compactK: number): Awaitable<void>;
   confirmRotationCore(options: {
     readonly docId: DocId;
