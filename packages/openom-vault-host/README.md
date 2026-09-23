@@ -15,8 +15,9 @@ The profile account is one portable, explicitly revisioned record. It scopes the
 generation floor to a stable `member_id`, and atomically carries the confirmed auth binding, acknowledged
 remote ETag/version, and pending backup intent. `SQLite` stores the complete record as one value and commits only
 the next expected record revision; that local revision is independent of the credential generation and every
-tree watermark. The trait is injected, so the native host is testable with an in-memory fake and, on Tauri,
-backs onto `SqliteVaultStore` (behind the `sqlite` feature).
+tree watermark. Auth bindings retain the token's issuer verbatim; an empty issuer is valid for the development
+bearer while the subject is always non-empty. The trait is injected, so the native host is testable with an
+in-memory fake and, on Tauri, backs onto `SqliteVaultStore` (behind the `sqlite` feature).
 
 ## Invariants
 

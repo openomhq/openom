@@ -182,7 +182,7 @@ function validateVersion(version, name) {
 
 function validateBinding(binding, memberId, name) {
   if (!isObject(binding)) fail(`${name} must be an object`);
-  nonemptyString(binding.issuer, `${name}.issuer`);
+  if (typeof binding.issuer !== 'string') fail(`${name}.issuer must be a string`);
   nonemptyString(binding.subject, `${name}.subject`);
   if (binding.memberId !== memberId) fail(`${name} belongs to another identity`);
 }

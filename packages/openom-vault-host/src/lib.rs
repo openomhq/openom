@@ -563,9 +563,9 @@ impl AccountRecord {
         if self
             .binding
             .as_ref()
-            .is_some_and(|binding| binding.issuer.is_empty() || binding.subject.is_empty())
+            .is_some_and(|binding| binding.subject.is_empty())
         {
-            return Err("account binding issuer and subject must not be empty".into());
+            return Err("account binding subject must not be empty".into());
         }
         if self.acknowledged_backup.is_some() && self.binding.is_none() {
             return Err("acknowledged account backup has no confirmed binding".into());
@@ -697,6 +697,17 @@ mod account_record_tests {
         let corrupted: AccountRecord = serde_json::from_value(encoded).unwrap();
 
         assert!(corrupted.validate().is_err());
+    }
+
+    #[test]
+    fn development_binding_allows_an_empty_issuer_but_requires_a_subject() {
+        let initial = AccountRecord::new(identity("member-a", 1, 1));
+        let dev = AccountBinding::new("", "member-a", AccountMemberId::new("member-a"));
+        assert!(initial.confirm_binding(dev).is_ok());
+
+        let missing_subject =
+            AccountBinding::new("https://issuer", "", AccountMemberId::new("member-a"));
+        assert!(initial.confirm_binding(missing_subject).is_err());
     }
 
     #[test]

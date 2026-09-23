@@ -94,7 +94,10 @@ describe('account record codec', () => {
   it('rejects malformed remote metadata and JSON byte arrays', async () => {
     const record = await createAccountRecord(await snapshot());
     await expect(validateAccountRecord({ ...record, revision: 0 })).rejects.toThrow('revision');
-    await expect(validateAccountRecord({ ...record, binding: { issuer: '', subject: 's', memberId: 'member-a' } })).rejects.toThrow('issuer');
+    await expect(validateAccountRecord({ ...record, binding: { issuer: 1, subject: 's', memberId: 'member-a' } })).rejects.toThrow('issuer');
+    await expect(validateAccountRecord({
+      ...record, binding: { issuer: '', subject: 'dev-subject', memberId: 'member-a' },
+    })).resolves.toMatchObject({ binding: { issuer: '', subject: 'dev-subject' } });
     await expect(validateAccountRecord({ ...record, acknowledgedBackup: { etag: '"v1"', version: null } })).rejects.toThrow('requires binding');
     await expect(validateAccountRecord({
       ...record,
