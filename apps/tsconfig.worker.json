@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "ESNext.Disposable", "WebWorker"]
+  },
+  "files": [
+    "app/src/core/types/domain.d.ts",
+    "app/src/core/types/contracts.d.ts",
+    "app/src/core/types/appCoreApi.d.ts",
+    "app/src/core/types/wasm.d.ts",
+    "app/src/core/wasmAppCore.js",
+    "app/src/vendor/comlink.d.ts",
+    "app/src/vendor/app-core/openom_app_core.d.ts",
+    "typecheck/wasm-boundary.check.js"
+  ]
+}

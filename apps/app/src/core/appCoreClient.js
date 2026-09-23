@@ -6,7 +6,12 @@ import * as Comlink from '../vendor/comlink.js';
 import { normalizeUnknown, isAppError } from './errorModel.js';
 import { createNativeAppCore, isNativeHost } from './nativeAppCore.js';
 
+/** @typedef {import('./types/appCoreApi.js').AppCoreClient} AppCoreClient */
+/** @typedef {import('./types/appCoreApi.js').AppCoreTransport} AppCoreTransport */
+
+/** @type {Worker | null} */
 let workerRef = null;
+/** @type {AppCoreClient | null} */
 let apiRef = null;
 
 let heartbeatTimer = null;
@@ -21,6 +26,7 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_MAX_MISSES = 2;
 
+/** @param {AppCoreClient} api */
 function startHeartbeat(api) {
   let misses = 0;
   clearInterval(heartbeatTimer);
@@ -53,6 +59,7 @@ function startHeartbeat(api) {
  * Under Tauri (OPE-427 Full-A / OPE-429), returns the NATIVE-mode client — the DEK + engine + local store run
  * in the Rust host and this drives them over `invoke`; no Web Worker, no wasm on this side. On the web it's the
  * Comlink-wrapped wasm worker as before. Both present the same method surface, so callers don't branch.
+ * @returns {AppCoreClient}
  */
 export function appCoreWorker() {
   if (apiRef) return apiRef;
@@ -61,7 +68,7 @@ export function appCoreWorker() {
     return apiRef;
   }
   workerRef = new Worker(new URL('./appCore.worker.js', import.meta.url), { type: 'module' });
-  apiRef = Comlink.wrap(workerRef);
+  apiRef = /** @type {AppCoreClient} */ (Comlink.wrap(workerRef));
   workerRef.addEventListener('error', (e) => {
     // eslint-disable-next-line no-console
     console.error('[openom] app-core worker error', e?.message ?? e);
@@ -88,6 +95,7 @@ export function resetAppCoreWorker() {
  * The network transport the worker calls (Comlink-proxied in). A thin adapter over `RemoteStore`, which
  * keeps auth + serverUrl on the main thread. The DATA channel is a BlobStore (list/get/put over opaque
  * object keys — the worker never parses a key); the keyring / access channels ride the same RemoteStore.
+ * @returns {AppCoreTransport}
  */
 export function remoteTransport(remoteStore) {
   return {

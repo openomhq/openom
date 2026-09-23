@@ -10,8 +10,9 @@
 // completion before the next `await`.
 import * as Comlink from '../vendor/comlink.js';
 import { makeError, normalizeUnknown, isAppError } from './errorModel.js';
-import init, {
-  AppCoreHandle,
+import {
+  initAppCore,
+  devCore,
   accountCreate as wasmAccountCreate,
   accountUnlock as wasmAccountUnlock,
   accountRecover as wasmAccountRecover,
@@ -50,7 +51,7 @@ import init, {
   chainHeadSigners as wasmChainHeadSigners,
   keyringCovers as wasmKeyringCovers,
   keyringHasBeenShared as wasmKeyringHasBeenShared,
-} from '../vendor/app-core/openom_app_core.js';
+} from './wasmAppCore.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import {
   acknowledgeAccountBackup,
@@ -74,7 +75,7 @@ import { pushMembershipSummary } from './membershipSummary.js';
 import { MembershipAsserts } from './membershipAsserts.js';
 
 let ready = null;
-const ensureInit = () => (ready ??= init());
+const ensureInit = () => (ready ??= initAppCore());
 
 // The keyring engine this build provisions with. Runtime-selectable later (Tauri seam); the web app is
 // chain today.
@@ -1032,7 +1033,7 @@ const api = {
    */
   async openDev(treeId, replicaId, createdBy, docId, persist = false) {
     await ensureInit();
-    const handle = AppCoreHandle.dev(treeId, replicaId, createdBy, docId);
+    const handle = devCore(treeId, replicaId, createdBy, docId);
     const core = new Core(handle, docId, persist, treeId, null); // dev path: never shared, no keyring sync
     await hydrate(core); // import persisted objects (if persisting) + bootstrap — uniform for both modes
     cores.set(docId, core);

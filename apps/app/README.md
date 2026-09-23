@@ -23,12 +23,22 @@ pnpm serve:preview          # serves apps/preview/desktop.html instead, same ser
 pnpm test:core              # unit (*.test) + integration (*.int) tests for src/, via vitest
 pnpm test:e2e               # Playwright, browser-driven (excludes @integration-tagged specs)
 pnpm test:e2e:full          # Playwright, the full suite including @integration specs
+pnpm typecheck              # strict main-thread + Web Worker checking, without emitting build output
 pnpm check:locales          # every locale in app/locales/ carries the same keys as en.ftl
 ```
 
 `pnpm test:core` runs vitest **inside a Docker container** (`node ../scripts/vitest.mjs`) — not
 because of cargo, but because this host's supply-chain policy makes `pnpm install`'s esbuild
 build-script check fatal; a container's pnpm has no such policy. Docker Desktop must be running.
+
+`pnpm typecheck` likewise runs the pinned TypeScript checker inside Docker. It uses separate strict
+main-thread and Web Worker configurations, emits nothing, and therefore preserves the buildless runtime.
+The generated `src/vendor/app-core/openom_app_core.d.ts` must exist first; build it from the repository
+root with `node scripts/build-app-core.mjs` when the runner reports that it is missing. App-owned declarations
+under `src/core/types/` restore domain distinctions erased by wasm-bindgen; compile-only fixtures under
+`apps/typecheck/` prove that same-representation swaps remain checker errors. The shared app-core RPC
+contract models the production surface once for both the Comlink worker and native host; browser-only test and
+engine diagnostics live in a separate extension rather than becoming accidental native requirements.
 
 Two things this app *depends on* but does not itself build:
 
@@ -137,6 +147,8 @@ src/main.js            wires the store stack, the sealer/vault, the lock policy,
                        router into one running app.
 
 src/core/              orchestration — no UI, no rendering.
+  types/                  branded values plus shared wasm, account-record, and app-core RPC contracts.
+  wasmAppCore.js           checked anti-corruption layer: branded app values in, raw wasm-bindgen primitives out.
   appCore.worker.js       owns the profile account handle plus every open tree core; account secrets stay in wasm.
   accountRecord.js        validates/codecs the portable identity-scoped account record and its three counters.
   accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.

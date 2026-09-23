@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "ESNext.Disposable", "DOM", "DOM.Iterable"]
+  },
+  "files": [
+    "app/src/core/types/domain.d.ts",
+    "app/src/core/types/contracts.d.ts",
+    "app/src/core/types/appCoreApi.d.ts",
+    "app/src/vendor/comlink.d.ts",
+    "app/src/vendor/app-core/openom_app_core.d.ts",
+    "typecheck/domain-contracts.check.js",
+    "typecheck/app-core-api.check.js"
+  ]
+}
