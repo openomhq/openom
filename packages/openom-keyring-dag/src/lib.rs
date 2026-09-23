@@ -3,6 +3,7 @@
 use keyeo_dag::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requirement, Role};
 use std::collections::HashSet;
 
+pub mod anchor_verifier;
 pub mod blob_sync;
 pub mod checkpoint;
 pub mod client;

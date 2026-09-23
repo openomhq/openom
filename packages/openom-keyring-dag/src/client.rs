@@ -153,21 +153,44 @@ impl std::error::Error for ClientError {}
 /// The client trust anchor: the pinned founding config + the pinned genesis op id + the op closure. The
 /// vault persists + publishes it opaquely; only this module reads it.
 #[derive(Serialize, Deserialize)]
-struct DagAnchor {
+pub(crate) struct DagAnchor {
     /// The group (openom: the tree) id every op in this anchor is bound to, pinned at provision. It is the
     /// value the engine's genesis is scoped to on resolve, and the id every appended op carries — so an op
     /// minted for a different tree is refused (`keyeo_dag::Error::WrongGroup`). A hint the SIGNED ops must
     /// agree with: tampering it makes resolution fail closed, since the signed ops won't match.
-    group_id: Vec<u8>,
-    genesis: Vec<MemberInitDto>,
-    reset_authority: Option<[u8; 32]>,
-    genesis_op_id: [u8; 32],
-    ops: Vec<Vec<u8>>,
+    pub(crate) group_id: Vec<u8>,
+    pub(crate) genesis: Vec<MemberInitDto>,
+    pub(crate) reset_authority: Option<[u8; 32]>,
+    pub(crate) genesis_op_id: [u8; 32],
+    pub(crate) ops: Vec<Vec<u8>>,
     /// A compaction checkpoint (OPE-348 step 2a): when present, the ops below its frontier are pruned and this
     /// signed checkpoint stands in for them — `resolve()` adopts its membership base + resumes the sealing fold
     /// from its preserved epochs instead of walking the pinned genesis. `None` for an un-compacted anchor.
     #[serde(default)]
-    checkpoint: Option<crate::checkpoint::SignedCheckpoint>,
+    pub(crate) checkpoint: Option<crate::checkpoint::SignedCheckpoint>,
+}
+
+/// Read the tree/group id from an anchor. This is only a routing candidate until [`verify_anchor`] or
+/// [`accept_remote_anchor`] authenticates the anchor's signed op closure.
+///
+/// # Errors
+/// Returns [`ClientError`] if the anchor is malformed.
+pub fn group_id(anchor_bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
+    let anchor: DagAnchor =
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    Ok(anchor.group_id)
+}
+
+/// Whether `candidate` adds a recovery-boundary operation absent from `prior`.
+pub(crate) fn crosses_reset_boundary(prior: &[u8], candidate: &[u8]) -> Result<bool, ClientError> {
+    let prior_ids: HashSet<[u8; 32]> = anchor_ops(prior)?.iter().map(|op| op.id).collect();
+    Ok(anchor_ops(candidate)?.iter().any(|op| {
+        !prior_ids.contains(&op.id)
+            && matches!(
+                op.action,
+                MembershipAction::ReFound { .. } | MembershipAction::RotateRecoveryAuthority { .. }
+            )
+    }))
 }
 
 /// Mint a signed, content-addressed op carrying an opaque `sealing` payload, using keyeo's unified

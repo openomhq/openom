@@ -27,7 +27,7 @@ services:
     # after which cargo-watch's `cargo run` starts serving in seconds (deps are cached).
     command: ["cargo", "watch", "--poll",
               "-w", "openom", "-w", "packages", "-w", "Cargo.toml", "-w", "Cargo.lock",
-              "-x", "run -p openom"]
+              "-x", "run -p openom --bin openom"]
     working_dir: /work
     environment:
       # OPENOM_RUNTIME=local presets STORAGE=local (MinIO) + AUTH=dev (fake auth: any bearer
@@ -44,6 +44,9 @@ services:
       # No issuer is baked into the code — swapping providers is a config change, not a rebuild.
       OPENOM_RUNTIME: local
       OPENOM_HTTP_ADDR: 0.0.0.0:${OPENOM_HTTP_PORT:-6060}
+      # The local browser app runs on a separate origin from the API. Keep the default convenient while
+      # allowing another exact development origin to be supplied through .env or the shell.
+      OPENOM_WEB_ORIGINS: "${OPENOM_WEB_ORIGINS:-http://localhost:5173}"
       DATABASE_URL: postgres://openom:openom@postgres:5432/openom
       S3_ENDPOINT: http://minio:9000
       # Presigned URLs handed to clients must be reachable from the host/browser, not

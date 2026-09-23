@@ -3604,6 +3604,7 @@ dependencies = [
  "openom-crypto",
  "openom-keyring-api",
  "openom-keyring-chain",
+ "openom-keyring-dag",
  "openom-protocol",
  "openom-roles",
  "opentelemetry",

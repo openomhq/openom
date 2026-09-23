@@ -23,6 +23,7 @@ use base64::Engine;
 use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipView, VerifyError};
 use openom_keyring_chain::decode_governing_ref;
 use openom_keyring_chain::verifier::ChainVerifier;
+use openom_keyring_dag::anchor_verifier::DagAnchorVerifier;
 use openom_protocol::v1::KeyringUpdate;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};
@@ -44,16 +45,13 @@ const RESET_COOLDOWN_SECS: f64 = 3600.0;
 /// The `KeyringUpdate` wire version this server understands; a higher one is refused, not misparsed.
 const KEYRING_UPDATE_VERSION: u32 = 1;
 
-/// The server's keyring-engine registry: an engine tag → its keyless verifier. This is the ONE dispatch
-/// point — a new **sequencer-backed** engine is one arm here and nothing else changes. Sequencer-free
-/// engines (the dag) never reach this endpoint (they sync via content-addressed blobs and push an advisory
-/// `MembershipView` over `/access`), so an unknown/dag tag is refused. The `engine` field is only a routing
-/// hint anyway: the dispatched verifier re-checks the inner `MembershipEnvelope`'s own engine tag, so a
-/// lying hint can't make the wrong verifier accept a body.
-fn verifier_for(engine: &str) -> Option<Box<dyn KeyringVerifier + Send + Sync>> {
-    match engine.parse::<EngineKind>() {
-        Ok(EngineKind::Chain) => Some(Box::new(ChainVerifier)),
-        _ => None,
+/// The server's keyring-engine registry: an engine tag → its keyless verifier. Chain admits one signed
+/// revision; DAG admits and merges a self-contained signed anchor so a fresh client can restore from the
+/// latest server slot. The outer engine is only a routing hint: each verifier re-checks the inner envelope.
+fn verifier_for(engine: EngineKind) -> Box<dyn KeyringVerifier + Send + Sync> {
+    match engine {
+        EngineKind::Chain => Box::new(ChainVerifier),
+        EngineKind::Dag => Box::new(DagAnchorVerifier),
     }
 }
 
@@ -102,7 +100,7 @@ pub async fn put_keyring(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("keyring.put");
-    let (update, verifier) = parse_update(&body)?;
+    let (update, engine, verifier) = parse_update(&body)?;
 
     let mut tx = state.db.begin().await.map_err(internal)?;
     // Serialize concurrent keyring PUTs on this tree; read the owner + current head revision.
@@ -142,10 +140,26 @@ pub async fn put_keyring(
             "keyring tree_id does not match the url".into(),
         ));
     }
-    // The canonical position, from the VERIFIED body: the chain encodes its revision as the governing-ref.
-    // The server keys storage / CAS / head-advance on THIS, never on the unauthenticated update hint.
-    let revision_u = decode_governing_ref(&admitted.update_ref)
-        .ok_or_else(|| ApiError::BadRequest("keyring update_ref is not a chain revision".into()))?;
+    // Chain carries its canonical revision in the verified body. DAG is sequencer-free internally, so its
+    // verified position is a frontier; the server slot is an outer hint constrained to exactly head+1 while
+    // holding the tree lock. The hint therefore cannot skip, overwrite, or steer any other storage position.
+    let revision_u = match engine {
+        EngineKind::Chain => decode_governing_ref(&admitted.update_ref).ok_or_else(|| {
+            ApiError::BadRequest("keyring update_ref is not a chain revision".into())
+        })?,
+        EngineKind::Dag => {
+            let hinted = decode_governing_ref(&update.update_ref)
+                .ok_or_else(|| ApiError::BadRequest("dag server revision is malformed".into()))?;
+            let expected = u32::try_from(head_rev)
+                .unwrap_or(u32::MAX)
+                .checked_add(1)
+                .ok_or(ApiError::Conflict)?;
+            if hinted != expected {
+                return Err(ApiError::Conflict);
+            }
+            hinted
+        }
+    };
     // Stored as i32 in Postgres; a revision past i32::MAX is unreachable, so saturate rather than wrap.
     let revision = i32::try_from(revision_u).unwrap_or(i32::MAX);
     let is_reset = admitted.view.reset_boundary;
@@ -167,7 +181,14 @@ pub async fn put_keyring(
 /// `tree_id`/`update_ref` are hints the caller cross-checks against the VERIFIED facts `admit` returns.
 fn parse_update(
     body: &Bytes,
-) -> Result<(KeyringUpdate, Box<dyn KeyringVerifier + Send + Sync>), ApiError> {
+) -> Result<
+    (
+        KeyringUpdate,
+        EngineKind,
+        Box<dyn KeyringVerifier + Send + Sync>,
+    ),
+    ApiError,
+> {
     if body.len() > MAX_KEYRING_BYTES {
         return Err(ApiError::BadRequest(
             "keyring exceeds the size limit".into(),
@@ -180,9 +201,12 @@ fn parse_update(
             "unsupported keyring update version".into(),
         ));
     }
-    let verifier = verifier_for(&update.engine)
-        .ok_or_else(|| ApiError::BadRequest("unknown or unsupported keyring engine".into()))?;
-    Ok((update, verifier))
+    let engine = update
+        .engine
+        .parse::<EngineKind>()
+        .map_err(|_| ApiError::BadRequest("unknown or unsupported keyring engine".into()))?;
+    let verifier = verifier_for(engine);
+    Ok((update, engine, verifier))
 }
 
 /// The stored opaque payload at the current head, or `None` at head 0 (genesis). "First keyring is revision

@@ -1,15 +1,13 @@
 //! Advisory membership summary + ACL derivation (OPE-278 / the server-keyring-decoupling decision).
 //!
-//! The server stays keyring-FORMAT-agnostic. The client verifies the keyring locally, resolves the
-//! membership, and pushes the resolved `{member_id -> role}` view here; the server stores it as the advisory
-//! `tree_access` ACL — used for coarse cost-control + the collaboration features (notifications, server-side
-//! revocation, proposal routing, a sharing dashboard), NEVER as the security boundary (the crypto is that,
-//! client-side — see `authz.rs`). So chain, dag, and any future engine reach the ACL through one
-//! engine-neutral summary with zero server changes.
+//! The server verifies signed keyring updates through the engine-neutral verifier seam and derives the
+//! resolved `{member_id -> role}` view. A client can also re-assert that verified view here; the server stores
+//! it as the advisory `tree_access` ACL — used for coarse cost-control + collaboration features, NEVER as the
+//! security boundary (the crypto is that, client-side — see `authz.rs`).
 //!
 //! [`apply_membership`] is the ONE place the ACL + a departed member's transient state are written, shared
-//! by the chain keyring PUT (`put_keyring`, in-tx and drift-free) and this summary endpoint (the dag path +
-//! everyone's re-assert path), so the two can never derive different ACLs.
+//! by both engines' keyring PUT (`put_keyring`, in-tx and drift-free) and this summary endpoint (the repair /
+//! re-assert path), so the two can never derive different ACLs.
 //!
 //! Concurrency: the client interprets its own engine-opaque `basis` frontier (chain: a revision token; dag:
 //! the op-DAG tip ids) to confirm it is not causally behind BEFORE pushing; the server only does
