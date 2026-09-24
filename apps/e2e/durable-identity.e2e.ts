@@ -3,8 +3,8 @@ import { expect, test } from '@playwright/test';
 
 const enabled = process.env.OPENOM_DURABLE_IDENTITY_ACCEPTANCE === '1';
 const serverUrl = process.env.OPENOM_DURABLE_IDENTITY_SERVER_URL ?? 'http://localhost:6061';
-const jwtSecret = process.env.OPENOM_DURABLE_IDENTITY_JWT_SECRET ?? 'openom-ope547-local-hs256-secret';
-const jwtIssuer = process.env.OPENOM_DURABLE_IDENTITY_JWT_ISSUER ?? 'https://ope547.local.openom.test';
+const jwtSecret = process.env.OPENOM_DURABLE_IDENTITY_JWT_SECRET ?? 'openom-durable-identity-hs256-secret';
+const jwtIssuer = process.env.OPENOM_DURABLE_IDENTITY_JWT_ISSUER ?? 'https://identity.local.openom.test';
 const harnessUrl = `http://localhost:5173/e2e/durable-identity-harness.html?server=${encodeURIComponent(serverUrl)}`;
 
 interface TestAuth {
@@ -65,11 +65,11 @@ test('durable identity registers before creating its first DAG tree @integration
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(String(error)));
   await ready(page);
-  const auth = jwt(`ope547-signup-first-${randomUUID()}`);
+  const auth = jwt(`signup-first-${randomUUID()}`);
 
   const result = await page.evaluate(async (input) => window.durableIdentityAcceptance.signUpFirst(input), {
     auth,
-    passphrase: 'OPE-547 signup-first passphrase',
+    passphrase: 'durable identity signup-first passphrase',
     given: 'Signup',
   });
 
@@ -88,15 +88,15 @@ test('local DAG signup and credential changes preserve identity and keyring @int
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(String(error)));
   await ready(page);
-  const auth = jwt(`ope547-local-first-${randomUUID()}`);
+  const auth = jwt(`local-first-${randomUUID()}`);
 
   const result = await page.evaluate(
     async (input) => window.durableIdentityAcceptance.localFirstThenSignUpAndRotate(input),
     {
       auth,
-      passphrase: 'OPE-547 local-first passphrase',
-      changedPassphrase: 'OPE-547 changed passphrase',
-      recoveredPassphrase: 'OPE-547 recovered passphrase',
+      passphrase: 'durable identity local-first passphrase',
+      changedPassphrase: 'durable identity changed passphrase',
+      recoveredPassphrase: 'durable identity recovered passphrase',
       given: 'Local',
     },
   );

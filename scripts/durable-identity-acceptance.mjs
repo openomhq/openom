@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// OPE-547: run the browser durable-identity acceptance against an ephemeral local AUTH=jwt / HS256
-// server. The ordinary dev server remains untouched; Postgres and MinIO are shared, while random JWT
-// subjects and tree ids isolate each run.
+// Run the browser durable-identity acceptance against an ephemeral local AUTH=jwt / HS256 server. The
+// ordinary dev server remains untouched; Postgres and MinIO are shared, while random JWT subjects and tree
+// ids isolate each run.
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,9 +11,9 @@ const APPS = path.join(REPO, 'apps');
 const port = process.env.OPENOM_DURABLE_IDENTITY_PORT ?? '6061';
 const serverUrl = `http://localhost:${port}`;
 const readyUrl = `${serverUrl}/ready`;
-const jwtSecret = process.env.OPENOM_DURABLE_IDENTITY_JWT_SECRET ?? 'openom-ope547-local-hs256-secret';
-const jwtIssuer = process.env.OPENOM_DURABLE_IDENTITY_JWT_ISSUER ?? 'https://ope547.local.openom.test';
-const containerName = `openom-ope547-${process.pid}`;
+const jwtSecret = process.env.OPENOM_DURABLE_IDENTITY_JWT_SECRET ?? 'openom-durable-identity-hs256-secret';
+const jwtIssuer = process.env.OPENOM_DURABLE_IDENTITY_JWT_ISSUER ?? 'https://identity.local.openom.test';
+const containerName = `openom-durable-identity-${process.pid}`;
 
 function command(commandName, args, options = {}) {
   const result = spawnSync(commandName, args, {
@@ -48,7 +48,7 @@ function startServer() {
   if (result.status !== 0) {
     process.stderr.write(result.stdout ?? '');
     process.stderr.write(result.stderr ?? '');
-    throw new Error(`failed to start the OPE-547 server (status ${result.status ?? 1})`);
+    throw new Error(`failed to start the durable-identity server (status ${result.status ?? 1})`);
   }
 }
 
@@ -70,10 +70,10 @@ async function waitForServer() {
 
 let failed = false;
 try {
-  console.error('[OPE-547] starting an ephemeral Docker AUTH=jwt / HS256 server');
+  console.error('[Identity] starting an ephemeral Docker AUTH=jwt / HS256 server');
   startServer();
   await waitForServer();
-  console.error('[OPE-547] running DAG onboarding and credential-stability acceptance');
+  console.error('[Identity] running DAG onboarding and credential-stability acceptance');
   command('pnpm', ['exec', 'playwright', 'test', 'e2e/durable-identity.e2e.ts'], {
     cwd: APPS,
     env: {
@@ -86,7 +86,7 @@ try {
   });
 } catch (error) {
   failed = true;
-  console.error(`[OPE-547] ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`[Identity] ${error instanceof Error ? error.message : String(error)}`);
   spawnSync('docker', ['logs', '--tail=200', containerName], { cwd: REPO, stdio: 'inherit' });
 } finally {
   removeServer();
