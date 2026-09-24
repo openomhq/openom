@@ -12,7 +12,7 @@
 //     registrationAttempt({ forceRefresh } = {}): Promise<{ accessToken, issuer, subject }>
 //     subject(): string | null                                // opaque provider subject (`sub`)
 //     onChange(cb): () => void                                // cb() on identity change; returns an unsubscribe
-//     capabilities(): { canRegister, canLogin, sync }
+//     capabilities(): { canSignUp, canLogin, sync }
 //   }
 //
 // Auth `sub` says who authenticated a request. AccountSession.memberId() says whose keys signed data.
@@ -32,6 +32,7 @@ import { isAppError, makeError } from './errorModel.js';
 /** @typedef {import('./types/session.js').AuthSessionCoordinatorLike} AuthSessionCoordinatorLike */
 /** @typedef {import('./types/session.js').AuthSessionRecord} AuthSessionRecord */
 /** @typedef {import('./types/session.js').AuthSession} AuthSession */
+/** @typedef {import('./types/session.js').AuthProvider} AuthProvider */
 /** @typedef {import('./types/session.js').GoTrueClientLike} GoTrueClientLike */
 /** @typedef {import('./types/session.js').GoTrueTokenSet} GoTrueTokenSet */
 /** @typedef {import('./types/session.js').PasswordCredentials} PasswordCredentials */
@@ -108,7 +109,7 @@ export class DevAuth {
   }
 
   capabilities() {
-    return { canRegister: false, canLogin: false, sync: true };
+    return { canSignUp: false, canLogin: false, sync: true };
   }
 
   #notify() {
@@ -278,7 +279,7 @@ export class SupabaseAuth {
   }
 
   capabilities() {
-    return { canRegister: false, canLogin: true, sync: true };
+    return { canSignUp: false, canLogin: true, sync: true };
   }
 
   dispose() {
@@ -408,10 +409,10 @@ export class SupabaseAuth {
  * logged in" truth, while the provider under it is chosen once at composition (the swap point).
  */
 export class SessionController {
-  /** @type {AuthSession} */
+  /** @type {AuthProvider} */
   #auth;
 
-  /** @param {AuthSession} auth */
+  /** @param {AuthProvider} auth */
   constructor(auth) {
     if (!auth) throw new Error('SessionController needs an AuthSession backend');
     this.#auth = auth;
@@ -434,6 +435,21 @@ export class SessionController {
   }
   capabilities() {
     return this.#auth.capabilities();
+  }
+
+  /** @param {PasswordCredentials} credentials */
+  signIn(credentials) {
+    if (!this.#auth.capabilities().canLogin || typeof this.#auth.signIn !== 'function') {
+      throw new Error('auth provider does not support interactive sign-in');
+    }
+    return this.#auth.signIn(credentials);
+  }
+
+  signOut() {
+    if (typeof this.#auth.signOut !== 'function') {
+      throw new Error('auth provider does not support interactive sign-out');
+    }
+    return this.#auth.signOut();
   }
 
   dispose() {

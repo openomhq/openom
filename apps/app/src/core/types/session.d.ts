@@ -7,7 +7,7 @@ export interface AuthRegistrationAttempt {
 }
 
 export interface AuthCapabilities {
-  readonly canRegister: boolean;
+  readonly canSignUp: boolean;
   readonly canLogin: boolean;
   readonly sync: boolean;
 }
@@ -20,6 +20,13 @@ export interface AuthSession {
   capabilities(): AuthCapabilities;
   dispose?(): void;
 }
+
+export interface InteractiveAuthSession extends AuthSession {
+  signIn(credentials: PasswordCredentials): Promise<void>;
+  signOut(): Promise<void>;
+}
+
+export type AuthProvider = AuthSession & Partial<Pick<InteractiveAuthSession, 'signIn' | 'signOut'>>;
 
 export interface AccountIdentitySource {
   memberId(): MemberId | null;

@@ -53,7 +53,7 @@ describe('DevAuth — account-backed development provider', () => {
 
   it('advertises account-backed development capabilities', () => {
     const { auth } = mk();
-    expect(auth.capabilities()).toEqual({ canRegister: false, canLogin: false, sync: true });
+    expect(auth.capabilities()).toEqual({ canSignUp: false, canLogin: false, sync: true });
   });
 
   it('fans out account changes and stops after unsubscribe', () => {
@@ -90,10 +90,12 @@ describe('SessionController — delegates the provider-auth seam', () => {
     expect(await controller.registrationAttempt()).toEqual({
       accessToken: 'member-controller', issuer: '', subject: 'member-controller',
     });
-    expect(controller.capabilities()).toEqual({ canRegister: false, canLogin: false, sync: true });
+    expect(controller.capabilities()).toEqual({ canSignUp: false, canLogin: false, sync: true });
     expect(controller.memberId).toBeUndefined();
-    expect(controller.signIn).toBeUndefined();
-    expect(controller.signOut).toBeUndefined();
+    expect(() => controller.signIn({ email: 'person@example.test', password: 'secret' })).toThrow(
+      'does not support interactive sign-in',
+    );
+    expect(() => controller.signOut()).toThrow('does not support interactive sign-out');
 
     const callback = vi.fn();
     const off = controller.onChange(callback);

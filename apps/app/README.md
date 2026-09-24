@@ -159,6 +159,7 @@ src/core/              orchestration — no UI, no rendering.
   accountRecord.js        validates/codecs the portable identity-scoped account record and its three counters.
   accountRecordStore.js   serializes profile mutations and broadcasts verified IndexedDB-CAS commits.
   authSessionStore.js     serializes rotating provider refresh-token custody across browser tabs.
+  authProvider.js         selects DevAuth or SupabaseAuth from public build-time configuration.
   accountComposition.js   constructs the sole AccountSession + provider-auth + remote transport unit.
   accountSession.js       observable local/auth/binding facade; probes, registers, and CAS-backs up account custody.
   gotrueClient.js         validates the direct Supabase Auth REST wire; owns no session or identity state.

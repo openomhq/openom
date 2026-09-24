@@ -22,4 +22,14 @@ describe('account identity composition boundary', () => {
     const productionSources = `${accountSession}\n${session}\n${remoteStore}`;
     expect(productionSources).not.toMatch(/memberIdFrom(?:Sub|Subject|Bearer)/i);
   });
+
+  it('keeps provider sign-up capability separate from durable identity binding', async () => {
+    const [accountSession, session] = await Promise.all([
+      source('core/accountSession.js'),
+      source('core/session.js'),
+    ]);
+    expect(session).not.toContain('canRegister');
+    expect(accountSession).not.toContain('canSignUp');
+    expect(session).not.toMatch(/\bissuer\s*\(\s*\)/);
+  });
 });

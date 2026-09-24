@@ -13,6 +13,7 @@
     "app/src/core/accountComposition.js",
     "app/src/core/appCoreClient.js",
     "app/src/core/authSessionStore.js",
+    "app/src/core/authProvider.js",
     "app/src/core/gotrueClient.js",
     "app/src/core/membership.js",
     "app/src/core/remoteStore.js",

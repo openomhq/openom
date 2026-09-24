@@ -103,6 +103,7 @@ describe('SupabaseAuth rotating session', () => {
   it('starts signed out when no persisted refresh record exists', async () => {
     const auth = new SupabaseAuth(fakeClient(), { store: coordinator() });
     expect(auth.subject()).toBeNull();
+    expect(auth.capabilities()).toEqual({ canSignUp: false, canLogin: true, sync: true });
     await expect(auth.getAccessToken()).rejects.toMatchObject({ code: 'auth_required' });
   });
 

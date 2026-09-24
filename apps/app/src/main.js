@@ -4,7 +4,7 @@ import * as Comlink from './vendor/comlink.js';
 import { createLockPolicy } from './core/lockPolicy.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
-import { DevAuth } from './core/session.js';
+import { createAuthProvider } from './core/authProvider.js';
 import { composeAccountSession } from './core/accountComposition.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
@@ -138,7 +138,7 @@ class App {
     this.unsubscribeAccount = null;
     this.accountComposition?.dispose();
     this.accountComposition = await composeAccountSession(this.worker, {
-      createAuth: (account) => new DevAuth(account),
+      createAuth: (account) => createAuthProvider(account),
       createRemote: (auth) => (this.serverUrl ? new RemoteStore({ baseUrl: this.serverUrl, auth }) : null),
     });
     ({ account: this.account, auth: this.auth, remote: this.remote } = this.accountComposition);

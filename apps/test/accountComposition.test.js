@@ -19,7 +19,7 @@ function authBackend() {
       subscribers.add(callback);
       return () => subscribers.delete(callback);
     },
-    capabilities: () => ({ canRegister: false, canLogin: false, sync: true }),
+    capabilities: () => ({ canSignUp: false, canLogin: false, sync: true }),
     setSubject(next) {
       subject = next;
       for (const callback of subscribers) callback();
