@@ -52,9 +52,10 @@ pnpm test:e2e
   the latter does not change the owner or DAG anchor, and checks passphrase change and recovery preserve the
   identity, keyring, and tree contents.
 - `staging-auth.e2e.ts` (`@staging`, deployment workflow only) — unlocks the real staging Pages gate,
-  verifies the assembled Supabase metadata and CSP, then uses deployed production modules to sign in, force a
-  token refresh, bind/backup the stable test identity, and restore it in a fresh browser context. The dedicated
-  account passphrase is a protected environment secret and never enters committed fixtures or test output.
+  verifies its build marker matches the dispatched commit and its secure admission cookie is set, checks the
+  assembled Supabase metadata and CSP, then uses deployed production modules to sign in, force a token refresh,
+  bind/backup the stable test identity, and restore it in a fresh browser context. The dedicated account
+  passphrase never enters committed fixtures or test output.
 
 ## Conventions
 `.e2e.ts` = Playwright browser test (vitest only matches `*.test`/`*.spec`, so these are

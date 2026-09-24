@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type BrowserContext, type Page, type Response } from '@playwright/test';
+import { enterStagingGate } from './support/stagingGate.js';
 
 const enabled = process.env.OPENOM_STAGING_AUTH_ACCEPTANCE === '1';
 const stagingUrl = process.env.OPENOM_STAGING_APP_URL ?? 'https://app.staging.openom.org/';
@@ -8,6 +9,7 @@ const credentials = {
 };
 const accountPassphrase = process.env.SUPABASE_TEST_ACCOUNT_PASSPHRASE ?? '';
 const gatePassword = process.env.STAGING_APP_GATE_PASSWORD ?? '';
+const expectedCommit = (process.env.OPENOM_STAGING_COMMIT_SHA ?? '').slice(0, 7);
 
 interface StagingAccountResult {
   memberId: string;
@@ -16,30 +18,19 @@ interface StagingAccountResult {
   state: { auth: string; account: string; binding: string; pending: string[] };
 }
 
-async function openStagingApp(page: Page): Promise<Response> {
+async function openStagingApp(page: Page, readinessTimeoutMs: number): Promise<Response> {
   await page.route('**/src/main.js', (route) => route.fulfill({
     status: 200,
     contentType: 'application/javascript',
     body: 'export {};',
   }));
 
-  const deadline = Date.now() + 120_000;
-  let response: Response | null = null;
-  while (Date.now() < deadline) {
-    response = await page.goto(stagingUrl, { waitUntil: 'domcontentloaded' });
-    if (response && response.ok()) break;
-    await page.waitForTimeout(2_000);
-  }
-  if (!response || !response.ok()) throw new Error('staging app did not become reachable');
-
-  const gate = page.locator('form[action="/__gate"]');
-  if (await gate.isVisible()) {
-    await page.locator('input[name="password"]').fill(gatePassword);
-    const navigation = page.waitForNavigation({ waitUntil: 'domcontentloaded' });
-    await page.locator('button[type="submit"]').click();
-    response = await navigation;
-  }
-  if (!response || !response.ok()) throw new Error('staging gate did not admit the acceptance browser');
+  const response = await enterStagingGate(page, {
+    stagingUrl,
+    password: gatePassword,
+    expectedCommit,
+    readinessTimeoutMs,
+  });
   await expect(page.locator('meta[name="openom:auth-provider"]')).toHaveAttribute('content', 'supabase');
   return response;
 }
@@ -103,12 +94,12 @@ async function accountRoundTrip(page: Page, allowCreate: boolean): Promise<Stagi
   }, { signIn: credentials, passphrase: accountPassphrase, mayCreate: allowCreate });
 }
 
-async function acceptanceContext(browser: Browser) {
+async function acceptanceContext(browser: Browser, readinessTimeoutMs: number) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(String(error)));
-  const response = await openStagingApp(page);
+  const response = await openStagingApp(page, readinessTimeoutMs);
   const csp = response.headers()['content-security-policy'] ?? '';
   const authOrigin = await page.locator('meta[name="openom:supabase-url"]').getAttribute('content') ?? '';
   expect(authOrigin).toMatch(/^https:\/\/[^%]+$/);
@@ -118,20 +109,22 @@ async function acceptanceContext(browser: Browser) {
 }
 
 test('deployed staging signs in, refreshes, binds, backs up, and restores in a fresh context @staging', async ({ browser }) => {
+  test.setTimeout(180_000);
   test.skip(!enabled, 'run from the staging web workflow with environment credentials');
   expect(credentials.email).not.toBe('');
   expect(credentials.password).not.toBe('');
   expect(accountPassphrase).not.toBe('');
   expect(gatePassword).not.toBe('');
+  expect(expectedCommit).toMatch(/^[0-9a-f]{7}$/);
 
-  const first = await acceptanceContext(browser);
+  const first = await acceptanceContext(browser, 120_000);
   let second: { context: BrowserContext; page: Page; errors: string[] } | null = null;
   try {
     const source = await accountRoundTrip(first.page, true);
     expect(source.authSubject).not.toBe(source.memberId);
     expect(source.state).toEqual({ auth: 'signedIn', account: 'unlocked', binding: 'backedUp', pending: [] });
 
-    second = await acceptanceContext(browser);
+    second = await acceptanceContext(browser, 15_000);
     const restored = await accountRoundTrip(second.page, false);
     expect(restored.path).toBe('restored');
     expect(restored.memberId).toBe(source.memberId);
