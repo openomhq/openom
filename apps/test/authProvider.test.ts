@@ -51,6 +51,7 @@ describe('auth provider factory', () => {
     const provider = createAuthProvider(account(), { config: { provider: 'dev' } });
     expect(provider).toBeInstanceOf(DevAuth);
     expect(provider.capabilities()).toEqual({ canSignUp: false, canLogin: false, sync: true });
+    expect(provider.signUp).toBeUndefined();
     expect(provider.signIn).toBeUndefined();
     expect(provider.signOut).toBeUndefined();
   });
@@ -80,7 +81,9 @@ describe('auth provider factory', () => {
     });
     expect(provider).toBeInstanceOf(SupabaseAuth);
     const controller = new SessionController(provider);
-    await controller.signIn({ email: 'person@example.test', password: 'secret' });
+    expect(controller.capabilities()).toEqual({ canSignUp: true, canLogin: true, sync: true });
+    await expect(controller.signUp({ email: 'person@example.test', password: 'secret' }))
+      .resolves.toEqual({ status: 'signedIn' });
     expect(fetch).toHaveBeenCalledTimes(1);
     await expect(controller.getAccessToken()).resolves.toContain('.');
     expect(controller.memberId).toBeUndefined();

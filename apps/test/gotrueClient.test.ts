@@ -25,6 +25,40 @@ const client = (fetch: typeof globalThis.fetch, options = {}) => new GoTrueClien
 });
 
 describe('GoTrueClient request contract', () => {
+  it('sends sign-up to the exact hosted endpoint and returns an immediate session', async () => {
+    const fetch = vi.fn(async () => response());
+    const result = await client(fetch).signUp({ email: 'person@example.test', password: 'secret' });
+
+    expect(result).toEqual({
+      status: 'signedIn',
+      tokens: {
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        expiresAt: 2_000_000_000,
+      },
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      'https://project.supabase.co/auth/v1/signup',
+      {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          apikey: 'publishable-key',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ email: 'person@example.test', password: 'secret' }),
+      },
+    );
+  });
+
+  it('returns confirmationRequired for a validated user-only response', async () => {
+    const fetch = vi.fn(async () => response({
+      body: { id: 'provider-user-id', email: 'person@example.test', confirmation_sent_at: 'soon' },
+    }));
+    await expect(client(fetch).signUp({ email: 'person@example.test', password: 'secret' }))
+      .resolves.toEqual({ status: 'confirmationRequired' });
+  });
+
   it('sends password sign-in to the exact hosted endpoint and validates the token response', async () => {
     const fetch = vi.fn(async () => response());
     const tokens = await client(fetch).signInWithPassword({ email: 'person@example.test', password: 'secret' });
@@ -123,6 +157,18 @@ describe('GoTrueClient fail-closed decoding', () => {
   });
 
   it.each([
+    null,
+    {},
+    { id: '', email: 'person@example.test' },
+    { id: 'provider-user-id', email: '' },
+    { access_token: 'partial', refresh_token: '' },
+  ])('rejects malformed successful sign-up response %#', async (body) => {
+    const fetch = vi.fn(async () => response({ body }));
+    await expect(client(fetch).signUp({ email: 'person@example.test', password: 'secret' }))
+      .rejects.toMatchObject({ code: 'request_failed' });
+  });
+
+  it.each([
     ['not a URL', 'key'],
     ['ftp://project.example', 'key'],
     ['https://project.example/path', 'key'],
@@ -133,6 +179,19 @@ describe('GoTrueClient fail-closed decoding', () => {
 });
 
 describe('GoTrueClient error hygiene', () => {
+  it.each([400, 401, 403, 422])('maps sign-up rejection %s to generic sign_up_failed', async (status) => {
+    const fetch = vi.fn(async () => response({
+      status,
+      body: { error_code: 'user_already_exists', msg: 'email is already registered' },
+    }));
+    const error = await client(fetch)
+      .signUp({ email: 'person@example.test', password: 'secret' })
+      .catch((caught) => caught);
+    expect(error).toMatchObject({ code: 'sign_up_failed', httpStatus: status });
+    expect(JSON.stringify(error)).not.toContain('user_already_exists');
+    expect(JSON.stringify(error)).not.toContain('email is already registered');
+  });
+
   it.each([400, 401, 403, 422])('maps password rejection %s to generic sign_in_failed', async (status) => {
     const fetch = vi.fn(async () => response({
       status,
@@ -184,6 +243,8 @@ describe('GoTrueClient error hygiene', () => {
 
   it('rejects empty credentials locally without making a request', async () => {
     const fetch = vi.fn();
+    await expect(client(fetch).signUp({ email: '', password: '' }))
+      .rejects.toMatchObject({ code: 'sign_up_failed' });
     await expect(client(fetch).signInWithPassword({ email: '', password: '' }))
       .rejects.toMatchObject({ code: 'sign_in_failed' });
     await expect(client(fetch).refresh('')).rejects.toMatchObject({ code: 'session_expired' });

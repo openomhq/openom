@@ -5,6 +5,7 @@ const serverUrl = process.env.OPENOM_ACCOUNT_SERVER_URL ?? 'http://localhost:606
 const authProvider = process.env.OPENOM_ACCOUNT_AUTH_PROVIDER ?? 'fixed-dev';
 const authUrl = process.env.OPENOM_ACCOUNT_AUTH_URL ?? '';
 const publishableKey = process.env.OPENOM_ACCOUNT_PUBLISHABLE_KEY ?? '';
+const createProviderAccount = process.env.OPENOM_ACCOUNT_SIGN_UP === '1';
 const configuredCredentials = process.env.OPENOM_ACCOUNT_CREDENTIALS
   ? JSON.parse(process.env.OPENOM_ACCOUNT_CREDENTIALS) as Record<string, { email: string; password: string }>
   : {};
@@ -48,23 +49,30 @@ for (const engine of ['chain', 'dag'] as const) {
       if (authProvider === 'supabase' && !credentials) throw new Error(`missing ${engine} Supabase credentials`);
       let created;
       try {
-        created = await firstPage.evaluate(async ({ passphrase: value, selectedEngine, credentials: authCredentials }) => {
+        created = await firstPage.evaluate(async ({
+          passphrase: value,
+          selectedEngine,
+          credentials: authCredentials,
+          createProviderAccount,
+        }) => {
           try {
             return await window.accountAcceptance.createAndBackup({
               passphrase: value,
               engine: selectedEngine,
               given: selectedEngine === 'chain' ? 'Ada' : 'Grace',
               credentials: authCredentials,
+              createProviderAccount,
             });
           } catch (error) {
             throw new Error(JSON.stringify(error, Object.getOwnPropertyNames(error)));
           }
-        }, { passphrase, selectedEngine: engine, credentials });
+        }, { passphrase, selectedEngine: engine, credentials, createProviderAccount });
       } catch (error) {
         throw new Error(`${error}\nauth network: ${authDiagnostics.join('; ') || 'no failed response observed'}`);
       }
 
       expect(created.accountState).toEqual({ auth: 'signedIn', binding: 'backedUp', pending: [] });
+      expect(created.providerAccountStatus).toBe('signedIn');
       if (authProvider === 'supabase') expect(created.authSubject).not.toBe(created.memberId);
       else expect(created.authSubject).toBe(created.memberId);
 
@@ -111,6 +119,7 @@ declare global {
         engine: 'chain' | 'dag';
         given: string;
         credentials?: { email: string; password: string };
+        createProviderAccount?: boolean;
       }): Promise<any>;
       restoreAndOpen(input: {
         subject: string;

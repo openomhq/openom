@@ -79,10 +79,23 @@
       provider.signIn(memberId);
     }
 
+    async function signUp(credentials) {
+      if (authMode !== 'supabase' || typeof provider.signUp !== 'function') {
+        throw new Error('test provider cannot sign up');
+      }
+      const result = await provider.signUp(credentials);
+      if (result.status !== 'signedIn') {
+        throw new Error(`test account requires confirmation: ${result.status}`);
+      }
+      return result.status;
+    }
+
     window.accountAcceptance = {
-      async createAndBackup({ passphrase, engine, given, credentials }) {
+      async createAndBackup({ passphrase, engine, given, credentials, createProviderAccount = false }) {
         const created = await account.createAccount(passphrase);
-        await signIn(created.memberId, credentials);
+        let providerAccountStatus = 'signedIn';
+        if (createProviderAccount) providerAccountStatus = await signUp(credentials);
+        else await signIn(created.memberId, credentials);
         await account.enableSync();
 
         const identity = await ensureTreeIdentity(created.memberId);
@@ -99,6 +112,7 @@
         return {
           memberId: created.memberId,
           authSubject: provider.subject(),
+          providerAccountStatus,
           treeId: [...identity.bytes],
           docId: identity.uuid,
           personName: `${given} ${engine}-restored`,

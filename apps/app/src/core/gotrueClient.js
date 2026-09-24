@@ -8,6 +8,7 @@ import { makeError } from './errorModel.js';
 /** @typedef {(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>} FetchLike */
 /** @typedef {{ readonly email: string, readonly password: string }} PasswordCredentials */
 /** @typedef {{ readonly accessToken: string, readonly refreshToken: string, readonly expiresAt: number }} GoTrueTokenSet */
+/** @typedef {{ readonly status: 'signedIn', readonly tokens: GoTrueTokenSet } | { readonly status: 'confirmationRequired' }} GoTrueSignUpResult */
 /** @typedef {{ readonly url: string, readonly publishableKey: string, readonly fetch?: FetchLike, readonly now?: () => number }} GoTrueClientOptions */
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
@@ -58,8 +59,26 @@ function decodeTokenSet(value, nowMs) {
   };
 }
 
-/** @param {number} status @param {'password'|'refresh'|'logout'} operation */
+/** @param {unknown} value @param {number} nowMs @returns {GoTrueSignUpResult} */
+function decodeSignUp(value, nowMs) {
+  if (isRecord(value)
+    && typeof value.access_token === 'string' && value.access_token.length > 0
+    && typeof value.refresh_token === 'string' && value.refresh_token.length > 0) {
+    return { status: 'signedIn', tokens: decodeTokenSet(value, nowMs) };
+  }
+  if (isRecord(value)
+    && typeof value.id === 'string' && value.id.length > 0
+    && typeof value.email === 'string' && value.email.length > 0) {
+    return { status: 'confirmationRequired' };
+  }
+  throw makeError('request_failed', { cause: 'Supabase Auth returned an invalid sign-up response' });
+}
+
+/** @param {number} status @param {'signup'|'password'|'refresh'|'logout'} operation */
 function responseError(status, operation) {
+  if (operation === 'signup' && status >= 400 && status < 500 && status !== 429) {
+    return makeError('sign_up_failed', { httpStatus: status, cause: 'Supabase Auth rejected sign-up' });
+  }
   if (operation === 'password' && status >= 400 && status < 500 && status !== 429) {
     return makeError('sign_in_failed', { httpStatus: status, cause: 'Supabase Auth rejected sign-in' });
   }
@@ -94,13 +113,21 @@ export class GoTrueClient {
     this.#now = now;
   }
 
+  /** @param {PasswordCredentials} credentials @returns {Promise<GoTrueSignUpResult>} */
+  async signUp(credentials) {
+    this.#validateCredentials(credentials, 'sign_up_failed');
+    const value = await this.#jsonRequest(
+      '/auth/v1/signup',
+      { email: credentials.email, password: credentials.password },
+      'signup',
+    );
+    return decodeSignUp(value, this.#now());
+  }
+
   /** @param {PasswordCredentials} credentials @returns {Promise<GoTrueTokenSet>} */
   async signInWithPassword(credentials) {
-    if (typeof credentials?.email !== 'string' || credentials.email.length === 0
-      || typeof credentials?.password !== 'string' || credentials.password.length === 0) {
-      throw makeError('sign_in_failed', { cause: 'Email and password are required' });
-    }
-    const value = await this.#tokenRequest(
+    this.#validateCredentials(credentials, 'sign_in_failed');
+    const value = await this.#jsonRequest(
       '/auth/v1/token?grant_type=password',
       { email: credentials.email, password: credentials.password },
       'password',
@@ -113,7 +140,7 @@ export class GoTrueClient {
     if (typeof refreshToken !== 'string' || refreshToken.length === 0) {
       throw makeError('session_expired', { cause: 'Refresh token is unavailable' });
     }
-    const value = await this.#tokenRequest(
+    const value = await this.#jsonRequest(
       '/auth/v1/token?grant_type=refresh_token',
       { refresh_token: refreshToken },
       'refresh',
@@ -136,10 +163,10 @@ export class GoTrueClient {
   /**
    * @param {string} path
    * @param {Record<string, string>} body
-   * @param {'password'|'refresh'} operation
+   * @param {'signup'|'password'|'refresh'} operation
    * @returns {Promise<unknown>}
    */
-  async #tokenRequest(path, body, operation) {
+  async #jsonRequest(path, body, operation) {
     const response = await this.#request(path, {
       method: 'POST',
       headers: this.#headers(),
@@ -153,6 +180,14 @@ export class GoTrueClient {
         httpStatus: response.status,
         cause: 'Supabase Auth returned malformed JSON',
       });
+    }
+  }
+
+  /** @param {PasswordCredentials} credentials @param {'sign_up_failed'|'sign_in_failed'} code */
+  #validateCredentials(credentials, code) {
+    if (typeof credentials?.email !== 'string' || credentials.email.length === 0
+      || typeof credentials?.password !== 'string' || credentials.password.length === 0) {
+      throw makeError(code, { cause: 'Email and password are required' });
     }
   }
 

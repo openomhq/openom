@@ -91,6 +91,9 @@ describe('SessionController — delegates the provider-auth seam', () => {
       accessToken: 'member-controller', issuer: '', subject: 'member-controller',
     });
     expect(controller.capabilities()).toEqual({ canSignUp: false, canLogin: false, sync: true });
+    expect(() => controller.signUp({ email: 'person@example.test', password: 'secret' })).toThrow(
+      'does not support interactive sign-up',
+    );
     expect(controller.memberId).toBeUndefined();
     expect(() => controller.signIn({ email: 'person@example.test', password: 'secret' })).toThrow(
       'does not support interactive sign-in',

@@ -188,8 +188,10 @@ src/core/              orchestration — no UI, no rendering.
   library.js, seed.js, seedKhaldun.js, schema.js   the bundled demo datasets + custom-field defs.
   identity.js              device id + logical clock, persisted across restarts.
   session.js               provider-auth seam; supplies atomic token+issuer+subject registration attempts.
-                           DevAuth derives only a dev bearer from the unlocked AccountSession; SupabaseAuth keeps
-                           access tokens in memory and serializes rotating refresh custody across browser tabs.
+                           DevAuth derives only a dev bearer from the unlocked AccountSession; SupabaseAuth supports
+                           email/password sign-up, sign-in, and sign-out, keeps access tokens in memory, and serializes
+                           rotating refresh custody across browser tabs. Sign-up reports confirmation-required without
+                           creating local session custody when Supabase email confirmation is enabled.
   lockPolicy.js            decides WHEN to auto-lock; platform-agnostic (calls back into the app).
   watermarks.js            anti-rollback: refuses a keyring/snapshot older than one already seen.
   blobs.js                 content-addressed file storage, alongside the document not inside it.
@@ -234,7 +236,8 @@ styles/                tokens.css (design tokens), app.css (app styles), fonts.c
 Local serving selects `DevAuth` unless `OPENOM_AUTH_PROVIDER=supabase` is explicitly supplied together
 with `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Staging assembly requires those public values, includes
 the Supabase origin in `connect-src`, and runs a protected two-context account backup/restore acceptance after
-deployment. `pnpm test:e2e:supabase-auth` runs the equivalent provider path against isolated local GoTrue.
+deployment. `pnpm test:e2e:supabase-auth` signs up through the production provider against isolated local GoTrue,
+then signs in from a fresh context to restore the account and reopen its tree.
 
 ## Conventions
 

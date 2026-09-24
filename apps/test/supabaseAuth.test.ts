@@ -74,6 +74,7 @@ class FakeBroadcastChannel {
 
 function fakeClient(overrides = {}) {
   return {
+    signUp: vi.fn(async () => ({ status: 'signedIn', tokens: tokens() } as const)),
     signInWithPassword: vi.fn(async () => tokens()),
     refresh: vi.fn(async () => tokens({ accessToken: jwt('subject-a', 'refreshed'), refreshToken: 'refresh-b' })),
     signOut: vi.fn(async () => {}),
@@ -103,8 +104,61 @@ describe('SupabaseAuth rotating session', () => {
   it('starts signed out when no persisted refresh record exists', async () => {
     const auth = new SupabaseAuth(fakeClient(), { store: coordinator() });
     expect(auth.subject()).toBeNull();
-    expect(auth.capabilities()).toEqual({ canSignUp: false, canLogin: true, sync: true });
+    expect(auth.capabilities()).toEqual({ canSignUp: true, canLogin: true, sync: true });
     await expect(auth.getAccessToken()).rejects.toMatchObject({ code: 'auth_required' });
+  });
+
+  it('persists an auto-confirmed sign-up before publishing the authenticated subject', async () => {
+    const storage = new MemoryStorage();
+    const store = coordinator(storage);
+    const client = fakeClient();
+    const auth = new SupabaseAuth(client, { store });
+    const observed: Array<{ subject: string | null, persisted: boolean }> = [];
+    auth.onChange(() => observed.push({ subject: auth.subject(), persisted: store.read()?.state === 'active' }));
+
+    await expect(auth.signUp({ email: 'new@example.test', password: 'secret' }))
+      .resolves.toEqual({ status: 'signedIn' });
+
+    expect(observed).toEqual([{ subject: 'subject-a', persisted: true }]);
+    expect(store.read()).toMatchObject({
+      state: 'active',
+      refreshToken: 'refresh-a',
+      issuer: ISSUER,
+      subject: 'subject-a',
+    });
+    expect(await auth.getAccessToken()).toBe(jwt('subject-a'));
+  });
+
+  it('reports confirmation-required sign-up without creating local session custody', async () => {
+    const store = coordinator();
+    const client = fakeClient({
+      signUp: vi.fn(async () => ({ status: 'confirmationRequired' } as const)),
+    });
+    const auth = new SupabaseAuth(client, { store });
+    const changed = vi.fn();
+    auth.onChange(changed);
+
+    await expect(auth.signUp({ email: 'new@example.test', password: 'secret' }))
+      .resolves.toEqual({ status: 'confirmationRequired' });
+    expect(auth.subject()).toBeNull();
+    expect(store.read()).toBeNull();
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it('rejects an auto-confirmed sign-up with invalid token claims without persisting it', async () => {
+    const store = coordinator();
+    const client = fakeClient({
+      signUp: vi.fn(async () => ({
+        status: 'signedIn',
+        tokens: tokens({ accessToken: 'not-a-jwt' }),
+      } as const)),
+    });
+    const auth = new SupabaseAuth(client, { store });
+
+    await expect(auth.signUp({ email: 'new@example.test', password: 'secret' }))
+      .rejects.toMatchObject({ code: 'request_failed' });
+    expect(store.read()).toBeNull();
+    expect(auth.subject()).toBeNull();
   });
 
   it('persists a validated sign-in before publishing the authenticated subject', async () => {

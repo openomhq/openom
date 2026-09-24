@@ -169,11 +169,15 @@ const authHeaders = {
   'content-type': 'application/json',
 };
 
-async function seedUser(label) {
-  const credentials = {
+function userCredentials(label) {
+  return {
     email: `auth-${label}-${randomUUID()}@openom.local`,
     password: `Local-auth-${randomUUID()}!`,
   };
+}
+
+async function seedUser(label) {
+  const credentials = userCredentials(label);
   await jsonRequest(`${authBaseUrl}/signup`, {
     method: 'POST',
     headers: authHeaders,
@@ -230,14 +234,15 @@ try {
   run('docker', ['network', 'connect', `${authProject}_default`, serverContainer]);
   await waitForOk(`${serverUrl}/ready`, 'openom JWT server', 10 * 60_000);
 
+  const wireCredentials = await seedUser('wire');
   const credentials = {
-    chain: await seedUser('chain'),
-    dag: await seedUser('dag'),
+    chain: userCredentials('chain'),
+    dag: userCredentials('dag'),
   };
   const signInResult = await jsonRequest(`${authBaseUrl}/token?grant_type=password`, {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify(credentials.chain),
+    body: JSON.stringify(wireCredentials),
   });
   const signedIn = tokenResponse(signInResult.body, 'password sign-in');
   const header = jwtPart(signedIn.access_token, 0);
@@ -286,6 +291,7 @@ try {
       OPENOM_ACCOUNT_AUTH_URL: `http://localhost:${authPort}`,
       OPENOM_ACCOUNT_PUBLISHABLE_KEY: authHeaders.apikey,
       OPENOM_ACCOUNT_CREDENTIALS: JSON.stringify(credentials),
+      OPENOM_ACCOUNT_SIGN_UP: '1',
     },
   });
 

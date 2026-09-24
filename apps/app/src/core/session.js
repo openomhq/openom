@@ -34,8 +34,10 @@ import { isAppError, makeError } from './errorModel.js';
 /** @typedef {import('./types/session.js').AuthSession} AuthSession */
 /** @typedef {import('./types/session.js').AuthProvider} AuthProvider */
 /** @typedef {import('./types/session.js').GoTrueClientLike} GoTrueClientLike */
+/** @typedef {import('./types/session.js').AuthSignUpResult} AuthSignUpResult */
 /** @typedef {import('./types/session.js').GoTrueTokenSet} GoTrueTokenSet */
 /** @typedef {import('./types/session.js').PasswordCredentials} PasswordCredentials */
+/** @typedef {{ kind: 'confirmationRequired' } | { kind: 'signedIn', tokens: GoTrueTokenSet, claims: { issuer: AuthIssuer, subject: AuthSubject }, record: AuthSessionRecord }} SignUpOutcome */
 /** @typedef {{ kind: 'inactive', record: AuthSessionRecord|null } | { kind: 'retry'|'expired', record: AuthSessionRecord } | { kind: 'refreshed', tokens: GoTrueTokenSet, claims: { issuer: AuthIssuer, subject: AuthSubject }, record: AuthSessionRecord }} RefreshOutcome */
 /** @typedef {{ kind: 'retry'|'done', record: AuthSessionRecord|null }} LogoutOutcome */
 
@@ -162,7 +164,7 @@ export class SupabaseAuth {
    * @param {{ scope?: string, store?: AuthSessionCoordinatorLike, now?: () => number, refreshMarginMs?: number }} [options]
    */
   constructor(client, { scope, store, now = Date.now, refreshMarginMs = 60_000 } = {}) {
-    if (!client || typeof client.signInWithPassword !== 'function'
+    if (!client || typeof client.signUp !== 'function' || typeof client.signInWithPassword !== 'function'
       || typeof client.refresh !== 'function' || typeof client.signOut !== 'function') {
       throw new Error('SupabaseAuth needs a GoTrue client');
     }
@@ -178,6 +180,26 @@ export class SupabaseAuth {
     this.#now = now;
     this.#refreshMarginMs = refreshMarginMs;
     this.#unsubscribeRevision = this.#store.onRevision((revision) => this.#receiveRevision(revision));
+  }
+
+  /** @param {PasswordCredentials} credentials @returns {Promise<AuthSignUpResult>} */
+  async signUp(credentials) {
+    const result = /** @type {SignUpOutcome} */ (await this.#store.runExclusive(this.#record, async (transaction) => {
+      const signedUp = await this.#client.signUp(credentials);
+      if (signedUp.status === 'confirmationRequired') return { kind: 'confirmationRequired' };
+      const claims = this.#validatedClaims(signedUp.tokens.accessToken);
+      const committed = transaction.commit({
+        state: 'active',
+        refreshToken: signedUp.tokens.refreshToken,
+        issuer: claims.issuer,
+        subject: claims.subject,
+      });
+      return { kind: 'signedIn', tokens: signedUp.tokens, claims, record: committed.record };
+    }));
+    if (result.kind === 'confirmationRequired') return { status: 'confirmationRequired' };
+    this.#install(result.tokens, result.claims, result.record);
+    this.#notify();
+    return { status: 'signedIn' };
   }
 
   async getAccessToken({ forceRefresh = false } = {}) {
@@ -279,7 +301,7 @@ export class SupabaseAuth {
   }
 
   capabilities() {
-    return { canSignUp: false, canLogin: true, sync: true };
+    return { canSignUp: true, canLogin: true, sync: true };
   }
 
   dispose() {
@@ -435,6 +457,14 @@ export class SessionController {
   }
   capabilities() {
     return this.#auth.capabilities();
+  }
+
+  /** @param {PasswordCredentials} credentials */
+  signUp(credentials) {
+    if (!this.#auth.capabilities().canSignUp || typeof this.#auth.signUp !== 'function') {
+      throw new Error('auth provider does not support interactive sign-up');
+    }
+    return this.#auth.signUp(credentials);
   }
 
   /** @param {PasswordCredentials} credentials */

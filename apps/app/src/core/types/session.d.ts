@@ -22,11 +22,12 @@ export interface AuthSession {
 }
 
 export interface InteractiveAuthSession extends AuthSession {
+  signUp(credentials: PasswordCredentials): Promise<AuthSignUpResult>;
   signIn(credentials: PasswordCredentials): Promise<void>;
   signOut(): Promise<void>;
 }
 
-export type AuthProvider = AuthSession & Partial<Pick<InteractiveAuthSession, 'signIn' | 'signOut'>>;
+export type AuthProvider = AuthSession & Partial<Pick<InteractiveAuthSession, 'signUp' | 'signIn' | 'signOut'>>;
 
 export interface AccountIdentitySource {
   memberId(): MemberId | null;
@@ -38,6 +39,10 @@ export interface PasswordCredentials {
   readonly password: string;
 }
 
+export type AuthSignUpResult =
+  | { readonly status: 'signedIn' }
+  | { readonly status: 'confirmationRequired' };
+
 export interface GoTrueTokenSet {
   readonly accessToken: string;
   readonly refreshToken: string;
@@ -45,10 +50,15 @@ export interface GoTrueTokenSet {
 }
 
 export interface GoTrueClientLike {
+  signUp(credentials: PasswordCredentials): Promise<GoTrueSignUpResult>;
   signInWithPassword(credentials: PasswordCredentials): Promise<GoTrueTokenSet>;
   refresh(refreshToken: string): Promise<GoTrueTokenSet>;
   signOut(accessToken: string): Promise<void>;
 }
+
+export type GoTrueSignUpResult =
+  | { readonly status: 'signedIn'; readonly tokens: GoTrueTokenSet }
+  | { readonly status: 'confirmationRequired' };
 
 export interface ActiveAuthSessionRecord {
   readonly version: 1;

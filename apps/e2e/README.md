@@ -10,7 +10,7 @@ Then, from `apps/`: `pnpm test:e2e` (default — excludes `@integration`), `pnpm
 `scripts/serve.mjs` itself; the account runner also starts the real local server stack and waits for `/ready`.
 Run `pnpm test:e2e:durable-identity` for the OPE-547 DAG acceptance against an ephemeral
 `AUTH=jwt` / HS256 server on port 6061; it leaves the ordinary development server untouched.
-Run `pnpm test:e2e:supabase-auth` for the isolated local GoTrue ES256/JWKS round trip. The staging
+Run `pnpm test:e2e:supabase-auth` for the isolated local GoTrue ES256/JWKS sign-up/sign-in round trip. The staging
 web deployment additionally runs `staging-auth.e2e.ts` against the deployed app, CSP, Supabase project,
 and API using credentials from the protected `staging` environment.
 
@@ -42,7 +42,8 @@ pnpm test:e2e
   `test:e2e:account`) — uses the production account facade, worker, remote store, and tree projection
   against the Docker server. Two isolated browser contexts prove register → backup → fresh-device restore
   → same durable member ID → decrypted tree reopen for both chain and DAG. The ordinary runner uses a fixed
-  dev-auth subject; the Supabase runner selects the production `SupabaseAuth` provider against local GoTrue.
+  dev-auth subject; the Supabase runner signs up through the production `SupabaseAuth` provider against local GoTrue,
+  then signs in from the fresh restore context.
 - `durable-identity.e2e.ts` + `durable-identity-harness.html` (`@integration`, dedicated
   `test:e2e:durable-identity`) — runs the DAG engine against a Docker server in real `AUTH=jwt` mode with
   self-minted HS256 tokens whose provider subject deliberately differs from the durable member ID. It proves
