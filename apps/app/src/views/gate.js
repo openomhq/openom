@@ -92,6 +92,11 @@ function welcomeScreen(app) {
   if (app.startEnabled) {
     kids.push(primary(t('gate-start'), { type: 'button', onClick: () => app.startCreate() }));
   }
+  // Returning on a new device (or already have a sync login): a quiet entry to the account page,
+  // only where the provider actually supports interactive sign-in (hidden under local DevAuth).
+  if (app.auth?.capabilities?.().canLogin) {
+    kids.push(ghost(t('account-welcome-signin'), () => app.showAccountView('signIn')));
+  }
   return shell(...kids);
 }
 

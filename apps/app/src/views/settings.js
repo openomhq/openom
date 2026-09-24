@@ -167,6 +167,15 @@ export function settingsView(app) {
     ),
 
     h('div', { class: 'card stack' },
+      h('div', { class: 'section-label' }, t('account-title')),
+      ...accountRows(app),
+      app.account.state().storagePersistence === 'denied'
+        ? h('div', { class: 'caution' }, t('account-storage-denied')) : null,
+      h('button', { class: 'button-secondary', style: { alignSelf: 'flex-start' },
+        onClick: () => app.showAccountView('overview') }, t('account-action-manage'))
+    ),
+
+    h('div', { class: 'card stack' },
       h('div', { class: 'section-label' }, t('settings-security')),
       // Reality: the tree is sealed with the passphrase. Biometrics/PIN aren't built yet, so
       // they're labelled "planned" rather than dressed up as working controls.
@@ -296,6 +305,31 @@ function picker({ items, value, onPick, ariaLabel, local = false, minWidth = 132
   const wrap = h('div', { class: 'select-wrap' }, trigger, menu);
   Object.defineProperty(wrap, 'value', { get: () => current });
   return wrap;
+}
+
+// Account & sync status, rendered independently for the auth axis and the custody axis (they are
+// orthogonal). "Manage account" opens the account overlay for the actual actions.
+function accountRows(app) {
+  const s = app.account.state();
+  const caps = app.auth.capabilities();
+  const row = (label, value, tone) => h('div', {
+    class: 'row between', style: { gap: '12px', alignItems: 'baseline', minHeight: '32px' }
+  }, h('span', {}, label),
+     h('span', { class: 'account-status account-status-' + (tone || 'muted'), style: { flex: 'none' } }, value));
+  const authKey = !caps.canLogin ? 'account-auth-local'
+    : s.auth === 'signedIn' ? 'account-auth-signedin'
+    : s.auth === 'expired' ? 'account-auth-expired' : 'account-auth-signedout';
+  const rows = [
+    row(t('account-auth-heading'), t(authKey), s.auth === 'signedIn' ? 'ok' : s.auth === 'expired' ? 'warn' : 'muted'),
+    row(t('account-data-heading'),
+      t(s.account === 'unlocked' ? 'account-data-unlocked' : s.account === 'locked' ? 'account-data-locked' : 'account-data-none'),
+      s.account === 'unlocked' ? 'ok' : 'muted'),
+  ];
+  if (s.account === 'unlocked') {
+    const syncKey = s.binding === 'backedUp' ? 'account-sync-backedup' : s.binding === 'bound' ? 'account-sync-bound' : 'account-sync-off';
+    rows.push(h('div', { class: 'muted', style: { fontSize: 'var(--t-small)' } }, t(syncKey)));
+  }
+  return rows;
 }
 
 function localePicker(app) {

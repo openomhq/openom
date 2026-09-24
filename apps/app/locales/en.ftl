@@ -254,3 +254,78 @@ error-storage-blocked = Local storage isn't available — some private-browsing 
 error-storage-corrupt = Local storage is corrupt and needs to be rebuilt.
 error-app-worker-unavailable = Something went wrong and the app needs to reload.
 error-app-internal = Something went wrong. Please try again.
+
+# --- Account & sync. Two separate credentials: the sign-in PASSWORD (Supabase, lets you
+# sync) and the PASSPHRASE (encrypts your data locally, unrecoverable). Copy keeps them distinct. ---
+# Title-bar status chip
+account-chip-attention = Attention
+account-chip-expired = Session expired
+account-chip-syncing = Syncing…
+account-chip-local = Local
+account-chip-signin = Sign in
+account-chip-synced = Synced
+account-chip-backup-needed = Backup needed
+account-chip-sync-off = Sync off
+
+# Overview
+account-title = Account & sync
+account-auth-heading = Sign-in
+account-data-heading = Your data
+account-auth-signedout = Not signed in
+account-auth-signedin = Signed in
+account-auth-expired = Session expired — sign in again to sync
+account-auth-local = Sign-in isn't available in this build — your session follows your unlocked account
+account-data-none = No account on this device yet
+account-data-locked = Locked
+account-data-unlocked = Unlocked
+account-sync-off = Sync is off
+account-sync-bound = Registered — backup still needed
+account-sync-backedup = Backed up
+account-pending-register = Finishing account registration…
+account-pending-restore = Finishing account restore…
+account-pending-backup = Finishing backup…
+account-pending-revoke = Applying the change…
+account-storage-denied = This device may evict local data. Keep sync enabled so an encrypted backup is available.
+account-two-secrets = Your sign-in password lets you sync. Your passphrase encrypts your data — no one can recover it for you.
+
+# Actions
+account-action-signin = Sign in
+account-action-signup = Sign up
+account-action-signout = Sign out
+account-action-enable-sync = Enable sync
+account-action-manage = Manage account
+account-action-resolve = Resolve
+account-action-close = Close
+account-action-back = Back
+
+# Welcome-screen entry
+account-welcome-signin = Sign in to sync
+
+# Sign-in screen
+auth-signin-title = Sign in to sync
+auth-signin-subtitle = Signing in lets your encrypted data sync across devices. You still unlock your data with your passphrase.
+auth-email = Email
+auth-password = Password
+auth-signin-submit = Sign in
+auth-signin-busy = Signing in…
+auth-to-signup = New here? Sign up
+
+# Sign-up screen
+auth-signup-title = Sign up
+auth-signup-subtitle = This is your sign-in for syncing. Your data stays end-to-end encrypted — you set the passphrase that encrypts it when you create your tree.
+auth-password-confirm = Confirm password
+auth-signup-submit = Sign up
+auth-signup-busy = Signing up…
+auth-to-signin = I already have a login
+auth-signup-mismatch = Passwords do not match.
+
+# Email-confirmation screen
+auth-confirm-title = Check your email
+auth-confirm-body = We sent a confirmation link. Confirm your email, then come back and sign in.
+auth-confirm-back = Back to sign in
+
+# Restore / conflict (placeholder screens — actions arrive in a later step; local data is untouched)
+account-restore-title = Restore your synced account
+account-restore-body = There's an existing synced account for this sign-in. Restoring it here isn't available yet — it's coming in a later step. Your local data is safe.
+account-conflict-title = Account needs attention
+account-conflict-body = This device and your synced account don't match. Resolving it here isn't available yet — nothing has been changed and your local data is untouched.

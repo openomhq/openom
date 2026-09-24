@@ -210,6 +210,40 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .command-results button { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-radius: var(--r-control); text-align: left; }
 .command-results button:hover, .command-results button[aria-selected="true"] { background: var(--accent-tint); }
 
+/* Account & sync. Overlay mirrors the command palette; panel and inputs reuse the card and lock styles. */
+.account-overlay {
+  position: fixed; inset: 0; display: grid; place-items: center; padding: 20px;
+  background: rgba(16, 24, 32, 0.28); backdrop-filter: blur(6px); z-index: 45;
+}
+.account-panel {
+  width: min(420px, 100%); background: var(--card); border-radius: var(--r-sheet);
+  box-shadow: var(--shadow-3); padding: 22px; display: flex; flex-direction: column; gap: 16px;
+  max-height: 90vh; overflow: auto;
+}
+.account-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.account-panel-title { font-weight: 600; font-size: 18px; }
+.account-close {
+  flex: none; width: 34px; height: 34px; border-radius: 10px; font-size: 22px; line-height: 1;
+  color: var(--secondary); background: var(--raised);
+}
+.account-close:disabled { opacity: .5; cursor: default; }
+.account-chip {
+  padding: 6px 12px; border-radius: 14px; font-size: var(--t-small); font-weight: 500;
+  background: var(--raised); color: var(--secondary); white-space: nowrap;
+}
+.account-chip-accent { background: var(--accent-tint); color: var(--accent-tint-text); }
+.account-chip-ok { color: var(--accent-on); }
+.account-chip-warn { color: var(--caution); }
+.account-status { font-size: var(--t-small); }
+.account-status-ok { color: var(--accent-on); }
+.account-status-warn { color: var(--caution); }
+.account-status-muted { color: var(--secondary); }
+.account-note {
+  padding: 10px 12px; border-radius: var(--r-control); background: var(--raised);
+  font-size: var(--t-small); color: var(--secondary); text-wrap: pretty;
+}
+.account-note-warn { color: var(--caution); }
+
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
   background: var(--label); color: var(--canvas); padding: 12px 18px; border-radius: 13px;

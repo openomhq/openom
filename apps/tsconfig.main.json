@@ -17,6 +17,7 @@
     "app/src/core/gotrueClient.js",
     "app/src/core/membership.js",
     "app/src/core/remoteStore.js",
+    "app/src/views/account.js",
     "app/src/vendor/comlink.d.ts",
     "app/src/vendor/app-core/openom_app_core.d.ts",
     "typecheck/domain-contracts.check.js",
