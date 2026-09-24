@@ -28,7 +28,7 @@
         this.#subscribers.add(callback);
         return () => this.#subscribers.delete(callback);
       }
-      capabilities() { return { canRegister: false, canLogin: true, sync: true }; }
+      capabilities() { return { canSignUp: false, canLogin: true, sync: true }; }
       signIn(attempt) {
         this.#attempt = { ...attempt };
         for (const callback of this.#subscribers) callback();
