@@ -9,6 +9,11 @@
     <!-- The managed sync backend's base URL, substituted at serve/deploy time (empty ⇒ local-only, no
          account wall). Per-tree backends attach on top of this; a tree with no backend never syncs. -->
     <meta name="openom:server" content="%SERVER%" />
+    <!-- Provider authentication is selected at assembly time. Direct local serving substitutes DevAuth;
+         staging/prod substitute Supabase plus its public project URL and publishable key. -->
+    <meta name="openom:auth-provider" content="%AUTH_PROVIDER%" />
+    <meta name="openom:supabase-url" content="%SUPABASE_URL%" />
+    <meta name="openom:supabase-anon-key" content="%SUPABASE_ANON_KEY%" />
     <title>openom</title>
     <!-- Fonts are vendored (scripts/vendor-fonts.mjs), never fetched from Google at runtime — a
          privacy-first app must not phone home or need the network to render. @font-face with

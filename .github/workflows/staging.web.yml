@@ -25,6 +25,7 @@ jobs:
       API_URL: https://api.staging.openom.org
       SITE_URL: https://app.staging.openom.org/
       PAGES_PROJECT: openom-staging-web
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
     steps:
       - uses: actions/checkout@v5
 
@@ -47,14 +48,17 @@ jobs:
           mkdir -p _site/functions
           cp apps/staging-gate/_middleware.js _site/functions/_middleware.js
 
-      # Fill %SITE_URL% / %LANDING% / %SERVER% (openom:server meta → the RemoteStore base URL). LANDING=live
-      # (real onboarding + backend, account wall on), SERVER = the custom API domain (the raw Function URL is locked).
+      # Fill every public runtime placeholder. The Supabase publishable key is intentionally client-visible;
+      # no service-role key or other secret enters the static site.
       - name: Substitute deploy-time placeholders
         working-directory: apps
         env:
           SITE_URL: ${{ env.SITE_URL }}
           OPENOM_LANDING: "live"
           OPENOM_SERVER: ${{ env.API_URL }}
+          OPENOM_AUTH_PROVIDER: supabase
+          SUPABASE_URL: ${{ env.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
         run: node scripts/site-url.mjs ../_site
 
       # Enforced strict CSP (verified clean in a browser under Report-Only first). script-src 'self' +
@@ -69,7 +73,7 @@ jobs:
         run: |
           cat > _site/_headers <<EOF
           /*
-            Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ${API_URL} ${R2}; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+            Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ${API_URL} ${SUPABASE_URL} ${R2}; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
             X-Content-Type-Options: nosniff
             Referrer-Policy: no-referrer
           /assets/*

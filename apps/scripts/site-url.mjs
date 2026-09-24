@@ -26,6 +26,55 @@ export async function siteUrl() {
   return value.endsWith('/') ? value : value + '/';
 }
 
+/** Resolve and validate the public provider configuration used by both local serving and deployment assembly. */
+export function authConfig(environment = process.env) {
+  const provider = environment.OPENOM_AUTH_PROVIDER?.trim() || 'dev';
+  if (provider !== 'dev' && provider !== 'supabase') {
+    throw new Error(`OPENOM_AUTH_PROVIDER must be dev or supabase, found ${provider}`);
+  }
+  if (provider === 'dev') return { provider, supabaseUrl: '', publishableKey: '' };
+
+  const supabaseUrl = environment.SUPABASE_URL?.trim() || '';
+  const publishableKey = environment.SUPABASE_PUBLISHABLE_KEY?.trim() || '';
+  if (!supabaseUrl || !publishableKey) {
+    throw new Error('Supabase auth requires SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY');
+  }
+  let parsed;
+  try {
+    parsed = new URL(supabaseUrl);
+  } catch {
+    throw new Error('SUPABASE_URL must be a valid HTTP(S) origin');
+  }
+  if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:')
+    || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+    throw new Error('SUPABASE_URL must be a valid HTTP(S) origin');
+  }
+  return { provider, supabaseUrl: parsed.origin, publishableKey };
+}
+
+const PLACEHOLDERS = [
+  '%SITE_URL%',
+  '%LANDING%',
+  '%SERVER%',
+  '%AUTH_PROVIDER%',
+  '%SUPABASE_URL%',
+  '%SUPABASE_ANON_KEY%',
+];
+
+/** Substitute every app-owned HTML placeholder and refuse to return a partial deployment artifact. */
+export function assembleHtml(html, { siteUrl: publicUrl, landing, server, auth }) {
+  const assembled = html
+    .replaceAll('%SITE_URL%', publicUrl)
+    .replaceAll('%LANDING%', landing)
+    .replaceAll('%SERVER%', server)
+    .replaceAll('%AUTH_PROVIDER%', auth.provider)
+    .replaceAll('%SUPABASE_URL%', auth.supabaseUrl)
+    .replaceAll('%SUPABASE_ANON_KEY%', auth.publishableKey);
+  const unresolved = PLACEHOLDERS.filter((placeholder) => assembled.includes(placeholder));
+  if (unresolved.length) throw new Error(`unresolved app placeholders: ${unresolved.join(', ')}`);
+  return assembled;
+}
+
 async function* htmlFiles(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -55,12 +104,16 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // The managed sync backend URL: empty unless a deployment sets OPENOM_SERVER, so production is
   // local-only (no account wall) until a server is wired.
   const server = process.env.OPENOM_SERVER ?? '';
+  const auth = authConfig();
   let touched = 0;
   for await (const file of htmlFiles(target)) {
     const before = await readFile(file, 'utf8');
-    if (!before.includes('%SITE_URL%')) continue;
-    await writeFile(file, before.replaceAll('%SITE_URL%', url).replaceAll('%LANDING%', landing).replaceAll('%SERVER%', server));
-    touched++;
+    const after = assembleHtml(before, { siteUrl: url, landing, server, auth });
+    if (after !== before) {
+      await writeFile(file, after);
+      touched++;
+    }
   }
-  console.log('site-url → ' + url + ' · demo=' + demo + ' · server=' + (server || '(none)') + ' (' + touched + ' file' + (touched === 1 ? '' : 's') + ')');
+  console.log('site-url → ' + url + ' · landing=' + landing + ' · server=' + (server || '(none)')
+    + ' · auth=' + auth.provider + ' (' + touched + ' file' + (touched === 1 ? '' : 's') + ')');
 }

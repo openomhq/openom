@@ -8,7 +8,7 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { siteUrl } from './site-url.mjs';
+import { assembleHtml, authConfig } from './site-url.mjs';
 
 const PORT = Number(process.env.PORT) || 5173;
 const ROOT = process.cwd();
@@ -17,6 +17,7 @@ const START = openIdx > -1 ? process.argv[openIdx + 1] : 'app/index.html';
 
 // Local runs answer from this server; SITE_URL only matters for a deploy.
 const LOCAL_URL = 'http://localhost:' + PORT + '/';
+const AUTH = authConfig();
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -67,7 +68,12 @@ createServer(async (req, res) => {
       // The managed sync backend: the docker-compose server by default, so synced mode works in dev
       // (set OPENOM_SERVER='' to run local-only). Substituted like %LANDING% so the placeholder never ships.
       const server = process.env.OPENOM_SERVER ?? 'http://localhost:6060';
-      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL).replaceAll('%LANDING%', landing).replaceAll('%SERVER%', server);
+      body = assembleHtml(body.toString('utf8'), {
+        siteUrl: LOCAL_URL,
+        landing,
+        server,
+        auth: AUTH,
+      });
     }
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
