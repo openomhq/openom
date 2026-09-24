@@ -20,7 +20,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       API_URL: https://api.staging.openom.org
       SITE_URL: https://app.staging.openom.org/
@@ -28,6 +28,10 @@ jobs:
       SUPABASE_URL: ${{ vars.SUPABASE_URL }}
     steps:
       - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.20.0
 
       - uses: actions/setup-node@v4
         with:
@@ -101,3 +105,18 @@ jobs:
         # relative to the CWD (join(cwd(),"functions")), NOT the deploy dir, so deploying `_site` from
         # the repo root would silently skip _site/functions and ship a static-only site (no gate).
         run: cd _site && npx --yes wrangler@4 pages deploy . --project-name "$PAGES_PROJECT" --branch main --commit-hash "${{ github.sha }}"
+
+      - name: Install browser acceptance dependencies
+        run: |
+          pnpm --dir apps install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps exec playwright install --with-deps chromium
+
+      - name: Accept deployed Supabase account round trip
+        env:
+          OPENOM_STAGING_AUTH_ACCEPTANCE: "1"
+          OPENOM_STAGING_APP_URL: ${{ env.SITE_URL }}
+          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
+        run: pnpm --dir apps exec playwright test e2e/staging-auth.e2e.ts

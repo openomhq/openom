@@ -10,6 +10,9 @@ Then, from `apps/`: `pnpm test:e2e` (default — excludes `@integration`), `pnpm
 `scripts/serve.mjs` itself; the account runner also starts the real local server stack and waits for `/ready`.
 Run `pnpm test:e2e:durable-identity` for the OPE-547 DAG acceptance against an ephemeral
 `AUTH=jwt` / HS256 server on port 6061; it leaves the ordinary development server untouched.
+Run `pnpm test:e2e:supabase-auth` for the isolated local GoTrue ES256/JWKS round trip. The staging
+web deployment additionally runs `staging-auth.e2e.ts` against the deployed app, CSP, Supabase project,
+and API using credentials from the protected `staging` environment.
 
 ```sh
 cd apps
@@ -38,15 +41,18 @@ pnpm test:e2e
 - `account-roundtrip.e2e.ts` + `account-roundtrip-harness.html` (`@integration`, dedicated
   `test:e2e:account`) — uses the production account facade, worker, remote store, and tree projection
   against the Docker server. Two isolated browser contexts prove register → backup → fresh-device restore
-  → same durable member ID → decrypted tree reopen for both chain and DAG. Its fixed dev-auth subject exists
-  only in the harness so the empty second context can authenticate before restoring custody; normal local
-  development continues to use production `DevAuth`.
+  → same durable member ID → decrypted tree reopen for both chain and DAG. The ordinary runner uses a fixed
+  dev-auth subject; the Supabase runner selects the production `SupabaseAuth` provider against local GoTrue.
 - `durable-identity.e2e.ts` + `durable-identity-harness.html` (`@integration`, dedicated
   `test:e2e:durable-identity`) — runs the DAG engine against a Docker server in real `AUTH=jwt` mode with
   self-minted HS256 tokens whose provider subject deliberately differs from the durable member ID. It proves
   both onboarding orders (register before the first tree, or register after an offline local tree), verifies
   the latter does not change the owner or DAG anchor, and checks passphrase change and recovery preserve the
   identity, keyring, and tree contents.
+- `staging-auth.e2e.ts` (`@staging`, deployment workflow only) — unlocks the real staging Pages gate,
+  verifies the assembled Supabase metadata and CSP, then uses deployed production modules to sign in, force a
+  token refresh, bind/backup the stable test identity, and restore it in a fresh browser context. The dedicated
+  account passphrase is a protected environment secret and never enters committed fixtures or test output.
 
 ## Conventions
 `.e2e.ts` = Playwright browser test (vitest only matches `*.test`/`*.spec`, so these are

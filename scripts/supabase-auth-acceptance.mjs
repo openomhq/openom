@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Prove the real local Supabase Auth wire before the browser provider is composed. The runner uses
-// pinned GoTrue with an ephemeral ES256 key, then launches a separate openom JWT server so ordinary DevAuth
-// remains untouched. Tokens and signing material stay in memory and are never printed.
+// Prove the real local Supabase Auth wire through both the direct protocol boundary and the browser's
+// production provider/account facades. The runner uses pinned GoTrue with an ephemeral ES256 key, then
+// launches a separate openom JWT server so ordinary DevAuth remains untouched. Tokens and signing material
+// stay in memory and are never printed.
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { spawnSync } from 'node:child_process';
@@ -9,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const APPS = path.join(REPO, 'apps');
 const authProject = `openom-auth-${process.pid}`;
 const serverContainer = `${authProject}-server`;
 const keyId = `local-auth-${process.pid}`;
@@ -124,6 +126,17 @@ async function waitForOk(url, description, deadlineMs = 120_000) {
     } catch (error) {
       lastStatus = error instanceof Error ? error.message : String(error);
     }
+    if (description === 'openom JWT server') {
+      const inspected = spawnSync(
+        'docker',
+        ['inspect', '--format', '{{.State.Status}} (exit {{.State.ExitCode}})', serverContainer],
+        { cwd: REPO, encoding: 'utf8' },
+      );
+      const containerStatus = inspected.status === 0 ? inspected.stdout.trim() : '';
+      if (containerStatus.startsWith('exited') || containerStatus.startsWith('dead')) {
+        throw new Error(`${description} stopped before becoming ready: ${containerStatus}`);
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   throw new Error(`${description} did not become ready at ${url}: ${lastStatus}`);
@@ -155,6 +168,19 @@ const authHeaders = {
   apikey: 'openom-local-publishable-key',
   'content-type': 'application/json',
 };
+
+async function seedUser(label) {
+  const credentials = {
+    email: `auth-${label}-${randomUUID()}@openom.local`,
+    password: `Local-auth-${randomUUID()}!`,
+  };
+  await jsonRequest(`${authBaseUrl}/signup`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify(credentials),
+  });
+  return credentials;
+}
 
 let cleaning = false;
 function cleanup() {
@@ -204,17 +230,14 @@ try {
   run('docker', ['network', 'connect', `${authProject}_default`, serverContainer]);
   await waitForOk(`${serverUrl}/ready`, 'openom JWT server', 10 * 60_000);
 
-  const email = `auth-${randomUUID()}@openom.local`;
-  const password = `Ope8-${randomUUID()}!`;
-  await jsonRequest(`${authBaseUrl}/signup`, {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify({ email, password }),
-  });
+  const credentials = {
+    chain: await seedUser('chain'),
+    dag: await seedUser('dag'),
+  };
   const signInResult = await jsonRequest(`${authBaseUrl}/token?grant_type=password`, {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify(credentials.chain),
   });
   const signedIn = tokenResponse(signInResult.body, 'password sign-in');
   const header = jwtPart(signedIn.access_token, 0);
@@ -252,7 +275,21 @@ try {
   });
   if (!logoutResponse.ok) throw new Error(`local-scope logout returned ${logoutResponse.status}`);
 
-  console.error('[Auth] real Supabase Auth signup, sign-in, refresh, JWKS, server verification, and logout passed');
+  console.error('[Auth] running the two-context account round trip through SupabaseAuth');
+  run('pnpm', ['exec', 'playwright', 'test', 'e2e/account-roundtrip.e2e.ts'], {
+    cwd: APPS,
+    env: {
+      ...process.env,
+      OPENOM_ACCOUNT_ACCEPTANCE: '1',
+      OPENOM_ACCOUNT_SERVER_URL: serverUrl,
+      OPENOM_ACCOUNT_AUTH_PROVIDER: 'supabase',
+      OPENOM_ACCOUNT_AUTH_URL: `http://localhost:${authPort}`,
+      OPENOM_ACCOUNT_PUBLISHABLE_KEY: authHeaders.apikey,
+      OPENOM_ACCOUNT_CREDENTIALS: JSON.stringify(credentials),
+    },
+  });
+
+  console.error('[Auth] real Supabase Auth wire and browser account round trip passed');
 } catch (error) {
   failed = true;
   console.error(`[Auth] ${error instanceof Error ? error.message : String(error)}`);

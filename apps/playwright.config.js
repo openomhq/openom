@@ -19,7 +19,7 @@ export default defineConfig({
     baseURL: 'http://localhost:5173',
   },
   // serve.mjs is a plain static server; Playwright starts it and waits for the port.
-  webServer: {
+  webServer: process.env.OPENOM_STAGING_AUTH_ACCEPTANCE === '1' ? undefined : {
     command: 'node scripts/serve.mjs',
     // @integration tests need BOTH the demo affordance (one test) and the "start your family tree" onboarding
     // (the rest), so the welcome gate must show both — that's the 'test' landing mode. (Only applies to a

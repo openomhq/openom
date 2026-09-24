@@ -218,6 +218,8 @@ configs:
               header Vary "Origin"
               reverse_proxy supabase-auth:9999 {
                   header_up Host supabase-auth:9999
+                  header_down -Access-Control-Allow-Origin
+                  header_down -Access-Control-Allow-Credentials
               }
           }
           respond "openom local Supabase Auth gateway" 200

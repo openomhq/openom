@@ -6,6 +6,7 @@
   <script type="module">
     import * as Comlink from '../app/src/vendor/comlink.js';
     import { composeAccountSession } from '../app/src/core/accountComposition.js';
+    import { createAuthProvider } from '../app/src/core/authProvider.js';
     import { appCoreWorker, remoteTransport } from '../app/src/core/appCoreClient.js';
     import { RemoteStore } from '../app/src/core/remoteStore.js';
     import { TreeLibrary } from '../app/src/core/library.js';
@@ -28,7 +29,7 @@
         this.#subscribers.add(callback);
         return () => this.#subscribers.delete(callback);
       }
-      capabilities() { return { canRegister: true, canLogin: true, sync: true }; }
+      capabilities() { return { canSignUp: false, canLogin: false, sync: true }; }
       signIn(subject) {
         this.#subject = subject;
         for (const callback of this.#subscribers) callback();
@@ -36,12 +37,24 @@
       dispose() { this.#subscribers.clear(); }
     }
 
-    const serverUrl = new URL(location.href).searchParams.get('server') ?? 'http://localhost:6060';
+    const parameters = new URL(location.href).searchParams;
+    const serverUrl = parameters.get('server') ?? 'http://localhost:6060';
+    const authMode = parameters.get('auth') ?? 'fixed-dev';
+    const authUrl = parameters.get('authUrl') ?? '';
+    const publishableKey = parameters.get('publishableKey') ?? '';
+    if (authMode !== 'fixed-dev' && authMode !== 'supabase') throw new Error(`unsupported test auth: ${authMode}`);
     const worker = appCoreWorker();
     await worker.warm();
     let provider;
     const composition = await composeAccountSession(worker, {
-      createAuth: () => (provider = new FixedDevAuth()),
+      createAuth: (account) => {
+        provider = authMode === 'supabase'
+          ? createAuthProvider(account, {
+              config: { provider: 'supabase', url: authUrl, publishableKey },
+            })
+          : new FixedDevAuth();
+        return provider;
+      },
       createRemote: (auth) => new RemoteStore({ baseUrl: serverUrl, auth }),
     });
     const { account, remote } = composition;
@@ -57,10 +70,19 @@
       }
     }
 
+    async function signIn(memberId, credentials) {
+      if (authMode === 'supabase') {
+        if (typeof provider.signIn !== 'function') throw new Error('Supabase test provider cannot sign in');
+        await provider.signIn(credentials);
+        return;
+      }
+      provider.signIn(memberId);
+    }
+
     window.accountAcceptance = {
-      async createAndBackup({ passphrase, engine, given }) {
+      async createAndBackup({ passphrase, engine, given, credentials }) {
         const created = await account.createAccount(passphrase);
-        provider.signIn(created.memberId);
+        await signIn(created.memberId, credentials);
         await account.enableSync();
 
         const identity = await ensureTreeIdentity(created.memberId);
@@ -76,6 +98,7 @@
 
         return {
           memberId: created.memberId,
+          authSubject: provider.subject(),
           treeId: [...identity.bytes],
           docId: identity.uuid,
           personName: `${given} ${engine}-restored`,
@@ -87,8 +110,8 @@
         };
       },
 
-      async restoreAndOpen({ subject, passphrase, engine, treeId, docId }) {
-        provider.signIn(subject);
+      async restoreAndOpen({ subject, credentials, passphrase, engine, treeId, docId }) {
+        await signIn(subject, credentials);
         const restored = await account.restore({ passphrase });
         await attachTree(docId);
         await worker.restoreTree({ treeId: new Uint8Array(treeId), docId, engine });
@@ -96,6 +119,7 @@
         const tree = await new TreeLibrary(worker).open(docId);
         return {
           memberId: restored.memberId,
+          authSubject: provider.subject(),
           people: tree.allPeople().map((person) => `${person.given} ${person.surname}`.trim()),
           accountState: {
             auth: account.state().auth,

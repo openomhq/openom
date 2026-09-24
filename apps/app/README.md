@@ -231,6 +231,11 @@ fonts/                 vendored woff2 subsets (vendor-fonts.mjs) — never fetch
 styles/                tokens.css (design tokens), app.css (app styles), fonts.css (@font-face).
 ```
 
+Local serving selects `DevAuth` unless `OPENOM_AUTH_PROVIDER=supabase` is explicitly supplied together
+with `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Staging assembly requires those public values, includes
+the Supabase origin in `connect-src`, and runs a protected two-context account backup/restore acceptance after
+deployment. `pnpm test:e2e:supabase-auth` runs the equivalent provider path against isolated local GoTrue.
+
 ## Conventions
 
 - **Module boundary = file boundary.** Every `src/` file is a plain ES module imported by
