@@ -192,6 +192,8 @@ src/core/              orchestration — no UI, no rendering.
                            email/password sign-up, sign-in, and sign-out, keeps access tokens in memory, and serializes
                            rotating refresh custody across browser tabs. Sign-up reports confirmation-required without
                            creating local session custody when Supabase email confirmation is enabled.
+  accountUiActions.js      coordinates presentational account actions, busy/error state, and post-auth remote probing;
+                           it renders no DOM and keeps provider registration distinct from durable identity binding.
   lockPolicy.js            decides WHEN to auto-lock; platform-agnostic (calls back into the app).
   watermarks.js            anti-rollback: refuses a keyring/snapshot older than one already seen.
   blobs.js                 content-addressed file storage, alongside the document not inside it.
@@ -217,7 +219,8 @@ src/ui/                generic view-layer helpers, no domain knowledge.
 
 src/views/             one file per screen, composed from ui/ + core/ read helpers: ancestors.js,
                        detail.js, editor.js, fan.js, gate.js (pre-unlock flow), graph.js,
-                       onboarding.js, people.js, settings.js, transfer.js.
+                       onboarding.js, people.js, settings.js, transfer.js. account.js is the stable account-overlay
+                       and status-chip presentation hook; lifecycle decisions remain in accountUiActions.js.
 
 src/vendor/            generated + third-party, never hand-edited.
   app-core/, tree/        wasm-bindgen output for openom-app-core / openom-data-tree — gitignored,
@@ -237,7 +240,10 @@ Local serving selects `DevAuth` unless `OPENOM_AUTH_PROVIDER=supabase` is explic
 with `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Staging assembly requires those public values, includes
 the Supabase origin in `connect-src`, and runs a protected two-context account backup/restore acceptance after
 deployment. `pnpm test:e2e:supabase-auth` signs up through the production provider against isolated local GoTrue,
-then signs in from a fresh context to restore the account and reopen its tree.
+then signs in from a fresh context to restore the account and reopen its tree. The same runner restarts GoTrue
+with confirmation required and verifies that sign-up creates no client session. Local `.env` may set
+`OPENOM_SUPABASE_MAILER_AUTOCONFIRM=false` to exercise that UI state manually; hosted Supabase confirmation
+remains a server-side project setting.
 
 ## Conventions
 

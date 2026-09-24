@@ -8,6 +8,7 @@ import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GoTrueClient } from '../apps/app/src/core/gotrueClient.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const APPS = path.join(REPO, 'apps');
@@ -163,6 +164,7 @@ const composeEnv = {
   ...process.env,
   OPENOM_SUPABASE_AUTH_PORT: String(authPort),
   OPENOM_SUPABASE_JWT_KEYS: signingKeys(),
+  OPENOM_SUPABASE_MAILER_AUTOCONFIRM: 'true',
 };
 const authHeaders = {
   apikey: 'openom-local-publishable-key',
@@ -295,7 +297,25 @@ try {
     },
   });
 
-  console.error('[Auth] real Supabase Auth wire and browser account round trip passed');
+  console.error('[Auth] restarting Supabase Auth with email confirmation required');
+  removeServer();
+  removeAuthStack(composeEnv);
+  const confirmationEnv = {
+    ...composeEnv,
+    OPENOM_SUPABASE_MAILER_AUTOCONFIRM: 'false',
+  };
+  dockerCompose(['up', '-d', 'supabase-auth-gateway'], confirmationEnv);
+  await waitForJson(`${authBaseUrl}/.well-known/jwks.json`, 'confirmation-required Supabase Auth JWKS');
+  const confirmationClient = new GoTrueClient({
+    url: `http://localhost:${authPort}`,
+    publishableKey: authHeaders.apikey,
+  });
+  const confirmation = await confirmationClient.signUp(userCredentials('confirmation'));
+  if (confirmation.status !== 'confirmationRequired') {
+    throw new Error('Supabase Auth did not return the confirmation-required sign-up outcome');
+  }
+
+  console.error('[Auth] real Supabase Auth immediate-session and confirmation-required flows passed');
 } catch (error) {
   failed = true;
   console.error(`[Auth] ${error instanceof Error ? error.message : String(error)}`);

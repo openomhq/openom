@@ -159,7 +159,9 @@ services:
       GOTRUE_JWT_SECRET: openom-local-gotrue-fallback-secret-32-chars
       GOTRUE_SITE_URL: http://localhost:5173
       GOTRUE_DISABLE_SIGNUP: "false"
-      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      # true gives a session immediately; false returns a confirmation-required user response.
+      # This is local GoTrue behavior only. Hosted Supabase projects configure confirmation server-side.
+      GOTRUE_MAILER_AUTOCONFIRM: "${OPENOM_SUPABASE_MAILER_AUTOCONFIRM:-true}"
       GOTRUE_SMTP_ADMIN_EMAIL: admin@openom.local
 
   # Hosted Supabase exposes GoTrue below /auth/v1; bare GoTrue serves from /. Keep the local and hosted

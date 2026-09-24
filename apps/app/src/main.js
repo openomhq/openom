@@ -6,6 +6,7 @@ import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { createAuthProvider } from './core/authProvider.js';
 import { composeAccountSession } from './core/accountComposition.js';
+import { AccountUiActions } from './core/accountUiActions.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
 import {
@@ -32,6 +33,7 @@ import { settingsView } from './views/settings.js';
 import { transferView } from './views/transfer.js';
 import { onboardingView } from './views/onboarding.js';
 import { gateView } from './views/gate.js';
+import { accountOverlayView, accountStatusChip } from './views/account.js';
 
 // Auto-lock window (minutes; 0 = off) is a device preference — like the locale, it lives in
 // localStorage so it survives reloads and is available before any tree is open.
@@ -115,6 +117,7 @@ class App {
   accountAuthState = 'signedOut';
   unsubscribeAccount = null;
   accountComposition = null;
+  accountActions = null;
   // The active real (lockable) sealer session, or null at the gate / in the demo. Auto-lock
   // and "Lock now" act on this; the demo never sets it (there'd be no keyring to re-unlock).
   sealer = null;
@@ -123,6 +126,7 @@ class App {
 
   constructor(root) {
     this.root = root;
+    this.accountOverlayRoot = document.getElementById('account-overlay');
     this.schema = new SchemaRegistry();
     // Attached once here (not per enterApp) so a lock → re-unlock cycle doesn't pile up render
     // subscriptions on the app-level schema.
@@ -137,13 +141,23 @@ class App {
     this.unsubscribeAccount?.();
     this.unsubscribeAccount = null;
     this.accountComposition?.dispose();
+    this.accountActions = null;
+    this.renderAccountSurface();
     this.accountComposition = await composeAccountSession(this.worker, {
       createAuth: (account) => createAuthProvider(account),
       createRemote: (auth) => (this.serverUrl ? new RemoteStore({ baseUrl: this.serverUrl, auth }) : null),
     });
     ({ account: this.account, auth: this.auth, remote: this.remote } = this.accountComposition);
+    this.accountActions = new AccountUiActions({
+      account: this.account,
+      auth: this.auth,
+      onChange: () => this.render(),
+      errorText: (error) => errText(error),
+      logError: (operation, error) => logError(`account-${operation}`, error),
+    });
     this.accountAuthState = this.account.state().auth;
     this.unsubscribeAccount = this.account.onChange((state) => this.onAccountStateChange(state));
+    this.renderAccountSurface();
   }
 
   async boot() {
@@ -200,6 +214,36 @@ class App {
     const id = this.account.memberId();
     if (!id) throw new Error('profile account is locked');
     return id;
+  }
+
+  accountUiState() {
+    return this.accountActions?.state() ?? Object.freeze({
+      screen: null, busy: null, error: '', notice: null, discovery: 'unknown',
+    });
+  }
+
+  showAccountView(screen = 'overview') {
+    this.accountActions?.show(screen);
+  }
+
+  closeAccountView() {
+    this.accountActions?.close();
+  }
+
+  doSignUp(email, password) {
+    return this.accountActions?.signUp({ email, password }) ?? Promise.resolve(null);
+  }
+
+  doSignIn(email, password) {
+    return this.accountActions?.signIn({ email, password }) ?? Promise.resolve(null);
+  }
+
+  doSignOut() {
+    return this.accountActions?.signOut() ?? Promise.resolve(null);
+  }
+
+  doEnableSync() {
+    return this.accountActions?.enableSync() ?? Promise.resolve(null);
   }
 
   // Facade auth changes affect only remote connectivity. The local unlocked account remains usable offline.
@@ -987,6 +1031,7 @@ class App {
 
   // ------------------------------------------------------------ render
   render() {
+    this.renderAccountSurface();
     // While a gate is up it owns its DOM (mounted via renderGate); the global render path is a
     // no-op so font-load/resize can't remount and wipe a half-typed passphrase. `!this.tree`
     // also covers the boot window before any tree exists (a cached-font `fonts.ready` can fire
@@ -1019,6 +1064,14 @@ class App {
       const next = this.root.querySelector('.content');
       if (next) next.scrollTop = keep;
     }
+  }
+
+  renderAccountSurface() {
+    if (!this.accountOverlayRoot) return;
+    const open = this.accountUiState().screen !== null;
+    const node = open ? accountOverlayView(this) : null;
+    this.accountOverlayRoot.replaceChildren(...(node ? [node] : []));
+    this.accountOverlayRoot.hidden = node === null;
   }
 
   /**
@@ -1081,6 +1134,7 @@ class App {
       h('div', { class: 'title' }, h('span', {}, 'open'), h('span', { class: 'om' }, 'om')),
 
       h('div', { class: 'titlebar-actions' },
+        accountStatusChip(this),
         isTreeArea && !compact ? h('div', { class: 'segmented' },
           h('button', { type: 'button', 'aria-pressed': String(this.view === 'tree'),
             title: t('view-ancestors'), 'aria-label': t('view-ancestors'),
