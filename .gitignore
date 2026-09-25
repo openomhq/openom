@@ -21,6 +21,14 @@ apps/app/src/vendor/app-core/
 
 plan/
 
+# Terraform working directories, local state, and saved plans. Environment configuration and
+# dependency lock files remain tracked.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+
 # Stray local pnpm store (host artifact); the real store lives in a Docker volume.
 .pnpm-store/
 
