@@ -55,7 +55,8 @@ with the preview backend configuration:
 export AWS_PROFILE=openom-admin
 export CLOUDFLARE_API_TOKEN=...
 terraform -chdir=infra/terraform/preview init -backend-config=env/preview.s3.tfbackend
-terraform -chdir=infra/terraform/preview plan -var-file=env/preview.tfvars
+terraform -chdir=infra/terraform/preview plan -var-file=env/preview.tfvars -out=.terraform/preview.tfplan
+terraform -chdir=infra/terraform/preview show -json .terraform/preview.tfplan | node scripts/preview-plan-check.mjs
 ```
 
 The token is deliberately vendor-prefixed. The per-preview application namespace is not: workflows set the
