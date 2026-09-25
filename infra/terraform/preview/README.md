@@ -15,6 +15,11 @@ records at the same edge. Unknown routes terminate at the edge. The declared ori
 that always returns 404; its only purpose is to supply the OAC configuration inherited by dynamically selected
 preview API origins.
 
+The Pages project is direct-upload only; GitHub integration is intentionally absent so untrusted pull-request
+code cannot trigger provider-side deployments. R2 permits presigned media access only from the preview app
+wildcard. Every server still receives its own `OBJECT_STORE_KEY_PREFIX`; CORS is not an isolation boundary.
+Lambda artifacts are private, encrypted at rest, and expire after seven days.
+
 ## Route contract
 
 The CloudFront KeyValueStore uses the normalized preview slug as its key. Its value is JSON:
