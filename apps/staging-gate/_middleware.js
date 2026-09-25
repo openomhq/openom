@@ -69,7 +69,7 @@ export async function onRequest(context) {
         },
       });
     }
-    return gatePage(env, { error: true, status: 401 });
+    return gatePage(env, { error: true });
   }
 
   // Already through the gate → serve the app.
@@ -77,10 +77,10 @@ export async function onRequest(context) {
   if (cookies[COOKIE] === token) return next();
 
   // Otherwise show the gate.
-  return gatePage(env, { status: 401 });
+  return gatePage(env);
 }
 
-async function gatePage(env, { error = false, status = 200 } = {}) {
+async function gatePage(env, { error = false } = {}) {
   const sha = (env.CF_PAGES_COMMIT_SHA || '').slice(0, 7) || 'unknown';
   const branch = env.CF_PAGES_BRANCH || 'unknown';
   const s = await fetchStatus();
@@ -164,7 +164,7 @@ async function gatePage(env, { error = false, status = 200 } = {}) {
 </html>`;
 
   return new Response(html, {
-    status,
+    status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',

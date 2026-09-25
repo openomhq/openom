@@ -26,7 +26,7 @@ async function waitForExpectedGate(page: Page, options: StagingGateOptions): Pro
       const response = await page.goto(options.stagingUrl, { waitUntil: 'domcontentloaded' });
       const observed = await gateObservation(page, response);
       last = `status=${observed.status ?? 'none'}, gate=${observed.visible}, commit=${observed.commit || 'none'}`;
-      if (response?.status() === 401 && observed.visible && observed.commit === options.expectedCommit) {
+      if (response?.status() === 200 && observed.visible && observed.commit === options.expectedCommit) {
         return response;
       }
     } catch (error) {
@@ -45,6 +45,9 @@ export async function enterStagingGate(page: Page, options: StagingGateOptions):
   const response = await navigation;
   if (!response?.ok()) {
     throw new Error(`staging gate rejected the configured password (status ${response?.status() ?? 'none'})`);
+  }
+  if (await page.locator('form[action="/__gate"]').isVisible().catch(() => false)) {
+    throw new Error('staging gate rejected the configured password');
   }
 
   const cookies = await page.context().cookies(options.stagingUrl);

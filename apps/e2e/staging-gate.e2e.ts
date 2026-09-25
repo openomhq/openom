@@ -13,7 +13,7 @@ test('staging gate admits a fresh browser through its expected deployed challeng
     if (request.method() === 'POST' && url.pathname === '/__gate') {
       const submitted = new URLSearchParams(request.postData() ?? '').get('password');
       if (submitted !== password) {
-        await route.fulfill({ status: 401, contentType: 'text/html', body: gatePage('abcdef0', true) });
+        await route.fulfill({ status: 200, contentType: 'text/html', body: gatePage('abcdef0', true) });
         return;
       }
       await route.fulfill({
@@ -34,7 +34,7 @@ test('staging gate admits a fresh browser through its expected deployed challeng
       return;
     }
     challenges += 1;
-    await route.fulfill({ status: 401, contentType: 'text/html', body: gatePage('abcdef0') });
+    await route.fulfill({ status: 200, contentType: 'text/html', body: gatePage('abcdef0') });
   });
 
   const response = await enterStagingGate(page, {

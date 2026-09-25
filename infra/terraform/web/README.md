@@ -14,7 +14,9 @@ domain; the workflow `staging.web.yml` uploads content (the app + the gate Funct
 A Pages Function (`apps/staging-gate/_middleware.js`, deployed into `_site/functions/`) serves a branded
 "openom · staging" page with a **single shared password**, build info (commit, branch), and live
 per-service health — API / DATABASE / AUTH / STORAGE, read server-side from the API's `/status`. Enter
-the password → a 30-day cookie → the app loads. The app's own account login is the *real* gate behind it.
+the password → a 30-day cookie → the app loads. The form is served as a normal `200` HTML response rather
+than an HTTP-auth `401`, so all supported browsers render it consistently. The app's own account login is
+the *real* gate behind it.
 
 Share access by telling someone the password (works from your phone); to revoke everyone, rotate it.
 This trades per-person control for zero-friction sharing — fine for a pre-release staging env with no
