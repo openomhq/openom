@@ -1,4 +1,4 @@
-name: web
+name: ci.web
 
 # Die Webapp ist reines ES-Modul-Werk ohne Build: pruefen heisst hier, dass
 # jede Datei laedt und die Uebersetzungen vollstaendig sind.

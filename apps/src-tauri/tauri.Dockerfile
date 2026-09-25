@@ -1,7 +1,7 @@
 # A rust image with the WebKitGTK system libraries the Tauri shell (openom-tauri) needs, so its crate
 # can be `cargo check`/`test`ed locally in Docker exactly as the desktop CI does — the plain pinned Rust
 # the normal runner (scripts/cargo.mjs) uses lacks them, which is why that runner excludes openom-tauri.
-# Mirrors the apt list in .github/workflows/desktop.yml. Self-contained: copies nothing (the workspace is
+# Mirrors the apt list in .github/workflows/ci.desktop.yml. Self-contained: copies nothing (the workspace is
 # bind-mounted at run time), so any dir works as the build context.
 #
 #   docker build -t openom-tauri-check -f apps/src-tauri/tauri.Dockerfile apps/src-tauri

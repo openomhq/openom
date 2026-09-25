@@ -1,4 +1,4 @@
-name: otel-export
+name: ci.otel-export
 
 # The OTLP EXPORT-mechanism check (openom/tests/tracing_export.rs): the real batch processor +
 # blocking reqwest client + force_flush, over a loopback receiver. Its failure trigger is a change

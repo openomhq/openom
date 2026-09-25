@@ -1,4 +1,4 @@
-name: integration
+name: ci.server
 
 # The server contract suite (openom/tests/api.rs + the storage checksum test) against a LIVE Postgres + MinIO.
 # These are the `#[ignore]`d integration tests the compile/unit jobs never run, so without this gate a

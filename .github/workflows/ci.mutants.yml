@@ -1,4 +1,4 @@
-name: mutants
+name: ci.mutants
 
 # Mutation testing (cargo-mutants) for the security-critical crates plus the pure core: it edits the
 # code in small ways (a mutant) and re-runs that crate's tests, checking each break is CAUGHT — surfacing

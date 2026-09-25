@@ -1,4 +1,4 @@
-name: mobile
+name: ci.mobile
 
 # Android and iOS — an OPTIONAL build check, manual only (workflow_dispatch). The SDKs make every run
 # expensive, and there is no release/signing pipeline yet: this only verifies that the Tauri mobile app

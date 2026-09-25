@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Local-only clippy `nursery` regression check — NOT wired into CI.
 //
-// The workspace deny-gate is `clippy::pedantic` + `clippy::cargo` (see .github/workflows/desktop.yml and
+// The workspace deny-gate is `clippy::pedantic` + `clippy::cargo` (see .github/workflows/ci.desktop.yml and
 // [workspace.lints.clippy]). `nursery` is deliberately NOT in that gate: it is an unstable lint group, so
 // gating on it would make CI flaky as toolchains shift what it flags. But a curated subset of nursery lints
 // is genuinely worth keeping clean, so this script lets a developer check for regressions on demand:

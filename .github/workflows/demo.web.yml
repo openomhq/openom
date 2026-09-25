@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: demo.web
 
 # Publishes the web app to GitHub Pages. The app ships as Tauri loads it — no bundler — but it loads ONE
 # gitignored build artifact, the openom-app-core wasm, which CI must compile before assembling the site.
@@ -14,7 +14,7 @@ permissions:
 
 # One deployment at a time; never cancel a running one.
 concurrency:
-  group: pages
+  group: demo.web
   cancel-in-progress: false
 
 jobs:

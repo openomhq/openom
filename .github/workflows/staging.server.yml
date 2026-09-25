@@ -1,4 +1,4 @@
-name: staging.deploy
+name: staging.server
 
 # Server deploy to staging: assume the OIDC deploy role (no static AWS keys), build the Lambda once
 # with cargo-lambda, upload a SHA-keyed artifact, run migrations out-of-band against the DIRECT Neon
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: staging.deploy
+  group: staging.server
   cancel-in-progress: false
 
 permissions:

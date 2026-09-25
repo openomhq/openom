@@ -2,7 +2,7 @@
 
 <img src="assets/tree.svg" alt="openom logo — a tree" width="120" align="right">
 
-[![desktop](https://github.com/openomhq/openom/actions/workflows/desktop.yml/badge.svg)](https://github.com/openomhq/openom/actions/workflows/desktop.yml)
+[![ci.desktop](https://github.com/openomhq/openom/actions/workflows/ci.desktop.yml/badge.svg)](https://github.com/openomhq/openom/actions/workflows/ci.desktop.yml)
 [![Docs](https://readthedocs.org/projects/openom/badge/?version=latest)](https://openom.readthedocs.io/)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue.svg)](LICENSE)
 
@@ -59,12 +59,12 @@ refresh tokens, JWKS verification, and the openom server's unregistered-account 
 
 | Workflow | Runs on | Answers |
 | --- | --- | --- |
-| `web.yml` | push to `main` / PR | Do all modules parse, error codes stay in sync, locales complete, and no `.stack` leak into the UI? (seconds, no toolchain) |
-| `desktop.yml` | push to `main` / PR / manual | Clippy gate (runs first, blocks the matrix), then the Tauri build on Windows/macOS/Linux + the store-conformance suite (MemoryStore ≡ SqliteStore) |
-| `integration.yml` | push to `main` / PR / manual | The server contract suite (`openom/tests/api.rs` + storage checksum) against a live Postgres + MinIO — the `#[ignore]`d tests the unit jobs skip |
-| `pages.yml` | manual | Publishes the web app to GitHub Pages |
-| `mobile.yml` | manual / weekly ×2 (Mon + Thu) | Android APK + unsigned iOS-simulator build (unsigned `--debug` build-check artifacts — the SDKs are slow, no signing pipeline yet) |
-| `mutants.yml` | manual / weekly (Mon) | Mutation testing (`cargo-mutants`) over the security-critical crypto/keyring/CRDT crates + the pure-core crates — surfaces test gaps a green suite hides |
+| `ci.web.yml` | push to `main` / PR | Do all modules parse, error codes stay in sync, locales complete, and no `.stack` leak into the UI? (seconds, no toolchain) |
+| `ci.desktop.yml` | push to `main` / PR / manual | Clippy gate (runs first, blocks the matrix), then the Tauri build on Windows/macOS/Linux + the store-conformance suite (MemoryStore ≡ SqliteStore) |
+| `ci.server.yml` | push to `main` / PR / manual | The server contract suite (`openom/tests/api.rs` + storage checksum) against a live Postgres + MinIO — the `#[ignore]`d tests the unit jobs skip |
+| `demo.web.yml` | manual | Publishes the local-only web demo to GitHub Pages |
+| `ci.mobile.yml` | manual / weekly ×2 (Mon + Thu) | Android APK + unsigned iOS-simulator build (unsigned `--debug` build-check artifacts — the SDKs are slow, no signing pipeline yet) |
+| `ci.mutants.yml` | manual / weekly (Mon) | Mutation testing (`cargo-mutants`) over the security-critical crypto/keyring/CRDT crates + the pure-core crates — surfaces test gaps a green suite hides |
 
 ## Brand
 

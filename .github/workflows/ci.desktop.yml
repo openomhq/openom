@@ -1,4 +1,4 @@
-name: desktop
+name: ci.desktop
 
 # Tauri-Anwendung fuer Windows, macOS und Linux. Hier laeuft auch die
 # Konformitaets-Suite des Stores: MemoryStore und SqliteStore muessen sich
