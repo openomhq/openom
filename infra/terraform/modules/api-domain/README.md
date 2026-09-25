@@ -4,6 +4,10 @@ CloudFront + a DNS-validated ACM cert + Cloudflare DNS in front of a Lambda **Fu
 across environments — staging, production, and per-PR preview envs each instantiate it with a different
 `api_domain` / `function_url_host`.
 
+Viewer traffic supports HTTP/2 (with HTTP/1.1 fallback). HTTP/3 is deliberately disabled because QUIC
+over UDP/443 is commonly blocked by enterprise networks, and some managed Chromium clients fail instead
+of falling back cleanly. The modern `TLSv1.2_2021` security policy remains unchanged.
+
 ## Inputs
 
 | name                 | required | notes                                                        |

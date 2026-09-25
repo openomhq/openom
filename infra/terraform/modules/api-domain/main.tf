@@ -64,9 +64,11 @@ resource "aws_cloudfront_origin_access_control" "api" {
 resource "aws_cloudfront_distribution" "api" {
   enabled         = true
   is_ipv6_enabled = true
-  http_version    = "http2and3"
-  aliases         = [var.api_domain]
-  comment         = var.comment
+  # Keep QUIC optionality out of the critical API path: some enterprise networks block UDP/443
+  # without letting managed Chromium clients fall back cleanly from HTTP/3 to HTTP/2.
+  http_version = "http2"
+  aliases      = [var.api_domain]
+  comment      = var.comment
 
   origin {
     domain_name              = var.function_url_host

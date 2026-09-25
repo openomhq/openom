@@ -59,7 +59,8 @@ Resource logic is in `../modules/api-domain`, so new environments add only thin 
 
 ## Notes
 
-- `PriceClass_100` (NA + EU edges) — cheapest tier covering our users. IPv6 + HTTP/3 on.
+- `PriceClass_100` (NA + EU edges) — cheapest tier covering our users. IPv6 + HTTP/2 on; HTTP/3 is
+  deliberately disabled for enterprise-network compatibility.
 - Managed **CachingDisabled** + **AllViewerExceptHostHeader** policies: the API is never cached, and
   every viewer header except `Host` is forwarded (a Function URL origin must present its own `Host` for
   TLS/SNI).
