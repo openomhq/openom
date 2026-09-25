@@ -20,6 +20,11 @@ code cannot trigger provider-side deployments. R2 permits presigned media access
 wildcard. Every server still receives its own `OBJECT_STORE_KEY_PREFIX`; CORS is not an isolation boundary.
 Lambda artifacts are private, encrypted at rest, and expire after seven days.
 
+The shared API execution role can write only matching preview Lambda logs. The GitHub OIDC deployment role
+can manage only `openom-preview-*-api` functions and log groups, `previews/*` artifact objects, and this root's
+single KVS. It can pass only the shared execution role, cannot mutate IAM roles, cannot modify the standing
+CloudFront distribution, and can create or update Function URLs only with `AWS_IAM` authorization.
+
 ## Route contract
 
 The CloudFront KeyValueStore uses the normalized preview slug as its key. Its value is JSON:

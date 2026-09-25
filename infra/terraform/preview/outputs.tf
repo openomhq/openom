@@ -41,3 +41,13 @@ output "preview_object_store" {
     region   = "auto"
   }
 }
+
+output "preview_api_execution_role_arn" {
+  description = "Shared, boundary-capped execution role for ephemeral preview APIs."
+  value       = aws_iam_role.preview_api.arn
+}
+
+output "preview_deploy_role_arn" {
+  description = "GitHub OIDC role assumed by privileged preview lifecycle jobs."
+  value       = aws_iam_role.preview_deploy.arn
+}
