@@ -13,6 +13,10 @@
 //! (prod). One concrete store, not a trait: both backends speak the same S3 API, so
 //! a trait would be a speculative abstraction over a single impl.
 //!
+//! Every operation qualifies its semantic key with the deployment's validated
+//! `OBJECT_STORE_KEY_PREFIX` here. Callers and Postgres continue to use prefix-free semantic keys,
+//! so there is no alternate unscoped path for proxy, GC, copy, or presigned operations.
+//!
 //! **Upload integrity is enforced at the PUT**, not at read: the caller passes the
 //! SHA-256 of the exact bytes being stored, and we sign it into the request as
 //! `x-amz-checksum-sha256`; the backend rejects a mismatched body with a 4xx
@@ -26,7 +30,7 @@ use base64::Engine as _;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use sha2::{Digest, Sha256};
 
-use crate::config::Config;
+use crate::config::{Config, ObjectStoreKeyPrefix};
 
 /// A signed-request builder + HTTP client bound to one bucket.
 #[derive(Clone)]
@@ -38,6 +42,8 @@ pub struct S3Store {
     public_bucket: Bucket,
     /// Used by `copy_object` to build `x-amz-copy-source`.
     bucket_name: String,
+    /// Deployment namespace inside the bucket; empty when the bucket itself is isolated.
+    key_prefix: ObjectStoreKeyPrefix,
     credentials: Credentials,
     http: reqwest::Client,
 }
@@ -105,9 +111,14 @@ impl S3Store {
             bucket,
             public_bucket,
             bucket_name: config.s3_bucket.clone(),
+            key_prefix: config.object_store_key_prefix.clone(),
             credentials,
             http: reqwest::Client::new(),
         })
+    }
+
+    fn key(&self, semantic_key: &str) -> String {
+        self.key_prefix.qualify(semantic_key)
     }
 
     /// Idempotently create the bucket (dev bootstrap; in prod the bucket is
@@ -152,10 +163,11 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the upload fails.
     pub async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<(), StorageError> {
+        let key = self.key(key);
         let checksum = sha256_b64(&body);
         let resp = self
             .send_retrying(|| {
-                let mut action = self.bucket.put_object(Some(&self.credentials), key);
+                let mut action = self.bucket.put_object(Some(&self.credentials), &key);
                 action
                     .headers_mut()
                     .insert(CHECKSUM_HEADER, checksum.clone());
@@ -178,11 +190,12 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the download fails.
     pub async fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let key = self.key(key);
         let resp = self
             .send_retrying(|| {
                 let url = self
                     .bucket
-                    .get_object(Some(&self.credentials), key)
+                    .get_object(Some(&self.credentials), &key)
                     .sign(PROXY_TTL);
                 self.http.get(url)
             })
@@ -202,11 +215,12 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the delete fails.
     pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
+        let key = self.key(key);
         let resp = self
             .send_retrying(|| {
                 let url = self
                     .bucket
-                    .delete_object(Some(&self.credentials), key)
+                    .delete_object(Some(&self.credentials), &key)
                     .sign(PROXY_TTL);
                 self.http.delete(url)
             })
@@ -237,11 +251,12 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the head request fails.
     pub async fn head_object(&self, key: &str) -> Result<Option<ObjectHead>, StorageError> {
+        let key = self.key(key);
         let resp = self
             .send_retrying(|| {
                 let url = self
                     .bucket
-                    .head_object(Some(&self.credentials), key)
+                    .head_object(Some(&self.credentials), &key)
                     .sign(PROXY_TTL);
                 self.http.head(url)
             })
@@ -267,10 +282,12 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the copy fails.
     pub async fn copy_object(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        let from = self.key(from);
+        let to = self.key(to);
         let source = format!("/{}/{}", self.bucket_name, from);
         let resp = self
             .send_retrying(|| {
-                let mut action = self.bucket.put_object(Some(&self.credentials), to);
+                let mut action = self.bucket.put_object(Some(&self.credentials), &to);
                 action.headers_mut().insert("x-amz-copy-source", &source);
                 let url = action.sign(PROXY_TTL);
                 self.http.put(url).header("x-amz-copy-source", &source)
@@ -294,7 +311,8 @@ impl S3Store {
         object_sha256_b64: &str,
         ttl: Duration,
     ) -> PresignedUpload {
-        let mut action = self.public_bucket.put_object(Some(&self.credentials), key);
+        let key = self.key(key);
+        let mut action = self.public_bucket.put_object(Some(&self.credentials), &key);
         action
             .headers_mut()
             .insert(CHECKSUM_HEADER, object_sha256_b64);
@@ -308,8 +326,9 @@ impl S3Store {
     /// Presign a client media download (membership-gated at mint time, §12).
     #[must_use]
     pub fn presign_get(&self, key: &str, ttl: Duration) -> String {
+        let key = self.key(key);
         self.public_bucket
-            .get_object(Some(&self.credentials), key)
+            .get_object(Some(&self.credentials), &key)
             .sign(ttl)
             .to_string()
     }
@@ -459,6 +478,155 @@ impl From<reqwest::Error> for StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::extract::{Request, State};
+    use axum::http::{HeaderValue, Method, Response};
+    use axum::Router;
+    use tokio::sync::mpsc;
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        method: Method,
+        path: String,
+        copy_source: Option<String>,
+    }
+
+    async fn capture_request(
+        State(sender): State<mpsc::UnboundedSender<CapturedRequest>>,
+        request: Request,
+    ) -> Response<Body> {
+        let captured = CapturedRequest {
+            method: request.method().clone(),
+            path: request.uri().path().to_owned(),
+            copy_source: request
+                .headers()
+                .get("x-amz-copy-source")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+        };
+        sender
+            .send(captured)
+            .expect("capture receiver remains open");
+
+        let mut response = Response::new(Body::from("object body"));
+        response.headers_mut().insert(
+            reqwest::header::CONTENT_LENGTH,
+            HeaderValue::from_static("11"),
+        );
+        response
+    }
+
+    async fn capture_store(
+        key_prefix: ObjectStoreKeyPrefix,
+    ) -> (
+        S3Store,
+        mpsc::UnboundedReceiver<CapturedRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let app = Router::new().fallback(capture_request).with_state(sender);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capture server");
+        let address = listener.local_addr().expect("capture server address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("capture server remains available");
+        });
+
+        let endpoint = format!("http://{address}");
+        let bucket = Bucket::new(
+            endpoint.parse().expect("internal endpoint"),
+            UrlStyle::Path,
+            "openom-test".to_owned(),
+            "us-east-1".to_owned(),
+        )
+        .expect("internal bucket");
+        let public_bucket = Bucket::new(
+            endpoint.parse().expect("public endpoint"),
+            UrlStyle::Path,
+            "openom-test".to_owned(),
+            "us-east-1".to_owned(),
+        )
+        .expect("public bucket");
+        let store = S3Store {
+            bucket,
+            public_bucket,
+            bucket_name: "openom-test".to_owned(),
+            key_prefix,
+            credentials: Credentials::new("access".to_owned(), "secret".to_owned()),
+            http: reqwest::Client::new(),
+        };
+        (store, receiver, task)
+    }
+
+    async fn expect_request(
+        receiver: &mut mpsc::UnboundedReceiver<CapturedRequest>,
+        method: Method,
+        path: &str,
+    ) -> CapturedRequest {
+        let request = receiver.recv().await.expect("captured request");
+        assert_eq!(request.method, method);
+        assert_eq!(request.path, path);
+        request
+    }
+
+    #[tokio::test]
+    async fn every_object_operation_applies_the_deployment_prefix() {
+        let prefix = ObjectStoreKeyPrefix::parse(Some("previews/feat-ope-123"))
+            .expect("valid preview prefix");
+        let (store, mut requests, server) = capture_store(prefix).await;
+        let expected = |key: &str| format!("/openom-test/previews/feat-ope-123/{key}");
+
+        store
+            .put_object("trees/a/snapshot", b"snapshot".to_vec())
+            .await
+            .expect("put");
+        expect_request(&mut requests, Method::PUT, &expected("trees/a/snapshot")).await;
+
+        let body = store
+            .get_object("data/a/log/1")
+            .await
+            .expect("get")
+            .expect("object exists");
+        assert_eq!(body, b"object body");
+        expect_request(&mut requests, Method::GET, &expected("data/a/log/1")).await;
+
+        store
+            .head_object("staging/a/blob")
+            .await
+            .expect("head")
+            .expect("object exists");
+        expect_request(&mut requests, Method::HEAD, &expected("staging/a/blob")).await;
+
+        store.delete_object("data/a/orphan").await.expect("delete");
+        expect_request(&mut requests, Method::DELETE, &expected("data/a/orphan")).await;
+
+        store
+            .copy_object("staging/a/blob", "blobs/a/blob")
+            .await
+            .expect("copy");
+        let copy = expect_request(&mut requests, Method::PUT, &expected("blobs/a/blob")).await;
+        assert_eq!(
+            copy.copy_source.as_deref(),
+            Some("/openom-test/previews/feat-ope-123/staging/a/blob")
+        );
+
+        let upload = store.presign_put("staging/a/upload", "checksum", Duration::from_secs(60));
+        assert_eq!(
+            url::Url::parse(&upload.url).expect("upload URL").path(),
+            expected("staging/a/upload")
+        );
+        assert_eq!(
+            url::Url::parse(&store.presign_get("blobs/a/download", Duration::from_secs(60)))
+                .expect("download URL")
+                .path(),
+            expected("blobs/a/download")
+        );
+
+        server.abort();
+    }
 
     /// Verifies the load-bearing assumption of the media confirm step (§9.10): the
     /// backend enforces `x-amz-checksum-sha256` **at the PUT**, rejecting a body that

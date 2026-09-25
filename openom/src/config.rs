@@ -19,6 +19,60 @@ use std::fmt;
 
 use uuid::Uuid;
 
+const MAX_OBJECT_STORE_KEY_PREFIX_LEN: usize = 256;
+
+/// Validated, canonical prefix prepended to every object-store key. Empty for dedicated buckets;
+/// non-empty values always end in `/` and contain only path-safe ASCII segments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectStoreKeyPrefix(String);
+
+impl ObjectStoreKeyPrefix {
+    /// Parse `OBJECT_STORE_KEY_PREFIX`. Unset/blank means no prefix; a non-empty value is canonicalized to one
+    /// trailing slash. Absolute paths, traversal, empty segments, and URL-ambiguous characters fail.
+    ///
+    /// # Errors
+    /// Returns a static explanation when `raw` is not a safe relative object-key prefix.
+    pub fn parse(raw: Option<&str>) -> Result<Self, &'static str> {
+        let value = raw.unwrap_or_default().trim();
+        if value.is_empty() {
+            return Ok(Self::default());
+        }
+        if value.len() > MAX_OBJECT_STORE_KEY_PREFIX_LEN {
+            return Err("is longer than 256 bytes");
+        }
+        if value.starts_with('/') || value.contains('\\') {
+            return Err("must be a relative forward-slash path");
+        }
+
+        let value = value.strip_suffix('/').unwrap_or(value);
+        if value.is_empty()
+            || value.split('/').any(|segment| {
+                segment.is_empty()
+                    || matches!(segment, "." | "..")
+                    || !segment.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+        {
+            return Err("must contain only non-empty safe path segments");
+        }
+
+        Ok(Self(format!("{value}/")))
+    }
+
+    /// Canonical prefix, either empty or ending in `/`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Qualify one semantic object key inside this deployment's namespace.
+    #[must_use]
+    pub(crate) fn qualify(&self, key: &str) -> String {
+        format!("{}{key}", self.0)
+    }
+}
+
 /// Where the API process runs. `Local` = a long-running local HTTP server (+ pretty logs +
 /// dev routes); `Remote` = a deployed serverless function (+ JSON logs + no dev routes). Also
 /// the default source for the storage/auth axes. Selected by `OPENOM_RUNTIME` (`local` |
@@ -135,6 +189,8 @@ pub struct Config {
     pub s3_public_endpoint: String,
     /// Bucket that holds the encrypted tree envelopes.
     pub s3_bucket: String,
+    /// Optional namespace inside the shared bucket (`OBJECT_STORE_KEY_PREFIX`). Empty for a dedicated bucket.
+    pub object_store_key_prefix: ObjectStoreKeyPrefix,
     /// S3 region.
     pub s3_region: String,
     /// S3 access key id.
@@ -197,6 +253,7 @@ impl fmt::Debug for Config {
             .field("s3_endpoint", &self.s3_endpoint)
             .field("s3_public_endpoint", &self.s3_public_endpoint)
             .field("s3_bucket", &self.s3_bucket)
+            .field("object_store_key_prefix", &self.object_store_key_prefix)
             .field("s3_region", &self.s3_region)
             .field("s3_access_key", &"<redacted>")
             .field("s3_secret_key", &"<redacted>")
@@ -282,6 +339,10 @@ impl Config {
             s3_endpoint,
             s3_public_endpoint,
             s3_bucket: env::var("S3_BUCKET").unwrap_or_else(|_| "openom-trees".into()),
+            object_store_key_prefix: ObjectStoreKeyPrefix::parse(
+                env::var("OBJECT_STORE_KEY_PREFIX").ok().as_deref(),
+            )
+            .unwrap_or_else(|reason| panic!("config: invalid OBJECT_STORE_KEY_PREFIX: {reason}")),
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
             s3_access_key: env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "openom".into()),
             s3_secret_key: env::var("S3_SECRET_KEY").unwrap_or_else(|_| "openompw123".into()),
@@ -385,7 +446,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_env, parse_runtime, OpenomEnv, Runtime};
+    use super::{parse_env, parse_runtime, ObjectStoreKeyPrefix, OpenomEnv, Runtime};
 
     #[test]
     fn runtime_unset_or_empty_defaults_to_local() {
@@ -437,6 +498,45 @@ mod tests {
     }
 
     #[test]
+    fn object_store_key_prefix_is_canonical_and_empty_by_default() {
+        assert_eq!(ObjectStoreKeyPrefix::parse(None).unwrap().as_str(), "");
+        assert_eq!(
+            ObjectStoreKeyPrefix::parse(Some("  ")).unwrap().as_str(),
+            ""
+        );
+        assert_eq!(
+            ObjectStoreKeyPrefix::parse(Some(" previews/feat-ope-123 "))
+                .unwrap()
+                .as_str(),
+            "previews/feat-ope-123/"
+        );
+        assert_eq!(
+            ObjectStoreKeyPrefix::parse(Some("previews/feat-ope-123/"))
+                .unwrap()
+                .as_str(),
+            "previews/feat-ope-123/"
+        );
+    }
+
+    #[test]
+    fn object_store_key_prefix_rejects_unsafe_or_ambiguous_paths() {
+        for raw in [
+            "/previews/x",
+            "previews//x",
+            "previews/./x",
+            "previews/../x",
+            "previews\\x",
+            "previews/x%2fy",
+            "previews/x y",
+        ] {
+            assert!(
+                ObjectStoreKeyPrefix::parse(Some(raw)).is_err(),
+                "accepted {raw:?}"
+            );
+        }
+    }
+
+    #[test]
     fn debug_redacts_every_secret() {
         use super::{AuthMode, Config, JwtAlg, StorageMode};
         let cfg = Config {
@@ -450,6 +550,7 @@ mod tests {
             s3_endpoint: "https://s3".into(),
             s3_public_endpoint: "https://s3".into(),
             s3_bucket: "b".into(),
+            object_store_key_prefix: ObjectStoreKeyPrefix::default(),
             s3_region: "eu".into(),
             s3_access_key: "AKIASECRETKEYID".into(),
             s3_secret_key: "S3SECRETVALUE".into(),

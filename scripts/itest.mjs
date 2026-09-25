@@ -67,6 +67,9 @@ const env = {
   S3_REGION: 'us-east-1',
   S3_ACCESS_KEY: 'openom',
   S3_SECRET_KEY: 'openompw123',
+  // Exercise the same shared-bucket namespace boundary that full previews use. The server's
+  // Postgres records remain semantic/prefix-free; only the object-store transport sees this.
+  OBJECT_STORE_KEY_PREFIX: `integration/${database}/`,
 };
 
 const args = [
