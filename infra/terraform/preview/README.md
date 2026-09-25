@@ -10,6 +10,11 @@ object-store prefixes; preview workflows own those ephemeral resources.
 The root is applied administratively. Pull-request code must never run Terraform here or receive its
 Cloudflare and standing-infrastructure credentials.
 
+The shared distribution serves only HTTP/2, keeps caching disabled, and points both unproxied wildcard DNS
+records at the same edge. Unknown routes terminate at the edge. The declared origin is a protected Lambda
+that always returns 404; its only purpose is to supply the OAC configuration inherited by dynamically selected
+preview API origins.
+
 ## Route contract
 
 The CloudFront KeyValueStore uses the normalized preview slug as its key. Its value is JSON:
@@ -50,4 +55,5 @@ Run the exact router-source tests from the repository root:
 
 ```sh
 node --test scripts/preview-router.test.mjs
+node --test scripts/preview-sink.test.mjs
 ```
