@@ -42,9 +42,9 @@ jobs:
       - name: Build the contract suite
         run: cargo test -p openom --no-run --locked
 
-      # Postgres + MinIO from the repo's own compose (docker compose v2 is preinstalled on ubuntu-latest). ONLY
+      # Postgres + SILO from the repo's own compose (docker compose v2 is preinstalled on ubuntu-latest). ONLY
       # these two — NOT the `server` service (the tests run the router in-process) nor the profile-gated `lgtm`.
-      # MinIO's image is quay.io/minio/minio (Docker Hub removed minio/minio in 2025; the compose points there).
+      # SILO is the maintained MinIO fork and is pinned by its multi-architecture release digest in compose.
       - name: Start Postgres + MinIO
         run: docker compose up -d postgres minio
 
