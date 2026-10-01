@@ -3,8 +3,8 @@
 > The application-facing Rust core shared by the browser worker and native host: durable account custody,
 > encrypted tree sessions, the claim engine, and local-first synchronization.
 
-**Status:** built · account/tree custody cutover in progress · wasm + native rlib
-**Last updated:** 2026-09-23
+**Status:** built · durable account/tree custody complete · wasm + native rlib
+**Last updated:** 2026-10-01
 
 ## What it is — and is not
 
