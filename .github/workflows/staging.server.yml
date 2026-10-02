@@ -1,11 +1,8 @@
 name: staging.server
 
-# Server deploy to staging: assume the OIDC deploy role (no static AWS keys), build the Lambda once
-# with cargo-lambda, upload a SHA-keyed artifact, run migrations out-of-band against the DIRECT Neon
-# URL, terraform-apply (which publishes a new Lambda version + moves the `live` alias the Function URL
-# serves), then smoke /health. Rollback = re-point the alias to the prior version.
-# Manual only — deliberately NO push trigger. We don't auto-deploy staging on merge until the
-# branching model is settled; deploys are an explicit `Run workflow` for now.
+# Manual staging deployment. Build runs without the staging environment, secrets, or AWS OIDC.
+# Deploy receives the verified build artifact and only the credentials required for migration and
+# publication. Acceptance probes the public API without inheriting deployment credentials.
 on:
   workflow_dispatch:
 
@@ -14,23 +11,76 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  id-token: write # OIDC federation to AWS
   contents: read
 
+env:
+  AWS_REGION: eu-central-1
+  ARTIFACTS_BUCKET: openom-staging-artifacts-841547768414
+
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.8.1
+
+      - name: Install checksum-verified Zig and cargo-lambda
+        run: |
+          set -euo pipefail
+          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz
+          echo 'd45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz' | sha256sum -c -
+          mkdir -p "$HOME/.zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/.zig" --strip-components=1
+          echo "$HOME/.zig" >> "$GITHUB_PATH"
+
+          curl -fsSL https://github.com/cargo-lambda/cargo-lambda/releases/download/v1.9.2/cargo-lambda-v1.9.2.x86_64-unknown-linux-musl.tar.gz -o /tmp/cargo-lambda.tar.gz
+          echo 'b5c258c424ebaef39541c3641f33c51137ee6c426016f365628fedb2c737271d  /tmp/cargo-lambda.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/cargo-lambda
+          tar -xzf /tmp/cargo-lambda.tar.gz -C /tmp/cargo-lambda
+          sudo install "$(find /tmp/cargo-lambda -type f -name cargo-lambda -print -quit)" /usr/local/bin/cargo-lambda
+
+      - name: Build the Lambda
+        run: cargo lambda build --release --arm64 -p openom --bin openom --output-format zip
+
+      - name: Stage and hash the deployment artifact
+        run: |
+          set -euo pipefail
+          zip=$(find target/lambda -name bootstrap.zip -print -quit)
+          test -n "$zip" || { echo 'no bootstrap.zip under target/lambda'; exit 1; }
+          mkdir -p _artifact
+          cp "$zip" _artifact/bootstrap.zip
+          (cd _artifact && sha256sum bootstrap.zip > SHA256SUMS)
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-server-${{ github.sha }}
+          path: _artifact/
+          if-no-files-found: error
+          retention-days: 1
+
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 30
-    env:
-      AWS_REGION: eu-central-1
-      ARTIFACTS_BUCKET: openom-staging-artifacts-841547768414
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: staging-server-${{ github.sha }}
+          path: _artifact
 
       - name: Verify staging configuration
         env:
-          AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -45,59 +95,36 @@ jobs:
           SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
           SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
           OPENOM_WEB_ORIGINS: ${{ vars.OPENOM_WEB_ORIGINS }}
-        run: node scripts/deployment-config.mjs --validate-workflow staging.server
+        run: node scripts/deployment-config.mjs --validate-job staging.server.deploy
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify the deployment artifact
+        run: cd _artifact && sha256sum -c SHA256SUMS
+
+      - uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5.1.1
         with:
-          targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
-
-      # cargo-lambda cross-compiles the Rust server to an arm64 `bootstrap` zip; it needs Zig for the
-      # cross-link. Install a pinned Zig on PATH (cargo-lambda finds `zig` there), then cargo-lambda.
-      - name: Install Zig + cargo-lambda
-        run: |
-          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz
-          mkdir -p "$HOME/.zig" && tar -xJf /tmp/zig.tar.xz -C "$HOME/.zig" --strip-components=1
-          echo "$HOME/.zig" >> "$GITHUB_PATH"
-          pipx install cargo-lambda
-
-      - name: Build the Lambda (arm64)
-        run: cargo lambda build --release --arm64 -p openom --bin openom --output-format zip
-        # → target/lambda/openom/bootstrap.zip (a `bootstrap`-at-root zip for provided.al2023)
-
-      - name: Assume the AWS deploy role (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Upload the SHA-keyed artifact
-        run: |
-          zip=$(find target/lambda -name bootstrap.zip | head -n1)
-          test -n "$zip" || { echo "no bootstrap.zip under target/lambda:"; ls -R target/lambda; exit 1; }
-          aws s3 cp "$zip" "s3://${ARTIFACTS_BUCKET}/openom/${GITHUB_SHA}.zip"
+        run: aws s3 cp _artifact/bootstrap.zip "s3://${ARTIFACTS_BUCKET}/openom/${GITHUB_SHA}.zip"
 
-      # Migrations run OUT-OF-BAND against the DIRECT endpoint (the runtime never migrates — OPE-506).
-      # Additive-only, so running before the new code goes live is safe for the old code. Use a
-      # PREBUILT sqlx-cli (0.9, matching our sqlx) instead of `cargo run --bin migrate` — no crate
-      # rebuild. Same migration format + _sqlx_migrations table as the `migrate` bin, which stays for
-      # local/Docker use.
-      - name: Install sqlx-cli (prebuilt)
-        uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.68.14
         with:
           tool: sqlx-cli@0.9.0
-      - name: Migrate (direct URL)
+
+      - name: Migrate using the direct database URL
         env:
           MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
         run: sqlx migrate run --source openom/migrations --database-url "$MIGRATION_DATABASE_URL"
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.16.2
+          terraform_wrapper: false
 
-      - name: Terraform apply (publishes the version, moves the alias)
+      - name: Apply staging infrastructure
         working-directory: infra/terraform
         env:
-          # Infisical-managed secrets are delivered through the protected GitHub environment; public
-          # environment-specific configuration remains in GitHub variables.
           TF_VAR_lambda_artifact_key: openom/${{ github.sha }}.zip
           TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
           TF_VAR_s3_access_key: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -117,11 +144,10 @@ jobs:
           terraform init -backend-config=env/staging.s3.tfbackend
           terraform apply -auto-approve -var-file=env/staging.tfvars
 
-      # Liveness gate via the PUBLIC entrypoint (the CloudFront custom domain), which works whether the
-      # Function URL is public (NONE) or locked to CloudFront (AWS_IAM). The raw Function URL isn't used
-      # here — under AWS_IAM it 403s everyone but CloudFront. (Richer JWT'd round-trip smoke comes later.)
-      - name: Smoke — /health via the public API domain
-        run: |
-          url="https://api.staging.openom.org"
-          echo "staging API: $url"
-          curl -fsS "$url/health" && echo " — /health OK"
+  acceptance:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the public API health endpoint
+        run: curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 https://api.staging.openom.org/health

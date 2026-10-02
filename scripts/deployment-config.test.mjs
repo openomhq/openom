@@ -2,12 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  assertPinnedActions,
+  assertJobPrivileges,
   DeploymentConfigError,
   checkDeploymentContract,
   loadDeploymentContract,
   runDeploymentConfigCli,
   validateDeploymentEnvironment,
   validateWorkflowEnvironment,
+  validateWorkflowJobEnvironment,
+  workflowJobSources,
   workflowReferences,
 } from './deployment-config.mjs';
 
@@ -55,12 +59,51 @@ test('extracts unique reference candidates without reading their values', () => 
   assert.deepEqual(workflowReferences(source, 'secrets'), ['ONE', 'TWO', 'ONE']);
 });
 
+test('extracts workflow jobs without merging their configuration', () => {
+  const jobs = workflowJobSources(`name: example\njobs:\n  build:\n    env:\n      VALUE: \${{ vars.BUILD }}\n  deploy:\n    env:\n      VALUE: \${{ secrets.DEPLOY }}\n`);
+  assert.deepEqual(Object.keys(jobs), ['build', 'deploy']);
+  assert.match(jobs.build, /vars\.BUILD/);
+  assert.doesNotMatch(jobs.build, /secrets\.DEPLOY/);
+});
+
+test('requires external actions to be pinned to immutable commits', () => {
+  assert.doesNotThrow(() => assertPinnedActions('example', '- uses: ./local\n- uses: owner/action@0123456789012345678901234567890123456789'));
+  assert.throws(
+    () => assertPinnedActions('example', '- uses: owner/action@v1'),
+    (error) => error instanceof DeploymentConfigError
+      && error.code === 'unpinned_workflow_action'
+      && error.message.includes('owner/action@v1'),
+  );
+});
+
+test('rejects workflow-level OIDC before checking job privileges', () => {
+  const source = 'name: example\npermissions:\n  id-token: write\njobs:\n  build:\n    runs-on: ubuntu-latest\n';
+  const workflow = { jobs: { build: { environment: false, oidc: false } } };
+  assert.throws(
+    () => assertJobPrivileges('example', workflow, source, workflowJobSources(source)),
+    (error) => error instanceof DeploymentConfigError
+      && error.code === 'workflow_level_privilege',
+  );
+});
+
 test('accepts every workflow with shape-valid configuration', () => {
   const contract = loadDeploymentContract();
   for (const workflowName of Object.keys(contract.workflows)) {
     assert.doesNotThrow(() => {
       validateWorkflowEnvironment(contract, workflowName, environmentFor(contract, workflowName));
     });
+  }
+});
+
+test('accepts every workflow job with only its declared configuration', () => {
+  const contract = loadDeploymentContract();
+  for (const [workflowName, workflow] of Object.entries(contract.workflows)) {
+    const values = environmentFor(contract, workflowName);
+    for (const jobName of Object.keys(workflow.jobs)) {
+      assert.doesNotThrow(() => {
+        validateWorkflowJobEnvironment(contract, `${workflowName}.${jobName}`, values);
+      });
+    }
   }
 });
 

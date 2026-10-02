@@ -47,7 +47,6 @@
         "recursive": false
       },
       "secrets": [
-        "AWS_DEPLOY_ROLE_ARN",
         "AXIOM_TOKEN",
         "CLOUDFLARE_PAGES_TOKEN",
         "DATABASE_URL",
@@ -57,12 +56,12 @@
         "R2_SECRET_ACCESS_KEY",
         "STAGING_APP_GATE_PASSWORD",
         "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
-        "SUPABASE_TEST_EMAIL",
         "SUPABASE_TEST_PASSWORD"
       ],
       "variables": [
         "AXIOM_DATASET",
         "AXIOM_OTLP_ENDPOINT",
+        "AWS_DEPLOY_ROLE_ARN",
         "CLOUDFLARE_ACCOUNT_ID",
         "OPENOM_WEB_ORIGINS",
         "R2_BUCKET",
@@ -71,6 +70,7 @@
         "SUPABASE_JWT_AUD",
         "SUPABASE_JWT_ISS",
         "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_TEST_EMAIL",
         "SUPABASE_URL"
       ],
       "adminSecrets": []
@@ -94,7 +94,7 @@
       "required": true,
       "validator": "aws-role-arn",
       "provider": "AWS IAM",
-      "source": "environment-scoped GitHub OIDC deployment role ARN",
+      "source": "environment-scoped GitHub variable containing the OIDC deployment role ARN",
       "infisical": null,
       "rotationUnit": "aws-deploy-role",
       "smoke": "OIDC role assumption and caller-identity check",
@@ -356,7 +356,6 @@
       "environment": "staging",
       "file": ".github/workflows/staging.server.yml",
       "secrets": [
-        "AWS_DEPLOY_ROLE_ARN",
         "AXIOM_TOKEN",
         "DATABASE_URL",
         "MIGRATION_DATABASE_URL",
@@ -367,13 +366,41 @@
       "variables": [
         "AXIOM_DATASET",
         "AXIOM_OTLP_ENDPOINT",
+        "AWS_DEPLOY_ROLE_ARN",
         "OPENOM_WEB_ORIGINS",
         "R2_BUCKET",
         "R2_ENDPOINT",
         "SUPABASE_JWKS_URL",
         "SUPABASE_JWT_AUD",
         "SUPABASE_JWT_ISS"
-      ]
+      ],
+      "jobs": {
+        "build": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
+        "deploy": {
+          "environment": true,
+          "oidc": true,
+          "secrets": [
+            "AXIOM_TOKEN",
+            "DATABASE_URL",
+            "MIGRATION_DATABASE_URL",
+            "OPENOM_INTERNAL_GC_TOKEN",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY"
+          ],
+          "variables": [
+            "AXIOM_DATASET",
+            "AXIOM_OTLP_ENDPOINT",
+            "AWS_DEPLOY_ROLE_ARN",
+            "OPENOM_WEB_ORIGINS",
+            "R2_BUCKET",
+            "R2_ENDPOINT",
+            "SUPABASE_JWKS_URL",
+            "SUPABASE_JWT_AUD",
+            "SUPABASE_JWT_ISS"
+          ]
+        },
+        "acceptance": { "environment": false, "oidc": false, "secrets": [], "variables": [] }
+      }
     },
     "staging.web": {
       "environment": "staging",
@@ -382,36 +409,58 @@
         "CLOUDFLARE_PAGES_TOKEN",
         "STAGING_APP_GATE_PASSWORD",
         "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
-        "SUPABASE_TEST_EMAIL",
         "SUPABASE_TEST_PASSWORD"
       ],
       "variables": [
         "CLOUDFLARE_ACCOUNT_ID",
         "R2_ENDPOINT",
         "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_TEST_EMAIL",
         "SUPABASE_URL"
-      ]
+      ],
+      "jobs": {
+        "build": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
+        "deploy": {
+          "environment": true,
+          "oidc": false,
+          "secrets": ["CLOUDFLARE_PAGES_TOKEN", "STAGING_APP_GATE_PASSWORD"],
+          "variables": [
+            "CLOUDFLARE_ACCOUNT_ID",
+            "R2_ENDPOINT",
+            "SUPABASE_PUBLISHABLE_KEY",
+            "SUPABASE_URL"
+          ]
+        },
+        "acceptance": {
+          "environment": true,
+          "oidc": false,
+          "secrets": [
+            "STAGING_APP_GATE_PASSWORD",
+            "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
+            "SUPABASE_TEST_PASSWORD"
+          ],
+          "variables": ["SUPABASE_TEST_EMAIL"]
+        }
+      }
     },
     "staging.smoke": {
       "environment": "staging",
       "file": ".github/workflows/staging.smoke.yml",
       "secrets": [
-        "AWS_DEPLOY_ROLE_ARN",
         "AXIOM_TOKEN",
         "CLOUDFLARE_PAGES_TOKEN",
         "DATABASE_URL",
         "MIGRATION_DATABASE_URL",
-        "OPENOM_INTERNAL_GC_TOKEN",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "STAGING_APP_GATE_PASSWORD",
         "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
-        "SUPABASE_TEST_EMAIL",
         "SUPABASE_TEST_PASSWORD"
       ],
       "variables": [
         "AXIOM_DATASET",
         "AXIOM_OTLP_ENDPOINT",
+        "AWS_DEPLOY_ROLE_ARN",
         "CLOUDFLARE_ACCOUNT_ID",
         "OPENOM_WEB_ORIGINS",
         "R2_BUCKET",
@@ -420,8 +469,70 @@
         "SUPABASE_JWT_AUD",
         "SUPABASE_JWT_ISS",
         "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_TEST_EMAIL",
         "SUPABASE_URL"
-      ]
+      ],
+      "jobs": {
+        "configuration": {
+          "environment": true,
+          "oidc": false,
+          "secrets": [],
+          "variables": [
+            "AXIOM_DATASET",
+            "AXIOM_OTLP_ENDPOINT",
+            "AWS_DEPLOY_ROLE_ARN",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "OPENOM_WEB_ORIGINS",
+            "R2_BUCKET",
+            "R2_ENDPOINT",
+            "SUPABASE_JWKS_URL",
+            "SUPABASE_JWT_AUD",
+            "SUPABASE_JWT_ISS",
+            "SUPABASE_PUBLISHABLE_KEY",
+            "SUPABASE_TEST_EMAIL",
+            "SUPABASE_URL"
+          ]
+        },
+        "infrastructure": {
+          "environment": true,
+          "oidc": true,
+          "secrets": ["CLOUDFLARE_PAGES_TOKEN"],
+          "variables": ["AWS_DEPLOY_ROLE_ARN", "CLOUDFLARE_ACCOUNT_ID"]
+        },
+        "storage": {
+          "environment": true,
+          "oidc": false,
+          "secrets": [
+            "DATABASE_URL",
+            "MIGRATION_DATABASE_URL",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY"
+          ],
+          "variables": ["R2_BUCKET", "R2_ENDPOINT"]
+        },
+        "authentication": {
+          "environment": true,
+          "oidc": false,
+          "secrets": [
+            "STAGING_APP_GATE_PASSWORD",
+            "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
+            "SUPABASE_TEST_PASSWORD"
+          ],
+          "variables": [
+            "SUPABASE_JWKS_URL",
+            "SUPABASE_JWT_AUD",
+            "SUPABASE_JWT_ISS",
+            "SUPABASE_PUBLISHABLE_KEY",
+            "SUPABASE_TEST_EMAIL"
+          ]
+        },
+        "observability": {
+          "environment": true,
+          "oidc": false,
+          "secrets": ["AXIOM_TOKEN"],
+          "variables": ["AXIOM_DATASET", "AXIOM_OTLP_ENDPOINT"]
+        }
+      }
     }
   }
 }

@@ -1,11 +1,8 @@
 name: staging.web
 
-# Publish the web app (apps/app) to the staging Cloudflare Pages project, pointed at the REAL staging
-# API (api.staging.openom.org), not local-only. The Pages project + custom domain + the Zero Trust
-# Access wall are Terraform (infra/terraform/web); this only builds + uploads content.
-#
-# Manual only — no auto-deploy until the branching model is settled (mirrors staging.deploy).
-
+# Manual staging web deployment. Static/WASM build receives no staging environment or credentials;
+# deployment injects public runtime configuration and publishes the verified artifact; browser
+# acceptance receives only the dedicated test-account credentials.
 on:
   workflow_dispatch:
 
@@ -16,77 +13,88 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  API_URL: https://api.staging.openom.org
+  SITE_URL: https://app.staging.openom.org/
+  PAGES_PROJECT: openom-staging-web
+
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+
+      - name: Build the app-core WASM
+        run: node scripts/build-app-core.mjs
+
+      - name: Assemble and hash the static site
+        run: |
+          set -euo pipefail
+          mkdir -p _site/functions _artifact
+          cp -r apps/app/. _site/
+          cp -r assets _site/assets
+          cp apps/staging-gate/_middleware.js _site/functions/_middleware.js
+          tar -czf _artifact/site.tar.gz -C _site .
+          (cd _artifact && sha256sum site.tar.gz > SHA256SUMS)
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-web-${{ github.sha }}
+          path: _artifact/
+          if-no-files-found: error
+          retention-days: 1
+
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 30
-    env:
-      API_URL: https://api.staging.openom.org
-      SITE_URL: https://app.staging.openom.org/
-      PAGES_PROJECT: openom-staging-web
-      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: staging-web-${{ github.sha }}
+          path: _artifact
 
-      - name: Verify staging configuration
+      - name: Verify staging deployment configuration
         env:
           CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
-          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
-          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
-          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-        run: node scripts/deployment-config.mjs --validate-workflow staging.web
+        run: node scripts/deployment-config.mjs --validate-job staging.web.deploy
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.20.0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      # The app loads ONE gitignored build artifact — the openom-app-core wasm. Compile it (Docker
-      # is pre-installed on the runner; wasm-bindgen is version-pinned to Cargo.lock). ~a few minutes.
-      - name: Build the app-core wasm
-        run: node scripts/build-app-core.mjs
-
-      - name: Assemble the site
+      - name: Verify and extract the static artifact
         run: |
-          mkdir -p _site
-          cp -r apps/app/. _site/
-          cp -r assets _site/assets
-          # The shared-password staging gate (a Pages Function). Lives outside apps/app so the public
-          # demo + local dev stay ungated; only staging gets it.
-          mkdir -p _site/functions
-          cp apps/staging-gate/_middleware.js _site/functions/_middleware.js
+          set -euo pipefail
+          (cd _artifact && sha256sum -c SHA256SUMS)
+          mkdir _site
+          tar -xzf _artifact/site.tar.gz -C _site
 
-      # Fill every public runtime placeholder. The Supabase publishable key is intentionally client-visible;
-      # no service-role key or other secret enters the static site.
-      - name: Substitute deploy-time placeholders
+      - name: Substitute public runtime configuration
         working-directory: apps
         env:
           SITE_URL: ${{ env.SITE_URL }}
-          OPENOM_LANDING: "live"
+          OPENOM_LANDING: live
           OPENOM_SERVER: ${{ env.API_URL }}
           OPENOM_AUTH_PROVIDER: supabase
-          SUPABASE_URL: ${{ env.SUPABASE_URL }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
         run: node scripts/site-url.mjs ../_site
 
-      # Enforced strict CSP (verified clean in a browser under Report-Only first). script-src 'self' +
-      # 'wasm-unsafe-eval' (WebAssembly, no eval) is the real XSS protection; style-src stays 'self' with
-      # NO 'unsafe-inline' — the one inline-style attribute was refactored to the CSSOM. img-src allows
-      # blob: for media/download object URLs; workers allow blob: for the wasm + sqlite/OPFS workers.
-      # Delivery-integrity story = HTTPS + this CSP + Cloudflare serving exact bytes (native SRI isn't
-      # feasible for a buildless ESM app; revisit if a build step / import-map integrity lands).
-      - name: Write _headers (CSP + security + caching)
+      - name: Write security and cache headers
         env:
           R2: ${{ vars.R2_ENDPOINT }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
         run: |
           cat > _site/_headers <<EOF
           /*
@@ -96,40 +104,54 @@ jobs:
           /assets/*
             Cache-Control: public, max-age=31536000, immutable
           EOF
-          echo "wrote _headers:"; cat _site/_headers
 
-      # Sync the shared gate password (a GitHub secret) into the Pages project's env, so the gate
-      # Function reads env.STAGING_APP_GATE_PASSWORD. Fed over stdin (no interactive prompt); idempotent —
-      # re-set on every deploy. Rotate = update the GitHub secret and re-run this workflow.
-      - name: Set the staging-gate password (Pages secret)
+      - name: Set the staging gate password
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
-        run: printf '%s' "$STAGING_APP_GATE_PASSWORD" | npx --yes wrangler@4 pages secret put STAGING_APP_GATE_PASSWORD --project-name "$PAGES_PROJECT"
+        run: printf '%s' "$STAGING_APP_GATE_PASSWORD" | npm exec --yes --ignore-scripts --package=wrangler@4.147.0 -- wrangler pages secret put STAGING_APP_GATE_PASSWORD --project-name "$PAGES_PROJECT"
 
       - name: Deploy to Cloudflare Pages
         env:
-          # wrangler reads the token from CLOUDFLARE_API_TOKEN by convention; our secret is named for its
-          # job (a Pages-Edit-only token), so map it here. Account id is a var — it's not secret.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        # Deploy from INSIDE _site (deploy dir ".") — wrangler resolves the Pages `functions/` dir
-        # relative to the CWD (join(cwd(),"functions")), NOT the deploy dir, so deploying `_site` from
-        # the repo root would silently skip _site/functions and ship a static-only site (no gate).
-        run: cd _site && npx --yes wrangler@4 pages deploy . --project-name "$PAGES_PROJECT" --branch main --commit-hash "${{ github.sha }}"
+        run: cd _site && npm exec --yes --ignore-scripts --package=wrangler@4.147.0 -- wrangler pages deploy . --project-name "$PAGES_PROJECT" --branch main --commit-hash "${{ github.sha }}"
+
+  acceptance:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4.2.0
+        with:
+          version: 11.20.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+
+      - name: Verify browser acceptance configuration
+        env:
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
+        run: node scripts/deployment-config.mjs --validate-job staging.web.acceptance
 
       - name: Install browser acceptance dependencies
         run: |
           pnpm --dir apps install --frozen-lockfile --ignore-scripts
           pnpm --dir apps exec playwright install --with-deps chromium
 
-      - name: Accept deployed Supabase account round trip
+      - name: Accept the deployed Supabase account round trip
         env:
-          OPENOM_STAGING_AUTH_ACCEPTANCE: "1"
+          OPENOM_STAGING_AUTH_ACCEPTANCE: '1'
           OPENOM_STAGING_APP_URL: ${{ env.SITE_URL }}
           OPENOM_STAGING_COMMIT_SHA: ${{ github.sha }}
-          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
           SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}

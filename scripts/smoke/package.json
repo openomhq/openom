@@ -4,6 +4,6 @@
   "type": "module",
   "description": "Deps for the staging-smoke workflow's Supabase auth check (not part of the app).",
   "dependencies": {
-    "jose": "^6.0.0"
+    "jose": "6.2.12"
   }
 }

@@ -1,17 +1,12 @@
 name: staging.smoke
 
-# Pre-deploy staging gate — proves the complete environment inventory and the staging providers
-# (AWS, Neon, R2, Supabase, Cloudflare, and Axiom) are wired correctly BEFORE either application
-# is deployed. Each provider is its OWN job so they run in parallel and fail INDEPENDENTLY:
-# a Neon outage doesn't mask an R2 problem, and the run shows exactly which provider is
-# down. The `otel` job also emits a real trace through our own exporter to prove OTLP
-# export + W3C propagation reach Axiom. The account job exercises the already deployed app,
-# including its gate password and durable-account passphrase. Runs twice a week + on demand.
-
+# Provider and deployed-application checks remain one workflow, grouped into five independently
+# diagnosable jobs. The configuration check receives no secrets; each other job receives only the
+# credential set needed for its group.
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 6 * * 1,4'   # Mon + Thu 06:30 UTC (~07:30 CET / 08:30 CEST)
+    - cron: '30 6 * * 1,4'
 
 permissions:
   contents: read
@@ -21,26 +16,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  config:
+  configuration:
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
-      - name: Verify complete staging configuration
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - name: Verify staging variables
         env:
-          AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
-          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
-          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
-          AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
-          CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
-          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
-          OPENOM_INTERNAL_GC_TOKEN: ${{ secrets.OPENOM_INTERNAL_GC_TOKEN }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           R2_BUCKET: ${{ vars.R2_BUCKET }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
@@ -48,104 +32,38 @@ jobs:
           SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
           SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           AXIOM_OTLP_ENDPOINT: ${{ vars.AXIOM_OTLP_ENDPOINT }}
           AXIOM_DATASET: ${{ vars.AXIOM_DATASET }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           OPENOM_WEB_ORIGINS: ${{ vars.OPENOM_WEB_ORIGINS }}
-        run: node scripts/deployment-config.mjs --validate-environment staging
+        run: node scripts/deployment-config.mjs --validate-job staging.smoke.configuration
 
-  aws:
-    needs: config
+  infrastructure:
+    needs: configuration
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 5
     permissions:
-      id-token: write
       contents: read
+      id-token: write
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - name: Verify infrastructure configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/deployment-config.mjs --validate-job staging.smoke.infrastructure
+
+      - uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5.1.1
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: eu-central-1
+
       - name: Verify the staging deployment identity
         run: aws sts get-caller-identity > /dev/null
 
-  neon:
-    needs: config
-    runs-on: ubuntu-latest
-    environment: staging
-    timeout-minutes: 5
-    steps:
-      - name: Connect + SELECT 1 (pooled)
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          pooled=$(psql "$DATABASE_URL" -tAc 'select 1;')
-          direct=$(psql "$MIGRATION_DATABASE_URL" -tAc 'select 1;')
-          test "$pooled" = "1" || { echo "pooled connection returned an unexpected result"; exit 1; }
-          test "$direct" = "1" || { echo "direct connection returned an unexpected result"; exit 1; }
-          echo "Neon pooled + direct OK"
-
-  r2:
-    needs: config
-    runs-on: ubuntu-latest
-    environment: staging
-    timeout-minutes: 5
-    steps:
-      - name: Put / get / delete round-trip
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          AWS_EC2_METADATA_DISABLED: 'true'
-          # R2 is S3-compatible but rejects aws-cli v2's newer default integrity checksums;
-          # only send/validate them when the request actually requires it.
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          key="smoke/heartbeat-${GITHUB_RUN_ID}.txt"
-          printf 'staging smoke %s\n' "$(date -u +%FT%TZ)" > /tmp/hb.txt
-          aws s3api put-object    --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" --body /tmp/hb.txt > /dev/null
-          aws s3api get-object    --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" /tmp/out.txt      > /dev/null
-          diff /tmp/hb.txt /tmp/out.txt
-          aws s3api delete-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key"                  > /dev/null
-          echo "R2 OK"
-
-  supabase:
-    needs: config
-    runs-on: ubuntu-latest
-    environment: staging
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-      - name: Sign in + verify token against JWKS
-        env:
-          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
-          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
-          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
-          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
-          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
-        run: |
-          set -euo pipefail
-          npm --prefix scripts/smoke install --no-audit --no-fund --silent
-          node scripts/smoke/supabase-smoke.mjs
-
-  cloudflare:
-    needs: config
-    runs-on: ubuntu-latest
-    environment: staging
-    timeout-minutes: 5
-    steps:
       - name: Read the staging Pages project
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
@@ -153,62 +71,136 @@ jobs:
           PAGES_PROJECT: openom-staging-web
         run: |
           set -euo pipefail
-          response=$(curl -fsS \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT")
-          jq -e --arg project "$PAGES_PROJECT" \
-            '.success == true and .result.name == $project' <<<"$response" > /dev/null
-          echo "Cloudflare Pages OK"
+          response=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT")
+          jq -e --arg project "$PAGES_PROJECT" '.success == true and .result.name == $project' <<<"$response" > /dev/null
 
-  account:
-    needs: config
+  storage:
+    needs: configuration
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - name: Verify storage configuration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: node scripts/deployment-config.mjs --validate-job staging.smoke.storage
+
+      - name: Connect to Neon
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          image='postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94'
+          pooled=$(docker run --rm -e DATABASE_URL "$image" sh -c 'psql "$DATABASE_URL" -tAc "select 1;"')
+          direct=$(docker run --rm -e MIGRATION_DATABASE_URL "$image" sh -c 'psql "$MIGRATION_DATABASE_URL" -tAc "select 1;"')
+          test "$pooled" = '1'
+          test "$direct" = '1'
+
+      - name: Put, get, and delete an R2 object
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: 'true'
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          image='amazon/aws-cli:2.31.22@sha256:bf253be91e12d49ba1bd6dc939a76ea9777901772032692b14639e643118e1c1'
+          key="smoke/heartbeat-${GITHUB_RUN_ID}.txt"
+          printf 'staging smoke %s\n' "$(date -u +%FT%TZ)" > "$RUNNER_TEMP/heartbeat.txt"
+          docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_EC2_METADATA_DISABLED -e AWS_REQUEST_CHECKSUM_CALCULATION -e AWS_RESPONSE_CHECKSUM_VALIDATION -v "$RUNNER_TEMP:/work" "$image" s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" --body /work/heartbeat.txt > /dev/null
+          docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_EC2_METADATA_DISABLED -e AWS_REQUEST_CHECKSUM_CALCULATION -e AWS_RESPONSE_CHECKSUM_VALIDATION -v "$RUNNER_TEMP:/work" "$image" s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" /work/downloaded.txt > /dev/null
+          diff "$RUNNER_TEMP/heartbeat.txt" "$RUNNER_TEMP/downloaded.txt"
+          docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_EC2_METADATA_DISABLED -e AWS_REQUEST_CHECKSUM_CALCULATION -e AWS_RESPONSE_CHECKSUM_VALIDATION "$image" s3api delete-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" > /dev/null
+
+  authentication:
+    needs: configuration
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4.2.0
         with:
           version: 11.20.0
-      - uses: actions/setup-node@v4
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
         with:
-          node-version: 24
+          node-version: 24.11.0
+
+      - name: Verify authentication configuration
+        env:
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
+        run: node scripts/deployment-config.mjs --validate-job staging.smoke.authentication
+
+      - name: Sign in and verify the token against JWKS
+        env:
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+        run: |
+          npm --prefix scripts/smoke install --no-audit --no-fund --ignore-scripts
+          node scripts/smoke/supabase-smoke.mjs
+
       - name: Install browser acceptance dependencies
         run: |
           pnpm --dir apps install --frozen-lockfile --ignore-scripts
           pnpm --dir apps exec playwright install --with-deps chromium
+
       - name: Accept the deployed account round trip
         env:
-          OPENOM_STAGING_AUTH_ACCEPTANCE: "1"
+          OPENOM_STAGING_AUTH_ACCEPTANCE: '1'
           OPENOM_STAGING_APP_URL: https://app.staging.openom.org/
-          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
           SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
         run: pnpm --dir apps exec playwright test e2e/staging-auth.e2e.ts
 
-  # Emit a real 2-span trace (client -> server, linked via an injected/extracted traceparent)
-  # through our OWN openom exporter, so this proves the whole path the server will use: OTLP
-  # HTTP export reaches Axiom, the resource attributes land, and W3C propagation links spans.
-  # Builds the crate (hence the toolchain + cache); it needs no DB/S3 — only the Axiom creds.
-  otel:
-    needs: config
+  observability:
+    needs: configuration
     runs-on: ubuntu-latest
     environment: staging
-    # Cap only guards a pathological cold compile of the server crate (warm w/ cache ≈ 1-2 min);
-    # a real telemetry failure exits in ~2s via the exporter's own flush timeout, not this cap.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Emit a trace to Axiom via the openom exporter
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.8.1
+
+      - name: Verify observability configuration
+        env:
+          AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
+          AXIOM_OTLP_ENDPOINT: ${{ vars.AXIOM_OTLP_ENDPOINT }}
+          AXIOM_DATASET: ${{ vars.AXIOM_DATASET }}
+        run: node scripts/deployment-config.mjs --validate-job staging.smoke.observability
+
+      - name: Emit a trace through the openom exporter
         env:
           OPENOM_OTEL: '1'
           OPENOM_ENV: staging
           OPENOM_STACK: otel-smoke
           OTEL_EXPORTER_OTLP_ENDPOINT: ${{ vars.AXIOM_OTLP_ENDPOINT }}
           OTEL_EXPORTER_OTLP_HEADERS: authorization=Bearer ${{ secrets.AXIOM_TOKEN }},x-axiom-dataset=${{ vars.AXIOM_DATASET }}
-        run: |
-          set -euo pipefail
-          cargo run -p openom --bin otel_smoke
+        run: cargo run -p openom --bin otel_smoke

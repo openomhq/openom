@@ -23,6 +23,66 @@ export function workflowReferences(source, namespace) {
   return [...source.matchAll(pattern)].map((match) => match[1]);
 }
 
+export function workflowJobSources(source) {
+  const lines = source.split(/\r?\n/);
+  const jobs = {};
+  let inJobs = false;
+  let jobName;
+
+  for (const line of lines) {
+    if (/^jobs:\s*$/.test(line)) {
+      inJobs = true;
+      continue;
+    }
+    if (!inJobs) continue;
+    if (/^[^\s#]/.test(line)) break;
+
+    const jobMatch = line.match(/^  ([A-Za-z0-9_-]+):\s*$/);
+    if (jobMatch) {
+      jobName = jobMatch[1];
+      jobs[jobName] = `${line}\n`;
+    } else if (jobName) {
+      jobs[jobName] += `${line}\n`;
+    }
+  }
+
+  return jobs;
+}
+
+export function assertPinnedActions(workflowName, source) {
+  const unpinned = [...source.matchAll(/^\s*-?\s*uses:\s*([^\s#]+).*$/gm)]
+    .map((match) => match[1])
+    .filter((reference) => !reference.startsWith('./'))
+    .filter((reference) => !/@[a-f0-9]{40}$/.test(reference));
+  if (unpinned.length === 0) return;
+  throw new DeploymentConfigError(
+    'unpinned_workflow_action',
+    `${workflowName} contains actions that are not pinned to a commit: ${uniqueSorted(unpinned).join(', ')}`,
+  );
+}
+
+export function assertJobPrivileges(workflowName, workflow, source, jobSources) {
+  const preamble = source.slice(0, source.indexOf('\njobs:'));
+  if (/\$\{\{\s*(?:secrets|vars)\./.test(preamble) || /^\s+id-token:\s*write\s*$/m.test(preamble)) {
+    throw new DeploymentConfigError(
+      'workflow_level_privilege',
+      `${workflowName} must grant environment configuration and OIDC only to individual jobs`,
+    );
+  }
+
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    const jobSource = jobSources[jobName];
+    const hasEnvironment = /^    environment:\s*\S+\s*$/m.test(jobSource);
+    const hasOidc = /^      id-token:\s*write\s*$/m.test(jobSource);
+    if (hasEnvironment !== job.environment || hasOidc !== job.oidc) {
+      throw new DeploymentConfigError(
+        'workflow_job_privilege_drift',
+        `${workflowName}.${jobName} privilege boundary drifted (environment=${hasEnvironment}, oidc=${hasOidc})`,
+      );
+    }
+  }
+}
+
 function uniqueSorted(values) {
   return [...new Set(values)].sort();
 }
@@ -69,6 +129,7 @@ export function checkDeploymentContract(contract, root = ROOT) {
       );
     }
     const source = readFileSync(path.join(root, workflow.file), 'utf8');
+    assertPinnedActions(workflowName, source);
     assertSameNames(
       workflowName,
       'secrets',
@@ -81,6 +142,24 @@ export function checkDeploymentContract(contract, root = ROOT) {
       workflow.variables,
       workflowReferences(source, 'vars'),
     );
+
+    const jobSources = workflowJobSources(source);
+    assertSameNames(workflowName, 'jobs', Object.keys(workflow.jobs), Object.keys(jobSources));
+    assertJobPrivileges(workflowName, workflow, source, jobSources);
+    for (const [jobName, job] of Object.entries(workflow.jobs)) {
+      assertSameNames(
+        `${workflowName}.${jobName}`,
+        'secrets',
+        job.secrets,
+        workflowReferences(jobSources[jobName], 'secrets'),
+      );
+      assertSameNames(
+        `${workflowName}.${jobName}`,
+        'vars',
+        job.variables,
+        workflowReferences(jobSources[jobName], 'vars'),
+      );
+    }
 
     for (const name of workflow.secrets) {
       if (!environment.secrets.includes(name)) {
@@ -159,7 +238,11 @@ export function validateWorkflowEnvironment(contract, workflowName, environment)
     throw new DeploymentConfigError('unknown_workflow', `unknown workflow ${workflowName}`);
   }
 
-  const names = uniqueSorted([...workflow.secrets, ...workflow.variables]);
+  validateNames(contract, [...workflow.secrets, ...workflow.variables], environment);
+}
+
+function validateNames(contract, configuredNames, environment) {
+  const names = uniqueSorted(configuredNames);
   const missing = names.filter((name) => {
     const definition = contract.values[name];
     return definition.required && (!environment[name] || environment[name].length === 0);
@@ -176,6 +259,18 @@ export function validateWorkflowEnvironment(contract, workflowName, environment)
     if (!value) continue;
     validateValue(name, value, contract.values[name].validator);
   }
+}
+
+export function validateWorkflowJobEnvironment(contract, workflowJobName, environment) {
+  const separator = workflowJobName.lastIndexOf('.');
+  const workflowName = workflowJobName.slice(0, separator);
+  const jobName = workflowJobName.slice(separator + 1);
+  const workflow = contract.workflows[workflowName];
+  const job = workflow?.jobs[jobName];
+  if (!workflow || !job) {
+    throw new DeploymentConfigError('unknown_workflow_job', `unknown workflow job ${workflowJobName}`);
+  }
+  validateNames(contract, [...job.secrets, ...job.variables], environment);
 }
 
 export function validateDeploymentEnvironment(contract, environmentName, environment) {
@@ -226,6 +321,13 @@ export function runDeploymentConfigCli(args, environment = process.env, write = 
     return;
   }
 
+  const workflowJobName = argumentValue(args, '--validate-job');
+  if (workflowJobName) {
+    validateWorkflowJobEnvironment(contract, workflowJobName, environment);
+    write(`${workflowJobName} deployment configuration is valid`);
+    return;
+  }
+
   const validatedEnvironmentName = argumentValue(args, '--validate-environment');
   if (validatedEnvironmentName) {
     validateDeploymentEnvironment(contract, validatedEnvironmentName, environment);
@@ -251,7 +353,7 @@ export function runDeploymentConfigCli(args, environment = process.env, write = 
 
   throw new DeploymentConfigError(
     'missing_command',
-    'usage: deployment-config.mjs --check | --validate-workflow <name> | --validate-environment <name> | --list <environment>',
+    'usage: deployment-config.mjs --check | --validate-workflow <name> | --validate-job <workflow.job> | --validate-environment <name> | --list <environment>',
   );
 }
 
