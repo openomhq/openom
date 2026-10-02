@@ -3,7 +3,7 @@ terraform {
   required_version = ">= 1.10.0"
 
   required_providers {
-    # Cloudflare Pages (the web app host), its custom domain + DNS, and the Zero Trust Access wall.
+    # Cloudflare Pages (the web app host), its custom domain, and DNS.
     cloudflare = {
       source  = "cloudflare/cloudflare"
       version = "~> 5.0"

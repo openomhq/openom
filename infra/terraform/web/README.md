@@ -22,9 +22,10 @@ Share access by telling someone the password (works from your phone); to revoke 
 This trades per-person control for zero-friction sharing — fine for a pre-release staging env with no
 real data. (If that ever changes, swap in per-person Cloudflare Access.)
 
-The password is the GitHub `staging` secret **`STAGING_APP_GATE_PASSWORD`**. The `staging.web` workflow
-syncs it into the Pages project on every deploy (`wrangler pages secret put`, fed over stdin) — no local
-tooling. Rotate = update the GitHub secret and re-run `staging.web`.
+The password is managed in Infisical and synchronized to the GitHub `staging` environment as
+**`STAGING_APP_GATE_PASSWORD`**. The `staging.web` workflow copies that delivery value into the Pages
+project on every deploy (`wrangler pages secret put`, fed over stdin). Rotate it in Infisical, wait for
+the GitHub sync, then re-run `staging.web`.
 
 ## Inputs
 
@@ -32,12 +33,10 @@ Committed in `env/staging.tfvars`: `cloudflare_account_id`, `cloudflare_zone_id`
 `pages_project_name`. No secrets in the repo.
 
 **Two tokens, don't confuse them:**
-- `CLOUDFLARE_PAGES_TOKEN` — a **GitHub secret** (Pages-Edit only), read by CI (`staging.web` →
-  `wrangler pages deploy`). Set once; you never need its value again.
-- `CLOUDFLARE_API_TOKEN` — **not** a GitHub secret. It's the **env-var name** wrangler + the Terraform
-  Cloudflare provider read when you run commands **locally** (the `terraform apply` here, and
-  `wrangler pages secret put`). Fill it with the local admin token (`openom-terraform-cloudflare`,
-  Pages+DNS+Access) in your shell: `export CLOUDFLARE_API_TOKEN=<that value>`.
+- `CLOUDFLARE_PAGES_TOKEN` — a Pages-Edit-only token managed in Infisical and synchronized to the
+  GitHub `staging` environment for `staging.web`.
+- `CLOUDFLARE_API_TOKEN` — an unsynchronized local operator credential from `prod:/admin`. The
+  Terraform Cloudflare provider reads it when an administrator runs this root.
 
 ## Apply (admin, local)
 
@@ -48,16 +47,12 @@ terraform init  -backend-config=env/staging.s3.tfbackend
 terraform apply -var-file=env/staging.tfvars
 ```
 
-Then, for the content deploy (`staging.web.yml`), set these on the GitHub `staging` environment:
-`CLOUDFLARE_PAGES_TOKEN` secret (a Pages-Edit-only token), `STAGING_APP_GATE_PASSWORD` secret (the shared
-gate password), the `CLOUDFLARE_ACCOUNT_ID` variable, and `https://app.staging.openom.org` in the
-`OPENOM_WEB_ORIGINS` variable (server CORS). Then dispatch the workflow.
+For content deployment, Infisical delivers `CLOUDFLARE_PAGES_TOKEN` and
+`STAGING_APP_GATE_PASSWORD` to the GitHub `staging` environment. Keep `CLOUDFLARE_ACCOUNT_ID` and
+`OPENOM_WEB_ORIGINS` as GitHub variables, then dispatch `staging.web`.
 
 ## Notes
 
-- **Cutover from the Access wall:** this apply removes the previously-applied Zero Trust Access
-  application + policy. Fine — the Pages project has no content deployed yet, so there's nothing exposed
-  in the gap until the first `staging.web` deploy brings up the gate Function.
 - **CSP ships Report-Only first** (in the workflow's `_headers`) — verify in a browser, then enforce.
   The gate page sets its own CSP (to allow its inline `<style>`); the app gets the `_headers` CSP.
 - **API stays gate-free** (CloudFront OAC + app JWT) — never put a wall on it (it would block the SPA's

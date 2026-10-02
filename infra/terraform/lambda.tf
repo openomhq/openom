@@ -96,7 +96,7 @@ resource "aws_lambda_function" "api" {
       AUTH_JWT_ISS                = var.jwt_issuer
       AUTH_JWT_AUD                = var.jwt_audience
       OPENOM_WEB_ORIGINS          = var.web_origins
-      # Secrets (CI supplies from the GitHub `staging` secrets as TF_VAR_*).
+      # Secrets (Infisical syncs the GitHub `staging` delivery copies; CI maps them to TF_VAR_*).
       DATABASE_URL               = var.database_url
       S3_ACCESS_KEY              = var.s3_access_key
       S3_SECRET_KEY              = var.s3_secret_key

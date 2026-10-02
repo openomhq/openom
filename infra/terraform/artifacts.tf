@@ -58,6 +58,6 @@ output "artifacts_bucket" {
 }
 
 output "ci_deploy_role_arn" {
-  description = "ARN of the OIDC deploy role CI assumes — set as the GitHub `staging` secret AWS_DEPLOY_ROLE_ARN."
+  description = "ARN of the OIDC deploy role CI assumes — set as the GitHub `staging` variable AWS_DEPLOY_ROLE_ARN."
   value       = aws_iam_role.ci_deploy.arn
 }

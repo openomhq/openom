@@ -5,7 +5,7 @@ const GATE_COOKIE = 'openom_staging_gate';
 export interface StagingGateOptions {
   readonly stagingUrl: string;
   readonly password: string;
-  readonly expectedCommit: string;
+  readonly expectedCommit?: string;
   readonly readinessTimeoutMs?: number;
 }
 
@@ -26,7 +26,11 @@ async function waitForExpectedGate(page: Page, options: StagingGateOptions): Pro
       const response = await page.goto(options.stagingUrl, { waitUntil: 'domcontentloaded' });
       const observed = await gateObservation(page, response);
       last = `status=${observed.status ?? 'none'}, gate=${observed.visible}, commit=${observed.commit || 'none'}`;
-      if (response?.status() === 200 && observed.visible && observed.commit === options.expectedCommit) {
+      const expectedCommit = options.expectedCommit;
+      const commitMatches = expectedCommit
+        ? observed.commit === expectedCommit
+        : /^[0-9a-f]{7}$/.test(observed.commit);
+      if (response?.status() === 200 && observed.visible && commitMatches) {
         return response;
       }
     } catch (error) {
@@ -34,7 +38,8 @@ async function waitForExpectedGate(page: Page, options: StagingGateOptions): Pro
     }
     if (Date.now() < deadline) await page.waitForTimeout(2_000);
   } while (Date.now() < deadline);
-  throw new Error(`expected staging gate for commit ${options.expectedCommit}; last observation: ${last}`);
+  const expected = options.expectedCommit ? `commit ${options.expectedCommit}` : 'a deployed commit';
+  throw new Error(`expected staging gate for ${expected}; last observation: ${last}`);
 }
 
 export async function enterStagingGate(page: Page, options: StagingGateOptions): Promise<Response> {

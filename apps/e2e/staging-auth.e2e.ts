@@ -115,7 +115,7 @@ test('deployed staging signs in, refreshes, binds, backs up, and restores in a f
   expect(credentials.password).not.toBe('');
   expect(accountPassphrase).not.toBe('');
   expect(gatePassword).not.toBe('');
-  expect(expectedCommit).toMatch(/^[0-9a-f]{7}$/);
+  if (expectedCommit) expect(expectedCommit).toMatch(/^[0-9a-f]{7}$/);
 
   const first = await acceptanceContext(browser, 120_000);
   let second: { context: BrowserContext; page: Page; errors: string[] } | null = null;

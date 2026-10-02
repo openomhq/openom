@@ -44,6 +44,11 @@ jobs:
       - name: Error codes in sync
         run: node scripts/gen-error-codes.mjs --check
 
+      - name: Deployment configuration contract in sync
+        run: |
+          node --test scripts/deployment-config.test.mjs
+          node scripts/deployment-config.mjs --check
+
       # Kein `.stack` darf je in die UI gerendert werden (nur Dev-Konsole).
       - name: Error hygiene
         run: node scripts/check-error-hygiene.mjs

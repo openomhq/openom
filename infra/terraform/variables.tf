@@ -45,9 +45,9 @@ variable "lambda_artifact_key" {
 }
 
 # --- Lambda env-specific config ---
-# All supplied by CI as TF_VAR_* from the GitHub `staging` environment (GitHub stays the single source
-# of truth). Every one defaults to "" so the admin's first apply — before any artifact exists, Lambda
-# count 0 — needs none of them. CI sets them when it deploys the function.
+# All supplied by CI as TF_VAR_* from the protected GitHub `staging` environment. Infisical is the
+# human-managed source for secrets; GitHub is their deployment delivery copy. Every value defaults to
+# "" so a read-only local initialization needs no deployment configuration.
 
 # Non-secret (GitHub *variables*).
 variable "otlp_endpoint" {
@@ -96,7 +96,7 @@ variable "web_origins" {
   default     = ""
 }
 
-# Secrets (GitHub *secrets*) — sensitive, redacted in plan output.
+# Secrets delivered through GitHub environment secrets — sensitive, redacted in plan output.
 variable "database_url" {
   description = "Pooled Neon connection string (embeds the password). Secret."
   type        = string

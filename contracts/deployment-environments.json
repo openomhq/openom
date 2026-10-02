@@ -1,0 +1,427 @@
+{
+  "version": 1,
+  "environments": {
+    "preview": {
+      "githubEnvironment": "preview",
+      "infisical": {
+        "environment": "preview",
+        "path": "/github",
+        "recursive": false
+      },
+      "secrets": [
+        "CLOUDFLARE_PAGES_TOKEN",
+        "NEON_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
+        "SUPABASE_TEST_PASSWORD"
+      ],
+      "variables": [
+        "AWS_CLOUDFRONT_DISTRIBUTION_ID",
+        "AWS_CLOUDFRONT_KVS_ARN",
+        "AWS_DEPLOY_ROLE_ARN",
+        "AWS_PREVIEW_ARTIFACTS_BUCKET",
+        "AWS_PREVIEW_EXECUTION_ROLE_ARN",
+        "AWS_REGION",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_PAGES_PROJECT",
+        "NEON_PREVIEW_BASE_BRANCH_ID",
+        "NEON_PROJECT_ID",
+        "PREVIEW_MAX_FULL_STACKS",
+        "R2_BUCKET",
+        "R2_ENDPOINT",
+        "SUPABASE_JWKS_URL",
+        "SUPABASE_JWT_AUD",
+        "SUPABASE_JWT_ISS",
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_TEST_EMAIL",
+        "SUPABASE_URL"
+      ],
+      "adminSecrets": []
+    },
+    "staging": {
+      "githubEnvironment": "staging",
+      "infisical": {
+        "environment": "staging",
+        "path": "/github",
+        "recursive": false
+      },
+      "secrets": [
+        "AWS_DEPLOY_ROLE_ARN",
+        "AXIOM_TOKEN",
+        "CLOUDFLARE_PAGES_TOKEN",
+        "DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+        "OPENOM_INTERNAL_GC_TOKEN",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "STAGING_APP_GATE_PASSWORD",
+        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
+        "SUPABASE_TEST_EMAIL",
+        "SUPABASE_TEST_PASSWORD"
+      ],
+      "variables": [
+        "AXIOM_DATASET",
+        "AXIOM_OTLP_ENDPOINT",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "OPENOM_WEB_ORIGINS",
+        "R2_BUCKET",
+        "R2_ENDPOINT",
+        "SUPABASE_JWKS_URL",
+        "SUPABASE_JWT_AUD",
+        "SUPABASE_JWT_ISS",
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_URL"
+      ],
+      "adminSecrets": []
+    },
+    "production": {
+      "githubEnvironment": "production",
+      "infisical": {
+        "environment": "prod",
+        "path": "/github",
+        "recursive": false
+      },
+      "secrets": [],
+      "variables": [],
+      "adminSecrets": [
+        "CLOUDFLARE_API_TOKEN"
+      ]
+    }
+  },
+  "values": {
+    "AWS_DEPLOY_ROLE_ARN": {
+      "required": true,
+      "validator": "aws-role-arn",
+      "provider": "AWS IAM",
+      "source": "environment-scoped GitHub OIDC deployment role ARN",
+      "infisical": null,
+      "rotationUnit": "aws-deploy-role",
+      "smoke": "OIDC role assumption and caller-identity check",
+      "materializes": ["GitHub runner configuration"]
+    },
+    "AWS_REGION": {
+      "required": true,
+      "validator": "aws-region",
+      "provider": "AWS",
+      "source": "preview resource region"
+    },
+    "AWS_PREVIEW_EXECUTION_ROLE_ARN": {
+      "required": true,
+      "validator": "aws-role-arn",
+      "provider": "AWS IAM",
+      "source": "shared preview API execution role ARN"
+    },
+    "AWS_PREVIEW_ARTIFACTS_BUCKET": {
+      "required": true,
+      "validator": "bucket-name",
+      "provider": "AWS S3",
+      "source": "short-lived preview Lambda artifact bucket"
+    },
+    "AWS_CLOUDFRONT_DISTRIBUTION_ID": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "AWS CloudFront",
+      "source": "shared preview edge distribution identifier"
+    },
+    "AWS_CLOUDFRONT_KVS_ARN": {
+      "required": true,
+      "validator": "aws-arn",
+      "provider": "AWS CloudFront KeyValueStore",
+      "source": "shared preview route-store ARN"
+    },
+    "DATABASE_URL": {
+      "required": true,
+      "validator": "postgres-url",
+      "provider": "Neon",
+      "source": "pooled runtime connection string",
+      "infisical": "staging:/github",
+      "rotationUnit": "neon-runtime-role",
+      "smoke": "staging.smoke pooled SELECT 1",
+      "materializes": ["Terraform state", "Lambda environment"]
+    },
+    "MIGRATION_DATABASE_URL": {
+      "required": true,
+      "validator": "postgres-url",
+      "provider": "Neon",
+      "source": "direct migration connection string",
+      "infisical": "staging:/github",
+      "rotationUnit": "neon-migration-role",
+      "smoke": "staging.smoke direct SELECT 1",
+      "materializes": ["migration runner environment"]
+    },
+    "R2_ACCESS_KEY_ID": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Cloudflare R2",
+      "source": "Object Read & Write S3 credential scoped to the environment's R2 bucket",
+      "infisical": "<environment>:/github",
+      "rotationUnit": "r2-environment-credential-pair",
+      "smoke": "environment-scoped put/get/delete round trip",
+      "materializes": ["Terraform state", "Lambda environment"]
+    },
+    "R2_SECRET_ACCESS_KEY": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Cloudflare R2",
+      "source": "Object Read & Write S3 credential scoped to the environment's R2 bucket",
+      "infisical": "<environment>:/github",
+      "rotationUnit": "r2-environment-credential-pair",
+      "smoke": "environment-scoped put/get/delete round trip",
+      "materializes": ["Terraform state", "Lambda environment"]
+    },
+    "AXIOM_TOKEN": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Axiom",
+      "source": "dataset-scoped ingest token",
+      "infisical": "staging:/github",
+      "rotationUnit": "axiom-staging-ingest",
+      "smoke": "staging.smoke trace export",
+      "materializes": ["Terraform state", "Lambda environment"]
+    },
+    "OPENOM_INTERNAL_GC_TOKEN": {
+      "required": false,
+      "validator": "nonempty",
+      "provider": "openom",
+      "source": "generated shared token for the internal GC caller",
+      "infisical": "staging:/github",
+      "rotationUnit": "internal-gc-caller",
+      "smoke": "internal GC rejection and caller acceptance once the scheduler exists",
+      "materializes": ["Terraform state", "Lambda environment"]
+    },
+    "CLOUDFLARE_PAGES_TOKEN": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Cloudflare Pages",
+      "source": "environment-specific account token with Cloudflare Pages Edit only",
+      "infisical": "<environment>:/github",
+      "rotationUnit": "cloudflare-pages-deploy",
+      "smoke": "read the environment's Pages project before deployment",
+      "materializes": ["GitHub runner environment"]
+    },
+    "CLOUDFLARE_PAGES_PROJECT": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Cloudflare Pages",
+      "source": "dedicated preview Pages project name"
+    },
+    "NEON_API_KEY": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Neon",
+      "source": "project-scoped organization API key for the preview project",
+      "infisical": "preview:/github",
+      "rotationUnit": "neon-preview-project-api",
+      "smoke": "read the preview project and preview-base branch",
+      "materializes": ["GitHub runner environment"]
+    },
+    "NEON_PROJECT_ID": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Neon",
+      "source": "dedicated preview project identifier"
+    },
+    "NEON_PREVIEW_BASE_BRANCH_ID": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Neon",
+      "source": "schema-only preview-base branch identifier"
+    },
+    "PREVIEW_MAX_FULL_STACKS": {
+      "required": true,
+      "validator": "positive-integer",
+      "provider": "openom",
+      "source": "concurrent full-preview capacity ceiling"
+    },
+    "STAGING_APP_GATE_PASSWORD": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "openom",
+      "source": "generated shared staging-gate password",
+      "infisical": "staging:/github",
+      "rotationUnit": "staging-web-gate",
+      "smoke": "staging.web browser acceptance after Pages update",
+      "materializes": ["Cloudflare Pages secret", "acceptance runner environment"]
+    },
+    "SUPABASE_TEST_EMAIL": {
+      "required": true,
+      "validator": "email",
+      "provider": "Supabase Auth",
+      "source": "dedicated non-human environment test account",
+      "infisical": null,
+      "rotationUnit": "staging-auth-fixture",
+      "smoke": "staging.smoke sign-in and staging.web account acceptance",
+      "materializes": ["GitHub runner environment"]
+    },
+    "SUPABASE_TEST_PASSWORD": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Supabase Auth",
+      "source": "dedicated non-human environment test account",
+      "infisical": "<environment>:/github",
+      "rotationUnit": "environment-auth-fixture",
+      "smoke": "provider sign-in and deployed account acceptance",
+      "materializes": ["GitHub runner environment"]
+    },
+    "SUPABASE_TEST_ACCOUNT_PASSPHRASE": {
+      "required": true,
+      "validator": "account-passphrase",
+      "provider": "openom",
+      "source": "durable environment test-account credential",
+      "infisical": "<environment>:/github",
+      "rotationUnit": "environment-auth-fixture",
+      "smoke": "fresh-context account restore",
+      "materializes": ["acceptance runner environment", "encrypted durable account backup"]
+    },
+    "AXIOM_DATASET": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Axiom",
+      "source": "staging dataset name"
+    },
+    "AXIOM_OTLP_ENDPOINT": {
+      "required": true,
+      "validator": "https-url",
+      "provider": "Axiom",
+      "source": "regional OTLP endpoint"
+    },
+    "R2_ENDPOINT": {
+      "required": true,
+      "validator": "https-url",
+      "provider": "Cloudflare R2",
+      "source": "account S3-compatible endpoint"
+    },
+    "R2_BUCKET": {
+      "required": true,
+      "validator": "bucket-name",
+      "provider": "Cloudflare R2",
+      "source": "staging encrypted-object bucket"
+    },
+    "SUPABASE_URL": {
+      "required": true,
+      "validator": "https-url",
+      "provider": "Supabase Auth",
+      "source": "staging project URL"
+    },
+    "SUPABASE_JWKS_URL": {
+      "required": true,
+      "validator": "https-url",
+      "provider": "Supabase Auth",
+      "source": "public asymmetric signing-key endpoint"
+    },
+    "SUPABASE_JWT_ISS": {
+      "required": true,
+      "validator": "https-url",
+      "provider": "Supabase Auth",
+      "source": "exact expected JWT issuer"
+    },
+    "SUPABASE_JWT_AUD": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Supabase Auth",
+      "source": "expected JWT audience"
+    },
+    "SUPABASE_PUBLISHABLE_KEY": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Supabase Auth",
+      "source": "public browser API key"
+    },
+    "OPENOM_WEB_ORIGINS": {
+      "required": true,
+      "validator": "https-origin-list",
+      "provider": "openom",
+      "source": "server CORS allow-list"
+    },
+    "CLOUDFLARE_ACCOUNT_ID": {
+      "required": true,
+      "validator": "cloudflare-account-id",
+      "provider": "Cloudflare",
+      "source": "openom Cloudflare account identifier"
+    },
+    "CLOUDFLARE_API_TOKEN": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Cloudflare",
+      "source": "production-capable local infrastructure token",
+      "infisical": "prod:/admin",
+      "rotationUnit": "cloudflare-local-administration",
+      "smoke": "read-only provider lookup before an admin plan",
+      "materializes": ["operator process environment"]
+    }
+  },
+  "workflows": {
+    "staging.server": {
+      "environment": "staging",
+      "file": ".github/workflows/staging.server.yml",
+      "secrets": [
+        "AWS_DEPLOY_ROLE_ARN",
+        "AXIOM_TOKEN",
+        "DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+        "OPENOM_INTERNAL_GC_TOKEN",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY"
+      ],
+      "variables": [
+        "AXIOM_DATASET",
+        "AXIOM_OTLP_ENDPOINT",
+        "OPENOM_WEB_ORIGINS",
+        "R2_BUCKET",
+        "R2_ENDPOINT",
+        "SUPABASE_JWKS_URL",
+        "SUPABASE_JWT_AUD",
+        "SUPABASE_JWT_ISS"
+      ]
+    },
+    "staging.web": {
+      "environment": "staging",
+      "file": ".github/workflows/staging.web.yml",
+      "secrets": [
+        "CLOUDFLARE_PAGES_TOKEN",
+        "STAGING_APP_GATE_PASSWORD",
+        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
+        "SUPABASE_TEST_EMAIL",
+        "SUPABASE_TEST_PASSWORD"
+      ],
+      "variables": [
+        "CLOUDFLARE_ACCOUNT_ID",
+        "R2_ENDPOINT",
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_URL"
+      ]
+    },
+    "staging.smoke": {
+      "environment": "staging",
+      "file": ".github/workflows/staging.smoke.yml",
+      "secrets": [
+        "AWS_DEPLOY_ROLE_ARN",
+        "AXIOM_TOKEN",
+        "CLOUDFLARE_PAGES_TOKEN",
+        "DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+        "OPENOM_INTERNAL_GC_TOKEN",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "STAGING_APP_GATE_PASSWORD",
+        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
+        "SUPABASE_TEST_EMAIL",
+        "SUPABASE_TEST_PASSWORD"
+      ],
+      "variables": [
+        "AXIOM_DATASET",
+        "AXIOM_OTLP_ENDPOINT",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "OPENOM_WEB_ORIGINS",
+        "R2_BUCKET",
+        "R2_ENDPOINT",
+        "SUPABASE_JWKS_URL",
+        "SUPABASE_JWT_AUD",
+        "SUPABASE_JWT_ISS",
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_URL"
+      ]
+    }
+  }
+}

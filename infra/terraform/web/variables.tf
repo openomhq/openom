@@ -1,10 +1,10 @@
 variable "stack_name" {
-  description = "Environment/stack identity (staging, production) — names the Pages project + Access app."
+  description = "Environment/stack identity (staging, production) — names the Pages project."
   type        = string
 }
 
 variable "cloudflare_account_id" {
-  description = "Cloudflare account id that owns Pages + Zero Trust (the openom account)."
+  description = "Cloudflare account id that owns Pages (the openom account)."
   type        = string
 }
 

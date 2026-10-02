@@ -60,7 +60,16 @@ The deploy workflow assumes the CI role over OIDC (its job needs `environment: s
 runs migrations, and `terraform apply`s the app root against `env/staging.tfvars`. Rollback is
 re-pointing the `live` alias at a previous artifact.
 
-## Admin apply (app root — for the IAM/OIDC parts CI can't create)
+## Local app-root administration
+
+> **Do not run an un-targeted local `terraform apply` in this root.** The deployed Lambda is count-gated
+> by `lambda_artifact_key`. A local command that omits CI's artifact input evaluates that count as zero
+> and plans deletion of the Lambda, alias, Function URL, and log group.
+
+The app root currently mixes CI-deployed compute with admin-owned IAM/OIDC resources. Until those
+admin resources move to their dedicated bootstrap root, local use is read-only: initialize the backend,
+inspect state or outputs, and stop. IAM/OIDC changes require an explicitly reviewed target-only recovery
+plan; do not improvise the target set from this README.
 
 ```sh
 cd infra/terraform
@@ -68,10 +77,11 @@ aws sso login --profile <admin-profile>
 export AWS_PROFILE=<admin-profile>
 
 terraform init  -backend-config=env/staging.s3.tfbackend
-terraform apply -var-file=env/staging.tfvars
-
-terraform output ci_deploy_role_arn   # → GitHub 'staging' secret AWS_DEPLOY_ROLE_ARN
+terraform output -raw ci_deploy_role_arn
 ```
+
+The output is non-secret configuration. Store it as the GitHub `staging` environment variable
+`AWS_DEPLOY_ROLE_ARN`, not as an Infisical/GitHub secret.
 
 ## API custom domain
 

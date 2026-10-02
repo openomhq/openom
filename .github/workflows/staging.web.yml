@@ -29,6 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Verify staging configuration
+        env:
+          CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
+          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+        run: node scripts/deployment-config.mjs --validate-workflow staging.web
+
       - uses: pnpm/action-setup@v4
         with:
           version: 11.20.0

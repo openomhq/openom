@@ -1,12 +1,12 @@
 name: staging.smoke
 
-# Provider-connectivity smoke test — proves the staging providers (Neon, R2, Supabase)
-# and their credentials are all wired correctly, BEFORE the openom server itself is
-# deployed. Each provider is its OWN job so they run in parallel and fail INDEPENDENTLY:
+# Pre-deploy staging gate — proves the complete environment inventory and the staging providers
+# (AWS, Neon, R2, Supabase, Cloudflare, and Axiom) are wired correctly BEFORE either application
+# is deployed. Each provider is its OWN job so they run in parallel and fail INDEPENDENTLY:
 # a Neon outage doesn't mask an R2 problem, and the run shows exactly which provider is
 # down. The `otel` job also emits a real trace through our own exporter to prove OTLP
-# export + W3C propagation reach Axiom. Runs twice a week + on demand. Once the real
-# server + deploy smoke test (OPE-511) exist, this is superseded and can be deleted.
+# export + W3C propagation reach Axiom. The account job exercises the already deployed app,
+# including its gate password and durable-account passphrase. Runs twice a week + on demand.
 
 on:
   workflow_dispatch:
@@ -21,7 +21,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  config:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify complete staging configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
+          CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
+          OPENOM_INTERNAL_GC_TOKEN: ${{ secrets.OPENOM_INTERNAL_GC_TOKEN }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          AXIOM_OTLP_ENDPOINT: ${{ vars.AXIOM_OTLP_ENDPOINT }}
+          AXIOM_DATASET: ${{ vars.AXIOM_DATASET }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          OPENOM_WEB_ORIGINS: ${{ vars.OPENOM_WEB_ORIGINS }}
+        run: node scripts/deployment-config.mjs --validate-environment staging
+
+  aws:
+    needs: config
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-central-1
+      - name: Verify the staging deployment identity
+        run: aws sts get-caller-identity > /dev/null
+
   neon:
+    needs: config
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 5
@@ -29,14 +79,18 @@ jobs:
       - name: Connect + SELECT 1 (pooled)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          out=$(psql "$DATABASE_URL" -tAc 'select 1;')
-          test "$out" = "1" || { echo "unexpected result: '$out'"; exit 1; }
-          echo "Neon OK"
+          pooled=$(psql "$DATABASE_URL" -tAc 'select 1;')
+          direct=$(psql "$MIGRATION_DATABASE_URL" -tAc 'select 1;')
+          test "$pooled" = "1" || { echo "pooled connection returned an unexpected result"; exit 1; }
+          test "$direct" = "1" || { echo "direct connection returned an unexpected result"; exit 1; }
+          echo "Neon pooled + direct OK"
 
   r2:
+    needs: config
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 5
@@ -64,6 +118,7 @@ jobs:
           echo "R2 OK"
 
   supabase:
+    needs: config
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 5
@@ -85,11 +140,59 @@ jobs:
           npm --prefix scripts/smoke install --no-audit --no-fund --silent
           node scripts/smoke/supabase-smoke.mjs
 
+  cloudflare:
+    needs: config
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - name: Read the staging Pages project
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          PAGES_PROJECT: openom-staging-web
+        run: |
+          set -euo pipefail
+          response=$(curl -fsS \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT")
+          jq -e --arg project "$PAGES_PROJECT" \
+            '.success == true and .result.name == $project' <<<"$response" > /dev/null
+          echo "Cloudflare Pages OK"
+
+  account:
+    needs: config
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.20.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install browser acceptance dependencies
+        run: |
+          pnpm --dir apps install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps exec playwright install --with-deps chromium
+      - name: Accept the deployed account round trip
+        env:
+          OPENOM_STAGING_AUTH_ACCEPTANCE: "1"
+          OPENOM_STAGING_APP_URL: https://app.staging.openom.org/
+          SUPABASE_TEST_EMAIL: ${{ secrets.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
+        run: pnpm --dir apps exec playwright test e2e/staging-auth.e2e.ts
+
   # Emit a real 2-span trace (client -> server, linked via an injected/extracted traceparent)
   # through our OWN openom exporter, so this proves the whole path the server will use: OTLP
   # HTTP export reaches Axiom, the resource attributes land, and W3C propagation links spans.
   # Builds the crate (hence the toolchain + cache); it needs no DB/S3 — only the Axiom creds.
   otel:
+    needs: config
     runs-on: ubuntu-latest
     environment: staging
     # Cap only guards a pathological cold compile of the server crate (warm w/ cache ≈ 1-2 min);
