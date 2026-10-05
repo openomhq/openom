@@ -42,7 +42,7 @@ jobs:
   mutants:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
 
       # openom-tauri (in the workspace) pulls WebKitGTK sys-crates; install the system libs so the
       # baseline workspace build never fails on them, whichever crates we scope to. Mirrors desktop.yml.
@@ -83,7 +83,7 @@ jobs:
           # cohort (top ~10%) would start false-timing-out.
           cargo mutants -vV --in-place --baseline=skip --timeout 17 "${args[@]}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: mutants-out
