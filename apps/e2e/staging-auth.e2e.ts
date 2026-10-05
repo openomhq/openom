@@ -7,7 +7,7 @@ const credentials = {
   email: process.env.SUPABASE_TEST_EMAIL ?? '',
   password: process.env.SUPABASE_TEST_PASSWORD ?? '',
 };
-const accountPassphrase = process.env.SUPABASE_TEST_ACCOUNT_PASSPHRASE ?? '';
+const accountPassphrase = process.env.OPENOM_TEST_ACCOUNT_PASSPHRASE ?? '';
 const gatePassword = process.env.STAGING_APP_GATE_PASSWORD ?? '';
 const expectedCommit = (process.env.OPENOM_STAGING_COMMIT_SHA ?? '').slice(0, 7);
 

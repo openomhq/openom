@@ -13,7 +13,6 @@
         "NEON_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
-        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
         "SUPABASE_TEST_PASSWORD"
       ],
       "variables": [
@@ -27,6 +26,7 @@
         "CLOUDFLARE_PAGES_PROJECT",
         "NEON_PREVIEW_BASE_BRANCH_ID",
         "NEON_PROJECT_ID",
+        "OPENOM_TEST_ACCOUNT_PASSPHRASE",
         "PREVIEW_MAX_FULL_STACKS",
         "R2_BUCKET",
         "R2_ENDPOINT",
@@ -55,7 +55,6 @@
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "STAGING_APP_GATE_PASSWORD",
-        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
         "SUPABASE_TEST_PASSWORD"
       ],
       "variables": [
@@ -63,6 +62,7 @@
         "AXIOM_OTLP_ENDPOINT",
         "AWS_DEPLOY_ROLE_ARN",
         "CLOUDFLARE_ACCOUNT_ID",
+        "OPENOM_TEST_ACCOUNT_PASSPHRASE",
         "OPENOM_WEB_ORIGINS",
         "R2_BUCKET",
         "R2_ENDPOINT",
@@ -264,13 +264,12 @@
       "smoke": "provider sign-in and deployed account acceptance",
       "materializes": ["GitHub runner environment"]
     },
-    "SUPABASE_TEST_ACCOUNT_PASSPHRASE": {
+    "OPENOM_TEST_ACCOUNT_PASSPHRASE": {
       "required": true,
       "validator": "account-passphrase",
       "provider": "openom",
-      "source": "durable environment test-account credential",
-      "infisical": "<environment>:/github",
-      "rotationUnit": "environment-auth-fixture",
+      "source": "stable disposable test-account fixture stored as an environment variable",
+      "infisical": null,
       "smoke": "fresh-context account restore",
       "materializes": ["acceptance runner environment", "encrypted durable account backup"]
     },
@@ -408,11 +407,11 @@
       "secrets": [
         "CLOUDFLARE_PAGES_TOKEN",
         "STAGING_APP_GATE_PASSWORD",
-        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
         "SUPABASE_TEST_PASSWORD"
       ],
       "variables": [
         "CLOUDFLARE_ACCOUNT_ID",
+        "OPENOM_TEST_ACCOUNT_PASSPHRASE",
         "R2_ENDPOINT",
         "SUPABASE_PUBLISHABLE_KEY",
         "SUPABASE_TEST_EMAIL",
@@ -436,10 +435,9 @@
           "oidc": false,
           "secrets": [
             "STAGING_APP_GATE_PASSWORD",
-            "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
             "SUPABASE_TEST_PASSWORD"
           ],
-          "variables": ["SUPABASE_TEST_EMAIL"]
+          "variables": ["OPENOM_TEST_ACCOUNT_PASSPHRASE", "SUPABASE_TEST_EMAIL"]
         }
       }
     },
@@ -454,7 +452,6 @@
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "STAGING_APP_GATE_PASSWORD",
-        "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
         "SUPABASE_TEST_PASSWORD"
       ],
       "variables": [
@@ -462,6 +459,7 @@
         "AXIOM_OTLP_ENDPOINT",
         "AWS_DEPLOY_ROLE_ARN",
         "CLOUDFLARE_ACCOUNT_ID",
+        "OPENOM_TEST_ACCOUNT_PASSPHRASE",
         "OPENOM_WEB_ORIGINS",
         "R2_BUCKET",
         "R2_ENDPOINT",
@@ -515,10 +513,10 @@
           "oidc": false,
           "secrets": [
             "STAGING_APP_GATE_PASSWORD",
-            "SUPABASE_TEST_ACCOUNT_PASSPHRASE",
             "SUPABASE_TEST_PASSWORD"
           ],
           "variables": [
+            "OPENOM_TEST_ACCOUNT_PASSPHRASE",
             "SUPABASE_JWKS_URL",
             "SUPABASE_JWT_AUD",
             "SUPABASE_JWT_ISS",

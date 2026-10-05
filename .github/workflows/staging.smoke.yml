@@ -146,7 +146,7 @@ jobs:
           SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
           SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
-          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          OPENOM_TEST_ACCOUNT_PASSPHRASE: ${{ vars.OPENOM_TEST_ACCOUNT_PASSPHRASE }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
         run: node scripts/deployment-config.mjs --validate-job staging.smoke.authentication
 
@@ -173,7 +173,7 @@ jobs:
           OPENOM_STAGING_APP_URL: https://app.staging.openom.org/
           SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
-          SUPABASE_TEST_ACCOUNT_PASSPHRASE: ${{ secrets.SUPABASE_TEST_ACCOUNT_PASSPHRASE }}
+          OPENOM_TEST_ACCOUNT_PASSPHRASE: ${{ vars.OPENOM_TEST_ACCOUNT_PASSPHRASE }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
         run: pnpm --dir apps exec playwright test e2e/staging-auth.e2e.ts
 
