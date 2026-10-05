@@ -1,7 +1,7 @@
 //! Recovery code — a second wrap path so a lost passphrase isn't total loss (§4, §17).
 //!
 //! The code is 128 bits of entropy plus an appended checksum byte, base32-encoded and
-//! hyphen-grouped for legibility. The checksum lets the client reject a typo instantly,
+//! hyphen-grouped for legibility. The checksum lets the client reject almost all accidental typos instantly,
 //! *before* running Argon2. Because the code is already high-entropy, its Argon2id cost
 //! is minimal — memory-hardness defends low-entropy passphrases and buys nothing here.
 //!
@@ -36,7 +36,7 @@ pub fn generate_recovery_code() -> Result<RecoveryCode, CryptoError> {
 }
 
 /// Parse + checksum-verify a recovery code (tolerant of case, spaces, hyphens),
-/// returning its raw entropy. Fails fast on a typo (checksum) before any KDF runs.
+/// returning its raw entropy. Fails fast when a typo changes the checksum, before any KDF runs.
 ///
 /// # Errors
 /// Returns [`CryptoError`] if the code is malformed or fails its checksum.
@@ -110,14 +110,20 @@ mod tests {
     #[test]
     fn typo_caught_by_checksum() {
         let code = generate_recovery_code().unwrap();
-        // Flip the first alphanumeric char to a different valid base32 char.
+        // The final base32 symbol contains only the checksum's low bit. Toggling it
+        // creates a one-character typo without the 1-in-256 collision chance that
+        // comes from changing entropy covered by an eight-bit checksum.
         let mut chars: Vec<char> = code.expose().chars().collect();
-        let i = chars.iter().position(char::is_ascii_alphanumeric).unwrap();
-        chars[i] = if chars[i] == 'A' { 'B' } else { 'A' };
+        let i = chars.iter().rposition(char::is_ascii_alphanumeric).unwrap();
+        chars[i] = match chars[i] {
+            'A' => 'Q',
+            'Q' => 'A',
+            symbol => panic!("unexpected trailing base32 symbol: {symbol}"),
+        };
         let typo: String = chars.into_iter().collect();
         assert!(matches!(
             parse_recovery_code(&RecoveryCode::new(typo)),
-            Err(CryptoError::RecoveryChecksum | CryptoError::RecoveryFormat)
+            Err(CryptoError::RecoveryChecksum)
         ));
     }
 
