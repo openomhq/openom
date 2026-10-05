@@ -81,7 +81,7 @@ jobs:
       - name: Verify staging configuration
         env:
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          DATABASE_URL_MIGRATION: ${{ secrets.DATABASE_URL_MIGRATION }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -114,8 +114,8 @@ jobs:
 
       - name: Migrate using the direct database URL
         env:
-          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
-        run: sqlx migrate run --source openom/migrations --database-url "$MIGRATION_DATABASE_URL"
+          DATABASE_URL_MIGRATION: ${{ secrets.DATABASE_URL_MIGRATION }}
+        run: sqlx migrate run --source openom/migrations --database-url "$DATABASE_URL_MIGRATION"
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:

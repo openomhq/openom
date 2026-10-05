@@ -50,7 +50,7 @@
         "AXIOM_TOKEN",
         "CLOUDFLARE_PAGES_TOKEN",
         "DATABASE_URL",
-        "MIGRATION_DATABASE_URL",
+        "DATABASE_URL_MIGRATION",
         "OPENOM_INTERNAL_GC_TOKEN",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
@@ -140,7 +140,7 @@
       "smoke": "staging.smoke pooled SELECT 1",
       "materializes": ["Terraform state", "Lambda environment"]
     },
-    "MIGRATION_DATABASE_URL": {
+    "DATABASE_URL_MIGRATION": {
       "required": true,
       "validator": "postgres-url",
       "provider": "Neon",
@@ -357,7 +357,7 @@
       "secrets": [
         "AXIOM_TOKEN",
         "DATABASE_URL",
-        "MIGRATION_DATABASE_URL",
+        "DATABASE_URL_MIGRATION",
         "OPENOM_INTERNAL_GC_TOKEN",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY"
@@ -381,7 +381,7 @@
           "secrets": [
             "AXIOM_TOKEN",
             "DATABASE_URL",
-            "MIGRATION_DATABASE_URL",
+            "DATABASE_URL_MIGRATION",
             "OPENOM_INTERNAL_GC_TOKEN",
             "R2_ACCESS_KEY_ID",
             "R2_SECRET_ACCESS_KEY"
@@ -448,7 +448,7 @@
         "AXIOM_TOKEN",
         "CLOUDFLARE_PAGES_TOKEN",
         "DATABASE_URL",
-        "MIGRATION_DATABASE_URL",
+        "DATABASE_URL_MIGRATION",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "STAGING_APP_GATE_PASSWORD",
@@ -502,7 +502,7 @@
           "oidc": false,
           "secrets": [
             "DATABASE_URL",
-            "MIGRATION_DATABASE_URL",
+            "DATABASE_URL_MIGRATION",
             "R2_ACCESS_KEY_ID",
             "R2_SECRET_ACCESS_KEY"
           ],

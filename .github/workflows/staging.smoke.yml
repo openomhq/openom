@@ -84,7 +84,7 @@ jobs:
       - name: Verify storage configuration
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          DATABASE_URL_MIGRATION: ${{ secrets.DATABASE_URL_MIGRATION }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
@@ -94,12 +94,12 @@ jobs:
       - name: Connect to Neon
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          DATABASE_URL_MIGRATION: ${{ secrets.DATABASE_URL_MIGRATION }}
         run: |
           set -euo pipefail
           image='postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94'
           pooled=$(docker run --rm -e DATABASE_URL "$image" sh -c 'psql "$DATABASE_URL" -tAc "select 1;"')
-          direct=$(docker run --rm -e MIGRATION_DATABASE_URL "$image" sh -c 'psql "$MIGRATION_DATABASE_URL" -tAc "select 1;"')
+          direct=$(docker run --rm -e DATABASE_URL_MIGRATION "$image" sh -c 'psql "$DATABASE_URL_MIGRATION" -tAc "select 1;"')
           test "$pooled" = '1'
           test "$direct" = '1'
 
