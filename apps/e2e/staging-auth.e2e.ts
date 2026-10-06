@@ -22,6 +22,12 @@ interface DeployedAccountResult {
   state: { auth: string; account: string; binding: string; pending: string[] };
 }
 
+interface DeployedTreeMarker {
+  docId: string;
+  marker: string;
+  treeId: number[];
+}
+
 async function openDeployedApp(page: Page, readinessTimeoutMs: number): Promise<Response> {
   await page.route('**/src/main.js', (route) => route.fulfill({
     status: 200,
@@ -68,7 +74,7 @@ async function composeAccount(page: Page) {
       createAuth: (account) => createAuthProvider(account),
       createRemote: (auth) => new RemoteStore({ baseUrl: serverUrl, auth }),
     });
-    window.stagingAuthAcceptance = composition;
+    window.stagingAuthAcceptance = { ...composition, remote, worker };
   });
 }
 
@@ -111,6 +117,67 @@ async function accountRoundTrip(page: Page, allowCreate: boolean): Promise<Deplo
   }, { signIn: credentials, passphrase: accountPassphrase, mayCreate: allowCreate });
 }
 
+async function writeTreeMarker(page: Page, memberId: string): Promise<DeployedTreeMarker> {
+  return page.evaluate(async ({ durableMemberId }) => {
+    const composition = window.stagingAuthAcceptance;
+    const [{ TreeLibrary }, { treeIdToUuid }, { remoteTransport }, Comlink] = await Promise.all([
+      import('/src/core/library.js'),
+      import('/src/core/keyringPublish.js'),
+      import('/src/core/appCoreClient.js'),
+      import('/src/vendor/comlink.js'),
+    ]);
+    const digest = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(`openom deployed acceptance tree v1\0${durableMemberId}`),
+    );
+    const treeId = new Uint8Array(digest).slice(0, 16);
+    const identity = { bytes: treeId, uuid: treeIdToUuid(treeId) };
+    await composition.worker.attachTransport(identity.uuid, Comlink.proxy(remoteTransport(composition.remote)));
+    const remoteKeyring = await composition.remote.readKeyring(identity.uuid);
+    let didKey: string;
+    if (remoteKeyring.revisions.length === 0) {
+      ({ didKey } = await composition.worker.provisionTree({
+        treeId: identity.bytes,
+        docId: identity.uuid,
+        engine: 'chain',
+      }));
+    } else {
+      ({ didKey } = await composition.worker.restoreTree({
+        treeId: identity.bytes,
+        docId: identity.uuid,
+        engine: 'chain',
+      }));
+    }
+    const tree = await new TreeLibrary(composition.worker).open(identity.uuid, didKey);
+    const marker = `deployed-sync-${Date.now()}-${crypto.randomUUID()}`;
+    await tree.createPerson({ given: marker, surname: 'acceptance' });
+    const synced = await composition.worker.syncNow(identity.uuid);
+    if (synced?.state !== 'ok') throw new Error(`tree write did not sync: ${JSON.stringify(synced)}`);
+    return { docId: identity.uuid, marker, treeId: [...identity.bytes] };
+  }, { durableMemberId: memberId });
+}
+
+async function readTreeMarker(page: Page, expected: DeployedTreeMarker): Promise<string[]> {
+  return page.evaluate(async ({ source }) => {
+    const composition = window.stagingAuthAcceptance;
+    const [{ TreeLibrary }, { remoteTransport }, Comlink] = await Promise.all([
+      import('/src/core/library.js'),
+      import('/src/core/appCoreClient.js'),
+      import('/src/vendor/comlink.js'),
+    ]);
+    await composition.worker.attachTransport(source.docId, Comlink.proxy(remoteTransport(composition.remote)));
+    await composition.worker.restoreTree({
+      treeId: new Uint8Array(source.treeId),
+      docId: source.docId,
+      engine: 'chain',
+    });
+    const synced = await composition.worker.syncNow(source.docId);
+    if (synced?.state !== 'ok') throw new Error(`tree read did not sync: ${JSON.stringify(synced)}`);
+    const tree = await new TreeLibrary(composition.worker).open(source.docId);
+    return tree.allPeople().map((person) => `${person.given} ${person.surname}`.trim());
+  }, { source: expected });
+}
+
 async function acceptanceContext(browser: Browser, readinessTimeoutMs: number) {
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -125,7 +192,7 @@ async function acceptanceContext(browser: Browser, readinessTimeoutMs: number) {
   return { context, page, errors };
 }
 
-test('deployed app signs in, refreshes, binds, backs up, and restores in a fresh context @staging', async ({ browser }) => {
+test('deployed app persists account custody and tree writes into a fresh context @staging', async ({ browser }) => {
   test.setTimeout(180_000);
   test.skip(!enabled, 'run from a deployed-app acceptance workflow with environment credentials');
   expect(credentials.email).not.toBe('');
@@ -140,6 +207,7 @@ test('deployed app signs in, refreshes, binds, backs up, and restores in a fresh
     const source = await accountRoundTrip(first.page, true);
     expect(source.authSubject).not.toBe(source.memberId);
     expect(source.state).toEqual({ auth: 'signedIn', account: 'unlocked', binding: 'backedUp', pending: [] });
+    const treeMarker = await writeTreeMarker(first.page, source.memberId);
 
     second = await acceptanceContext(browser, 15_000);
     const restored = await accountRoundTrip(second.page, false);
@@ -147,6 +215,7 @@ test('deployed app signs in, refreshes, binds, backs up, and restores in a fresh
     expect(restored.memberId).toBe(source.memberId);
     expect(restored.authSubject).toBe(source.authSubject);
     expect(restored.state).toEqual({ auth: 'signedIn', account: 'unlocked', binding: 'backedUp', pending: [] });
+    expect(await readTreeMarker(second.page, treeMarker)).toContain(`${treeMarker.marker} acceptance`);
     expect(first.errors).toEqual([]);
     expect(second.errors).toEqual([]);
   } finally {
@@ -172,6 +241,23 @@ declare global {
         signIn(credentials: { email: string; password: string }): Promise<void>;
         getAccessToken(options?: { forceRefresh?: boolean }): Promise<string>;
         subject(): string | null;
+      };
+      remote: {
+        readKeyring(treeId: string): Promise<{ revisions: ReadonlyArray<unknown> }>;
+      };
+      worker: {
+        attachTransport(docId: string, transport: unknown): Promise<void>;
+        provisionTree(input: {
+          treeId: Uint8Array;
+          docId: string;
+          engine: 'chain';
+        }): Promise<{ didKey: string }>;
+        restoreTree(input: {
+          treeId: Uint8Array;
+          docId: string;
+          engine: 'chain';
+        }): Promise<{ didKey: string }>;
+        syncNow(docId: string): Promise<{ state: string }>;
       };
       dispose(): void;
     };

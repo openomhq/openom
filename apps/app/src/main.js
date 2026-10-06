@@ -6,6 +6,7 @@ import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { createAuthProvider } from './core/authProvider.js';
 import { composeAccountSession } from './core/accountComposition.js';
+import { treeSyncAvailable } from './core/accountSession.js';
 import { AccountUiActions } from './core/accountUiActions.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
@@ -114,7 +115,7 @@ class App {
   remote = null;
   sync = null;
   syncStatus = null;
-  accountAuthState = 'signedOut';
+  accountTreeSyncAvailable = false;
   unsubscribeAccount = null;
   accountComposition = null;
   accountActions = null;
@@ -155,7 +156,7 @@ class App {
       errorText: (error) => errText(error),
       logError: (operation, error) => logError(`account-${operation}`, error),
     });
-    this.accountAuthState = this.account.state().auth;
+    this.accountTreeSyncAvailable = treeSyncAvailable(this.account.state());
     this.unsubscribeAccount = this.account.onChange((state) => this.onAccountStateChange(state));
     this.renderAccountSurface();
   }
@@ -246,13 +247,14 @@ class App {
     return this.accountActions?.enableSync() ?? Promise.resolve(null);
   }
 
-  // Facade auth changes affect only remote connectivity. The local unlocked account remains usable offline.
-  // Other account-state changes only re-render; `main.js` never interprets provider subjects or binding state.
+  // Remote readiness changes affect only connectivity. The local unlocked account remains usable offline.
+  // The account facade owns the auth/binding/conflict decision; main.js consumes only its derived predicate.
   onAccountStateChange(state) {
-    if (state.auth !== this.accountAuthState) {
-      this.accountAuthState = state.auth;
+    const remoteReady = treeSyncAvailable(state);
+    if (remoteReady !== this.accountTreeSyncAvailable) {
+      this.accountTreeSyncAvailable = remoteReady;
       this.stopSync();
-      if (this.lockable && this.tree && state.auth === 'signedIn') this.startSync();
+      if (this.lockable && this.tree && remoteReady) this.startSync();
     }
     this.render();
   }
@@ -612,7 +614,7 @@ class App {
   startSync() {
     this.stopSync();
     if (!this.lockable || !this.tree || !this.realDoc) return; // only the real, lockable tree syncs
-    if (!this.serverUrl || this.account.state().auth !== 'signedIn') return; // no backend / provider session → local-only
+    if (!this.serverUrl || !treeSyncAvailable(this.account.state())) return;
     try {
       const remote = this.remote;
       // The worker calls the transport across Comlink; auth + serverUrl stay on the main thread.
