@@ -8,6 +8,8 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::api_error::ApiError;
@@ -20,6 +22,49 @@ use crate::AppState;
 /// snapshots are far smaller, but the limit is enforced so a client can't wedge the
 /// proxy. Media (large) takes the presigned path instead, never this one.
 pub const MAX_OBJECT_BYTES: usize = 6 * 1024 * 1024;
+
+#[derive(Serialize)]
+pub struct OwnedTree {
+    /// Canonical tree UUID used by every managed tree route.
+    id: Uuid,
+    /// Pinned keyring engine learned from the first verified update.
+    engine: String,
+}
+
+#[derive(Serialize)]
+pub struct OwnedTrees {
+    /// Completed trees founded by the authenticated account.
+    trees: Vec<OwnedTree>,
+}
+
+/// `GET /trees` — list this account's completed owner trees for fresh-device restore.
+///
+/// Incomplete rows (no accepted keyring yet) are deliberately omitted: only the device that created such a
+/// row has enough local state to resume it. Joined trees need their independently authenticated first-sight
+/// material and are therefore not discovered through this owner-only endpoint.
+///
+/// # Errors
+/// Returns [`ApiError`] if the metadata lookup fails.
+pub async fn list_owned_trees(
+    State(state): State<AppState>,
+    identity: Identity,
+) -> Result<Json<OwnedTrees>, ApiError> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, keyring_engine FROM trees
+         WHERE owner_id = $1 AND keyring_revision > 0 AND keyring_engine IS NOT NULL
+         ORDER BY created_at, id",
+    )
+    .bind(identity.member_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+    Ok(Json(OwnedTrees {
+        trees: rows
+            .into_iter()
+            .map(|(id, engine)| OwnedTree { id, engine })
+            .collect(),
+    }))
+}
 
 /// `POST /trees/{tree_id}` — explicitly create the tree row (OPE-407, decision 3-B), entitlement-gated on
 /// the owner's `max_trees`; the caller becomes owner. This is the ONE place a `trees` row is minted for the

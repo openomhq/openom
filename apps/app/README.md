@@ -110,8 +110,12 @@ before clearing its durable create marker. Every shared-tree web or native tick 
 a locally newer chain tail or DAG anchor before transferring data; a failed membership upload aborts that tick
 so an attributed delta cannot outrun the authorization material needed to verify it. On a fresh device,
 founder-tree restore verifies the complete chain walk or DAG anchor, binds it to the restored account, and only
-then commits the local keyring head and opens the tree. In development, the singleton `DevAuth` observes that
-account handle and exposes its durable member ID only as the raw development bearer; it does not own accounts.
+then commits the local keyring head and opens the tree. If the local selected-tree cache is absent, the client
+discovers the account's single completed owner tree from the authenticated server index; it never provisions a
+replacement during restore, and refuses an ambiguous multi-tree result until explicit selection exists. Joined
+trees remain dependent on their independently authenticated first-sight material. In development, the singleton
+`DevAuth` observes that account handle and exposes its durable member ID only as the raw development bearer; it
+does not own accounts.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
 passphrase, snapshot, verified candidate adoption, revoke credentials, public identity, and registration proof), while
 keeping every secret handle in Rust/wasm. Candidate adoption verifies the fetched wrapped bytes before replacing

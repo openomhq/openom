@@ -16,14 +16,16 @@
 // yet" at a first provision would otherwise each mint a different id and split the account's one
 // tree across two server rows (cas_create accepts both — nothing reconciles them afterwards).
 
-import { treeIdToUuid } from './keyringPublish.js';
+import { treeIdToUuid, uuidToTreeId } from './keyringPublish.js';
 
 /** @typedef {import('./types/domain.js').MemberId} MemberId */
 /** @typedef {import('./types/domain.js').TreeId} TreeId */
 /** @typedef {import('./types/domain.js').TreeUuid} TreeUuid */
 /** @typedef {import('./types/contracts.js').TreeIdentity} TreeIdentity */
+/** @typedef {import('./types/domain.js').KeyringEngine} KeyringEngine */
 /** @typedef {{ getItem(key: string): string | null, setItem(key: string, value: string): void }} TreeIdentityStorage */
 /** @typedef {{ request<T>(name: string, callback: () => Promise<T> | T): Promise<T> }} TreeIdentityLocks */
+/** @typedef {{ readonly id: TreeUuid, readonly engine: KeyringEngine }} OwnedTree */
 
 /** @param {MemberId} accountMemberId */
 const key = (accountMemberId) => `openom.tree.${accountMemberId}`;
@@ -88,6 +90,30 @@ function write(storage, accountMemberId, bytes, uuid) {
 export function readTreeIdentity(accountMemberId, { storage = defaultStorage() } = {}) {
   if (!accountMemberId) return null;
   return read(storage, accountMemberId);
+}
+
+/**
+ * Reconcile the local selected-tree cache with the authenticated account's completed owner trees.
+ * A sole remote tree may seed a fresh device; an existing local selection is never silently replaced.
+ * @param {TreeIdentity | null} cached
+ * @param {ReadonlyArray<OwnedTree>} owned
+ * @returns {{ readonly identity: TreeIdentity, readonly engine: KeyringEngine | null } | null}
+ */
+export function resolveOwnerTreeSelection(cached, owned) {
+  if (cached) {
+    const match = owned.find((tree) => tree.id === cached.uuid);
+    if (match) return { identity: cached, engine: match.engine };
+    if (owned.length > 0) throw new Error('the local tree selection conflicts with the synced account');
+    return { identity: cached, engine: null };
+  }
+  if (owned.length === 0) return null;
+  if (owned.length > 1) throw new Error('multiple synced trees require an explicit selection');
+  const selected = owned[0];
+  if (!selected) return null;
+  return {
+    identity: { uuid: selected.id, bytes: uuidToTreeId(selected.id) },
+    engine: selected.engine,
+  };
 }
 
 /**

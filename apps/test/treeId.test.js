@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { readTreeIdentity, ensureTreeIdentity, seedTreeIdentity } from '../app/src/core/treeId.js';
+import {
+  readTreeIdentity, ensureTreeIdentity, resolveOwnerTreeSelection, seedTreeIdentity,
+} from '../app/src/core/treeId.js';
 import { treeIdToUuid, uuidToTreeId } from '../app/src/core/keyringPublish.js';
 
 function fakeStorage() {
@@ -32,6 +34,22 @@ function counterBytes() {
 }
 
 describe('treeId — one selected tree per account', () => {
+  it('reuses one completed owner tree and refuses ambiguous or conflicting discovery', () => {
+    const first = { id: '11111111-2222-3333-4444-555555555555', engine: 'chain' };
+    const second = { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', engine: 'dag' };
+    const selected = resolveOwnerTreeSelection(null, [first]);
+    expect(selected?.identity.uuid).toBe(first.id);
+    expect(selected?.engine).toBe('chain');
+    if (!selected) throw new Error('expected one discovered tree');
+    expect(resolveOwnerTreeSelection(null, [])).toBeNull();
+    expect(() => resolveOwnerTreeSelection(null, [first, second])).toThrow('explicit selection');
+
+    const cached = selected.identity;
+    expect(resolveOwnerTreeSelection(cached, [first])).toEqual({ identity: cached, engine: 'chain' });
+    expect(resolveOwnerTreeSelection(cached, [])).toEqual({ identity: cached, engine: null });
+    expect(() => resolveOwnerTreeSelection(cached, [second])).toThrow('conflicts');
+  });
+
   it('readTreeIdentity is null before anything is minted', () => {
     expect(readTreeIdentity('m1', { storage: fakeStorage() })).toBeNull();
     expect(readTreeIdentity(null, { storage: fakeStorage() })).toBeNull();

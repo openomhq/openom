@@ -29,6 +29,25 @@ function jsonRes({ status = 200, json = {} as any } = {}) {
 // here through a surviving method — blobGet for GETs, putKeyring for PUTs. (The V1 snapshot / V2 delta-log methods
 // that used to vehicle these were removed; the blob quartet + keyring + access + invites are the live surface.)
 describe('RemoteStore', () => {
+  it('decodes completed owner-tree discovery without flattening the engine', async () => {
+    const fetch = vi.fn(async () => jsonRes({
+      json: { trees: [{ id: '11111111-2222-3333-4444-555555555555', engine: 'dag' }] },
+    }));
+    const store = new RemoteStore({ baseUrl: 'http://x', fetch, auth: async () => 'jwt' });
+    await expect(store.listOwnedTrees()).resolves.toEqual([
+      { id: '11111111-2222-3333-4444-555555555555', engine: 'dag' },
+    ]);
+    expect(fetch).toHaveBeenCalledWith('http://x/v1/trees', expect.objectContaining({ method: 'GET' }));
+  });
+
+  it('rejects an unknown discovered tree engine', async () => {
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jsonRes({ json: { trees: [{ id: 'tree', engine: 'other' }] } }),
+    });
+    await expect(store.listOwnedTrees()).rejects.toThrow('engine is not supported');
+  });
+
   it('binds the browser default fetch to its global receiver', async () => {
     const fetch = vi.fn(function (this: unknown) {
       if (this !== globalThis) throw new TypeError('Illegal invocation');

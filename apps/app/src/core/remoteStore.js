@@ -2,8 +2,8 @@
 // (that's SealedStore, one layer up). The live sync path is the DATA channel as a content-addressable BLOB store
 // (blobList/blobGet/blobPut/putFrontier), plus the keyring channel (readKeyring/putKeyring), the advisory
 // membership summary (getAccess/putAccess), the Mode A share invites (createInvite/listInvites/claimInvite/
-// deleteInvite), and createTree. The old V1 snapshot (GET/PUT /trees/{id}) and V2 delta-log (/trees/{id}/log)
-// methods were removed once the blob quartet replaced them — nothing called them.
+// deleteInvite), explicit createTree, and owner-tree discovery. The old V1 snapshot (GET/PUT /trees/{id}) and
+// V2 delta-log (/trees/{id}/log) methods were removed once the blob quartet replaced them — nothing called them.
 
 import { ConflictError, AuthError } from './store.js';
 import { makeError, isAppError } from './errorModel.js';
@@ -44,6 +44,7 @@ import { ERROR_CODES } from './errorCodes.generated.js';
 /** @typedef {{ readonly inviteId: InviteId, readonly uuid: TreeUuid, readonly role: MemberRole, readonly engine: KeyringEngine, readonly pin: InvitePinBytes, readonly metaMac: InviteMacBytes, readonly recipientPin: string | null, readonly expiry: number }} PendingInvite */
 /** @typedef {{ readonly inviteId: InviteId, readonly memberId: MemberId, readonly hpkePublicKey: HpkePublicKeyBytes, readonly authorPublicKey: AuthorPublicKeyBytes, readonly tag: InviteMacBytes }} InviteClaim */
 /** @typedef {{ readonly memberId: MemberId, readonly authorPublicKey: AuthorPublicKeyBytes, readonly signature: RegistrationProofBytes, readonly ts: number }} RegistrationProof */
+/** @typedef {{ readonly id: TreeUuid, readonly engine: KeyringEngine }} OwnedTree */
 /** @typedef {import('./types/appCoreApi.js').RemoteProposal} RemoteProposal */
 /** @typedef {import('./types/appCoreApi.js').RemoteHistoryPage} RemoteHistoryPage */
 /** @typedef {{ readonly accessToken: string }} PinnedTokenOptions */
@@ -397,6 +398,26 @@ export class RemoteStore {
       throw netAppError(e);
     }
     if (!res.ok) throw await httpAppError(res);
+  }
+
+  /** Completed trees founded by the authenticated account, for fresh-device restore. */
+  /** @returns {Promise<ReadonlyArray<OwnedTree>>} */
+  async listOwnedTrees() {
+    let res;
+    try {
+      res = await this.#send(`${this.#baseUrl}/v1/trees`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
+    if (!res.ok) throw await httpAppError(res);
+    const payload = record(await res.json(), 'owned trees');
+    return requiredArray(payload.trees, 'owned trees list').map((entry) => {
+      const item = record(entry, 'owned tree');
+      return {
+        id: asTreeUuid(requiredString(item.id, 'owned tree id')),
+        engine: keyringEngine(item.engine),
+      };
+    });
   }
 
   // ---- data blob surface (the OPE-397 BlobStore-over-HTTP; the managed server is OPE-398) ----
