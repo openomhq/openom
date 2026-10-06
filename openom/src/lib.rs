@@ -124,6 +124,7 @@ pub fn app(state: AppState) -> Router {
         // POST creates the tree row (OPE-407, decision 3-B) — the explicit, entitlement-gated mint. The V1
         // scalar-snapshot GET/PUT and the §B1 delta-log route are retired (OPE-448): the data channel is the
         // blob store below, and change history is served by GET /history.
+        .route("/trees", get(trees::list_owned_trees))
         .route("/trees/{tree_id}", post(trees::create_tree))
         // Data-channel blob store (OPE-398): the R2+Neon realization of the client's BlobStore-over-HTTP
         // contract (opaque get/put-with-precondition/list-by-prefix; no DELETE — that's GC-internal only).

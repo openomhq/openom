@@ -1979,6 +1979,52 @@ async fn create_tree_then_blob_write_succeeds() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn owner_tree_discovery_omits_incomplete_and_joined_trees() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let member = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    assert_eq!(
+        send(&app, post_as(format!("/v1/trees/{tree}"), owner))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+
+    let (status, _, body) = send(&app, get_as("/v1/trees".into(), owner)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["trees"],
+        serde_json::json!([])
+    );
+
+    let founder = generate_identity().unwrap();
+    let genesis = build_keyring(tree, 1, vec![], &founder, owner, &[(member, 5)]);
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &genesis, owner)).await.0,
+        StatusCode::OK
+    );
+
+    let (status, _, body) = send(&app, get_as("/v1/trees".into(), owner)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["trees"],
+        serde_json::json!([{ "id": tree, "engine": "chain" }])
+    );
+
+    let (status, _, body) = send(&app, get_as("/v1/trees".into(), member)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["trees"],
+        serde_json::json!([]),
+        "joined trees require independently authenticated first-sight material"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn create_tree_idempotent_for_owner_forbidden_for_others() {
     // Idempotent for the owner (a returning device re-POSTs → 200, not an error); refused for a different
     // caller (never hijack an existing tree → 403).

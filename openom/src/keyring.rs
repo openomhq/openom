@@ -164,6 +164,21 @@ pub async fn put_keyring(
     let revision = i32::try_from(revision_u).unwrap_or(i32::MAX);
     let is_reset = admitted.view.reset_boundary;
 
+    let engine_bound = sqlx::query(
+        "UPDATE trees SET keyring_engine = COALESCE(keyring_engine, $2)
+         WHERE id = $1 AND (keyring_engine IS NULL OR keyring_engine = $2)",
+    )
+    .bind(tree_id)
+    .bind(engine.as_tag())
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    if engine_bound.rows_affected() != 1 {
+        return Err(ApiError::BadRequest(
+            "keyring engine does not match the tree's pinned engine".into(),
+        ));
+    }
+
     if is_reset {
         enforce_reset_cooldown(&mut tx, tree_id, revision).await?;
     }

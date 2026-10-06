@@ -25,7 +25,6 @@ interface DeployedAccountResult {
 interface DeployedTreeMarker {
   docId: string;
   marker: string;
-  treeId: number[];
 }
 
 async function openDeployedApp(page: Page, readinessTimeoutMs: number): Promise<Response> {
@@ -133,15 +132,18 @@ async function writeTreeMarker(page: Page, memberId: string): Promise<DeployedTr
     const treeId = new Uint8Array(digest).slice(0, 16);
     const identity = { bytes: treeId, uuid: treeIdToUuid(treeId) };
     await composition.worker.attachTransport(identity.uuid, Comlink.proxy(remoteTransport(composition.remote)));
-    const remoteKeyring = await composition.remote.readKeyring(identity.uuid);
+    const ownedTrees = await composition.remote.listOwnedTrees();
     let didKey: string;
-    if (remoteKeyring.revisions.length === 0) {
+    if (ownedTrees.length === 0) {
       ({ didKey } = await composition.worker.provisionTree({
         treeId: identity.bytes,
         docId: identity.uuid,
         engine: 'chain',
       }));
     } else {
+      if (ownedTrees.length !== 1 || ownedTrees[0]?.id !== identity.uuid || ownedTrees[0]?.engine !== 'chain') {
+        throw new Error('the deployed fixture account has an unexpected owner-tree selection');
+      }
       ({ didKey } = await composition.worker.restoreTree({
         treeId: identity.bytes,
         docId: identity.uuid,
@@ -153,27 +155,34 @@ async function writeTreeMarker(page: Page, memberId: string): Promise<DeployedTr
     await tree.createPerson({ given: marker, surname: 'acceptance' });
     const synced = await composition.worker.syncNow(identity.uuid);
     if (synced?.state !== 'ok') throw new Error(`tree write did not sync: ${JSON.stringify(synced)}`);
-    return { docId: identity.uuid, marker, treeId: [...identity.bytes] };
+    return { docId: identity.uuid, marker };
   }, { durableMemberId: memberId });
 }
 
 async function readTreeMarker(page: Page, expected: DeployedTreeMarker): Promise<string[]> {
   return page.evaluate(async ({ source }) => {
     const composition = window.stagingAuthAcceptance;
-    const [{ TreeLibrary }, { remoteTransport }, Comlink] = await Promise.all([
+    const [{ TreeLibrary }, { uuidToTreeId }, { remoteTransport }, Comlink] = await Promise.all([
       import('/src/core/library.js'),
+      import('/src/core/keyringPublish.js'),
       import('/src/core/appCoreClient.js'),
       import('/src/vendor/comlink.js'),
     ]);
-    await composition.worker.attachTransport(source.docId, Comlink.proxy(remoteTransport(composition.remote)));
+    const ownedTrees = await composition.remote.listOwnedTrees();
+    if (ownedTrees.length !== 1 || ownedTrees[0]?.id !== source.docId) {
+      throw new Error('the fresh context did not discover the expected owner tree');
+    }
+    const selected = ownedTrees[0];
+    const treeId = uuidToTreeId(selected.id);
+    await composition.worker.attachTransport(selected.id, Comlink.proxy(remoteTransport(composition.remote)));
     await composition.worker.restoreTree({
-      treeId: new Uint8Array(source.treeId),
-      docId: source.docId,
-      engine: 'chain',
+      treeId,
+      docId: selected.id,
+      engine: selected.engine,
     });
-    const synced = await composition.worker.syncNow(source.docId);
+    const synced = await composition.worker.syncNow(selected.id);
     if (synced?.state !== 'ok') throw new Error(`tree read did not sync: ${JSON.stringify(synced)}`);
-    const tree = await new TreeLibrary(composition.worker).open(source.docId);
+    const tree = await new TreeLibrary(composition.worker).open(selected.id);
     return tree.allPeople().map((person) => `${person.given} ${person.surname}`.trim());
   }, { source: expected });
 }
@@ -243,7 +252,7 @@ declare global {
         subject(): string | null;
       };
       remote: {
-        readKeyring(treeId: string): Promise<{ revisions: ReadonlyArray<unknown> }>;
+        listOwnedTrees(): Promise<ReadonlyArray<{ id: string; engine: 'chain' | 'dag' }>>;
       };
       worker: {
         attachTransport(docId: string, transport: unknown): Promise<void>;

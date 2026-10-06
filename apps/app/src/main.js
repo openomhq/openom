@@ -8,7 +8,9 @@ import { createAuthProvider } from './core/authProvider.js';
 import { composeAccountSession } from './core/accountComposition.js';
 import { treeSyncAvailable } from './core/accountSession.js';
 import { AccountUiActions } from './core/accountUiActions.js';
-import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
+import {
+  readTreeIdentity, ensureTreeIdentity, seedTreeIdentity, resolveOwnerTreeSelection,
+} from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
 import {
   inviteMember as mInviteMember, pendingInvites as mPendingInvites, admitMember as mAdmitMember,
@@ -203,6 +205,43 @@ class App {
     return !!id;
   }
 
+  async resolveSelectedTree() {
+    const cached = readTreeIdentity(this.account.memberId());
+    if (cached) {
+      this.realDoc = cached.uuid;
+      this.realTreeId = cached.bytes;
+      if (await this.worker.hasKeyring(cached.uuid)) return { ...cached, engine: null, local: true };
+    }
+    if (!this.remote || !treeSyncAvailable(this.account.state())) {
+      return cached ? { ...cached, engine: null, local: false } : null;
+    }
+
+    const selected = resolveOwnerTreeSelection(cached, await this.remote.listOwnedTrees());
+    if (!selected) return null;
+    const identity = cached ?? seedTreeIdentity(this.accountMemberId(), selected.identity);
+    this.realDoc = identity.uuid;
+    this.realTreeId = identity.bytes;
+    return { ...identity, engine: selected.engine, local: false };
+  }
+
+  async openSelectedTree() {
+    const selected = await this.resolveSelectedTree();
+    if (!selected) return null;
+    if (selected.local) {
+      return this.worker.openTree({ treeId: selected.bytes, docId: selected.uuid });
+    }
+    if (!selected.engine || !this.remote) return null;
+    await this.worker.attachTransport(
+      selected.uuid,
+      Comlink.proxy(remoteTransport(this.remote)),
+    );
+    return this.worker.restoreTree({
+      treeId: selected.bytes,
+      docId: selected.uuid,
+      engine: selected.engine,
+    });
+  }
+
   // Tree lookup is deliberately delayed until account unlock reveals the durable member id.
   async gateForAccount() {
     if (this.account.state().account === 'none') return 'welcome';
@@ -297,8 +336,13 @@ class App {
     try {
       if (this.account.state().account === 'none') {
         ({ recoveryCode: newRecoveryCode } = await this.account.createAccount(passphrase));
-      } else {
+      } else if (this.account.state().account === 'locked') {
         await this.account.unlock(passphrase);
+      }
+      const existing = await this.openSelectedTree();
+      if (existing) {
+        await this.enterApp({ docId: this.realDoc, createdBy: existing.didKey, lockable: true });
+        return;
       }
       // Provision only after account unlock supplies the durable identity used to key the selected-tree cache.
       const id = await ensureTreeIdentity(this.accountMemberId());
@@ -392,12 +436,12 @@ class App {
     this.renderGate();
     try {
       await this.account.unlock(passphrase);
-      if (!this.loadTreeIdentity() || !(await this.worker.hasKeyring(this.realDoc))) {
+      const opened = await this.openSelectedTree();
+      if (!opened) {
         this.showGate('welcome');
         return;
       }
-      const { didKey } = await this.worker.openTree({ treeId: this.realTreeId, docId: this.realDoc });
-      await this.enterApp({ docId: this.realDoc, createdBy: didKey, lockable: true });
+      await this.enterApp({ docId: this.realDoc, createdBy: opened.didKey, lockable: true });
     } catch (e) {
       this.gateBusy = false;
       // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
@@ -420,15 +464,15 @@ class App {
     let newCode = '';
     try {
       ({ recoveryCode: newCode } = await this.account.recover(recoveryCode, newPassphrase));
-      if (!this.loadTreeIdentity() || !(await this.worker.hasKeyring(this.realDoc))) {
+      const opened = await this.openSelectedTree();
+      if (!opened) {
         this.pendingDid = null;
         this.recoveryNextGate = 'welcome';
         this.gateRecoveryCode = newCode;
         this.showGate('recovery');
         return;
       }
-      const { didKey } = await this.worker.openTree({ treeId: this.realTreeId, docId: this.realDoc });
-      this.pendingDid = didKey;
+      this.pendingDid = opened.didKey;
       this.gateRecoveryCode = newCode; // a fresh code — the old one no longer works
       this.showGate('recovery');
     } catch (e) {
