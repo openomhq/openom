@@ -1,4 +1,5 @@
 import type { AccountProbe, AccountSessionState } from './accountSession.js';
+import type { AccountCandidateCredential } from './appCoreApi.js';
 import type { AuthCapabilities, AuthSignUpResult, PasswordCredentials } from './session.js';
 
 export type AccountUiScreen =
@@ -9,7 +10,7 @@ export type AccountUiScreen =
   | 'restore'
   | 'conflict';
 
-export type AccountUiOperation = 'signUp' | 'signIn' | 'signOut' | 'enableSync';
+export type AccountUiOperation = 'signUp' | 'signIn' | 'signOut' | 'enableSync' | 'restore';
 export type AccountUiNotice = 'confirmationRequired';
 export type AccountUiDiscovery = 'unknown' | 'unregistered' | 'registered';
 
@@ -25,6 +26,7 @@ export interface AccountUiAccount {
   state(): AccountSessionState;
   probe(): Promise<AccountProbe>;
   enableSync(): Promise<AccountSessionState>;
+  restore(credential: AccountCandidateCredential): Promise<unknown>;
 }
 
 export interface AccountUiAuth {
@@ -37,6 +39,7 @@ export interface AccountUiActionsOptions {
   readonly account: AccountUiAccount;
   readonly auth: AccountUiAuth;
   readonly onChange?: (state: AccountUiState) => void;
+  readonly onAccountRestored?: () => Promise<void>;
   readonly errorText: (error: unknown) => string;
   readonly logError: (operation: AccountUiOperation, error: unknown) => unknown;
 }
@@ -51,4 +54,5 @@ export interface AccountViewHost {
   doSignIn(email: string, password: string): Promise<unknown>;
   doSignOut(): Promise<unknown>;
   doEnableSync(): Promise<unknown>;
+  doRestore(passphrase: string): Promise<unknown>;
 }

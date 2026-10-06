@@ -22,6 +22,7 @@ function fixture({ signUpResult = { status: 'signedIn' }, probe, state } = {}) {
     state: vi.fn(() => currentState),
     probe: vi.fn(async () => remoteProbe),
     enableSync: vi.fn(async () => currentState),
+    restore: vi.fn(async () => ({ memberId: 'remote-member' })),
   };
   const auth = {
     signUp: vi.fn(async () => signUpResult),
@@ -30,14 +31,16 @@ function fixture({ signUpResult = { status: 'signedIn' }, probe, state } = {}) {
   };
   const changes = vi.fn();
   const logError = vi.fn((_operation, error) => error);
+  const onAccountRestored = vi.fn(async () => {});
   const actions = new AccountUiActions({
     account,
     auth,
     onChange: changes,
+    onAccountRestored,
     errorText: (error) => `safe:${error.code ?? 'unknown'}`,
     logError,
   });
-  return { account, actions, auth, changes, logError };
+  return { account, actions, auth, changes, logError, onAccountRestored };
 }
 
 describe('AccountUiActions', () => {
@@ -117,6 +120,34 @@ describe('AccountUiActions', () => {
     expect(fixtureValue.actions.state()).toMatchObject({
       screen: 'overview', discovery: 'unknown', notice: null,
     });
+  });
+
+  it('restores account custody before resuming the tree and closes on success', async () => {
+    const { account, actions, onAccountRestored } = fixture();
+    actions.show('restore');
+
+    await expect(actions.restore({ passphrase: 'account passphrase' }))
+      .resolves.toEqual({ memberId: 'remote-member' });
+
+    expect(account.restore).toHaveBeenCalledWith({ passphrase: 'account passphrase' });
+    expect(onAccountRestored).toHaveBeenCalledTimes(1);
+    expect(account.restore.mock.invocationCallOrder[0])
+      .toBeLessThan(onAccountRestored.mock.invocationCallOrder[0]);
+    expect(actions.state()).toMatchObject({ screen: null, busy: null, error: '', discovery: 'registered' });
+  });
+
+  it('keeps the restore form open with a safe error when credential verification fails', async () => {
+    const failure = { code: 'invalid_passphrase', message: 'sensitive detail' };
+    const { account, actions, logError, onAccountRestored } = fixture();
+    account.restore.mockRejectedValueOnce(failure);
+    actions.show('restore');
+
+    await expect(actions.restore({ passphrase: 'wrong' })).resolves.toBeNull();
+
+    expect(onAccountRestored).not.toHaveBeenCalled();
+    expect(logError).toHaveBeenCalledWith('restore', failure);
+    expect(actions.state()).toMatchObject({ screen: 'restore', busy: null, error: 'safe:invalid_passphrase' });
+    expect(JSON.stringify(actions.state())).not.toContain('sensitive detail');
   });
 
   it('validates routes and supports an independently mounted closed state', () => {

@@ -155,6 +155,7 @@ class App {
       account: this.account,
       auth: this.auth,
       onChange: () => this.render(),
+      onAccountRestored: () => this.openRestoredAccount(),
       errorText: (error) => errText(error),
       logError: (operation, error) => logError(`account-${operation}`, error),
     });
@@ -284,6 +285,19 @@ class App {
 
   doEnableSync() {
     return this.accountActions?.enableSync() ?? Promise.resolve(null);
+  }
+
+  doRestore(passphrase) {
+    return this.accountActions?.restore({ passphrase }) ?? Promise.resolve(null);
+  }
+
+  async openRestoredAccount() {
+    const opened = await this.openSelectedTree();
+    if (!opened) {
+      this.showGate('welcome');
+      return;
+    }
+    await this.enterApp({ docId: this.realDoc, createdBy: opened.didKey, lockable: true });
   }
 
   // Remote readiness changes affect only connectivity. The local unlocked account remains usable offline.

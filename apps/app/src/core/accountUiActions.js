@@ -7,6 +7,7 @@
 /** @typedef {import('./types/accountUi.js').AccountUiOperation} AccountUiOperation */
 /** @typedef {import('./types/accountUi.js').AccountUiScreen} AccountUiScreen */
 /** @typedef {import('./types/accountUi.js').AccountUiState} AccountUiState */
+/** @typedef {import('./types/appCoreApi.js').AccountCandidateCredential} AccountCandidateCredential */
 /** @typedef {import('./types/session.js').PasswordCredentials} PasswordCredentials */
 
 const SCREENS = new Set(['overview', 'signIn', 'signUp', 'confirmationRequired', 'restore', 'conflict']);
@@ -27,19 +28,23 @@ export class AccountUiActions {
   #errorText;
   /** @type {AccountUiActionsOptions['logError']} */
   #logError;
+  /** @type {NonNullable<AccountUiActionsOptions['onAccountRestored']>} */
+  #onAccountRestored;
   /** @type {AccountUiState} */
   #state = Object.freeze({ screen: null, busy: null, error: '', notice: null, discovery: 'unknown' });
 
   /** @param {AccountUiActionsOptions} options */
-  constructor({ account, auth, onChange = () => {}, errorText, logError }) {
-    if (!account || typeof account.probe !== 'function' || typeof account.enableSync !== 'function') {
+  constructor({ account, auth, onChange = () => {}, onAccountRestored = async () => {}, errorText, logError }) {
+    if (!account || typeof account.probe !== 'function' || typeof account.enableSync !== 'function'
+      || typeof account.restore !== 'function') {
       throw new TypeError('AccountUiActions needs an account facade');
     }
     if (!auth || typeof auth.signUp !== 'function' || typeof auth.signIn !== 'function'
       || typeof auth.signOut !== 'function') {
       throw new TypeError('AccountUiActions needs an interactive auth controller');
     }
-    if (typeof onChange !== 'function' || typeof errorText !== 'function' || typeof logError !== 'function') {
+    if (typeof onChange !== 'function' || typeof onAccountRestored !== 'function'
+      || typeof errorText !== 'function' || typeof logError !== 'function') {
       throw new TypeError('AccountUiActions needs UI error adapters');
     }
     this.#account = account;
@@ -47,6 +52,7 @@ export class AccountUiActions {
     this.#onChange = onChange;
     this.#errorText = errorText;
     this.#logError = logError;
+    this.#onAccountRestored = onAccountRestored;
   }
 
   /** @returns {Readonly<AccountUiState>} */
@@ -102,6 +108,20 @@ export class AccountUiActions {
       this.#update({
         screen: result.conflict === null ? 'overview' : 'conflict',
         notice: null,
+      });
+      return result;
+    });
+  }
+
+  /** @param {AccountCandidateCredential} credential */
+  restore(credential) {
+    return this.#run('restore', async () => {
+      const result = await this.#account.restore(credential);
+      await this.#onAccountRestored();
+      this.#update({
+        screen: null,
+        notice: null,
+        discovery: 'registered',
       });
       return result;
     });

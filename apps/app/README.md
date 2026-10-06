@@ -206,7 +206,8 @@ src/core/              orchestration — no UI, no rendering.
                            rotating refresh custody across browser tabs. Sign-up reports confirmation-required without
                            creating local session custody when Supabase email confirmation is enabled.
   accountUiActions.js      coordinates presentational account actions, busy/error state, and post-auth remote probing;
-                           it renders no DOM and keeps provider registration distinct from durable identity binding.
+                           it renders no DOM, keeps provider registration distinct from durable identity binding,
+                           and resumes tree opening only after verified account restore completes.
   lockPolicy.js            decides WHEN to auto-lock; platform-agnostic (calls back into the app).
   watermarks.js            anti-rollback: refuses a keyring/snapshot older than one already seen.
   blobs.js                 content-addressed file storage, alongside the document not inside it.
