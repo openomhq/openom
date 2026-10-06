@@ -362,6 +362,34 @@
     }
   },
   "workflows": {
+    "preview.deploy": {
+      "environment": "preview",
+      "file": ".github/workflows/preview.deploy.yml",
+      "secrets": ["CLOUDFLARE_PAGES_TOKEN"],
+      "variables": [
+        "AWS_CLOUDFRONT_KVS_ARN",
+        "AWS_DEPLOY_ROLE_ARN",
+        "AWS_REGION",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_PAGES_PROJECT"
+      ],
+      "jobs": {
+        "authorize": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
+        "build": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
+        "deploy": {
+          "environment": true,
+          "oidc": true,
+          "secrets": ["CLOUDFLARE_PAGES_TOKEN"],
+          "variables": [
+            "AWS_CLOUDFRONT_KVS_ARN",
+            "AWS_DEPLOY_ROLE_ARN",
+            "AWS_REGION",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_PAGES_PROJECT"
+          ]
+        }
+      }
+    },
     "staging.server": {
       "environment": "staging",
       "file": ".github/workflows/staging.server.yml",

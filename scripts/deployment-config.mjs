@@ -100,7 +100,7 @@ export function assertJobPrivileges(workflowName, workflow, source, jobSources) 
 
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
     const jobSource = jobSources[jobName];
-    const hasEnvironment = /^    environment:\s*\S+\s*$/m.test(jobSource);
+    const hasEnvironment = /^    environment:(?:\s*\S+)?\s*$/m.test(jobSource);
     const hasOidc = /^      id-token:\s*write\s*$/m.test(jobSource);
     if (hasEnvironment !== job.environment || hasOidc !== job.oidc) {
       throw new DeploymentConfigError(

@@ -1,0 +1,242 @@
+name: preview.deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request number to deploy
+        required: true
+        type: string
+
+concurrency:
+  group: preview-${{ inputs.pull_request }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      api_url: ${{ steps.request.outputs.api_url }}
+      app_url: ${{ steps.request.outputs.app_url }}
+      commit_sha: ${{ steps.request.outputs.commit_sha }}
+      pull_request_number: ${{ steps.request.outputs.pull_request_number }}
+      slug: ${{ steps.request.outputs.slug }}
+      source_branch: ${{ steps.request.outputs.source_branch }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - id: request
+        name: Authorize and pin the preview request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: node scripts/preview-request.mjs --pull-request "${{ inputs.pull_request }}"
+
+  build:
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      artifact_digest: ${{ steps.artifact.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: ${{ needs.authorize.outputs.commit_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+
+      - name: Build the app-core WASM
+        run: node scripts/build-app-core.mjs
+
+      - name: Assemble the unprivileged web artifact
+        run: |
+          set -euo pipefail
+          mkdir -p _site _artifact
+          cp -r apps/app/. _site/
+          cp -r assets _site/assets
+          unsafe_entry="$(find _site -mindepth 1 ! -type f ! -type d -print -quit)"
+          if [[ -n "$unsafe_entry" ]]; then
+            echo 'Preview artifact contains a non-regular filesystem entry' >&2
+            exit 1
+          fi
+          tar -czf _artifact/site.tar.gz -C _site .
+          (cd _artifact && sha256sum site.tar.gz > SHA256SUMS)
+
+      - id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preview-web-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
+          path: _artifact/
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: [authorize, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: preview
+      deployment: false
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: preview-web-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
+          path: _artifact
+
+      - name: Verify preview deployment configuration
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+        run: node scripts/deployment-config.mjs --validate-job preview.deploy.deploy
+
+      - name: Verify and assemble the static site
+        env:
+          APP_URL: ${{ needs.authorize.outputs.app_url }}
+        run: |
+          set -euo pipefail
+          (cd _artifact && sha256sum -c SHA256SUMS)
+          mkdir _site
+          tar -xzf _artifact/site.tar.gz -C _site
+          unsafe_entry="$(find _site -mindepth 1 ! -type f ! -type d -print -quit)"
+          if [[ -n "$unsafe_entry" ]]; then
+            echo 'Preview artifact contains a non-regular filesystem entry' >&2
+            exit 1
+          fi
+          SITE_URL="$APP_URL" OPENOM_LANDING=live OPENOM_AUTH_PROVIDER=dev \
+            node apps/scripts/site-url.mjs _site
+          cat > _site/_headers <<'EOF'
+          /*
+            Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+            X-Content-Type-Options: nosniff
+            Referrer-Policy: no-referrer
+          /assets/*
+            Cache-Control: public, max-age=31536000, immutable
+          EOF
+
+      - name: Deploy the immutable Pages artifact
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          PREVIEW_SHA: ${{ needs.authorize.outputs.commit_sha }}
+          PREVIEW_SLUG: ${{ needs.authorize.outputs.slug }}
+        run: npm exec --yes --ignore-scripts --package=wrangler@4.147.0 -- wrangler pages deploy _site --project-name "$PAGES_PROJECT" --branch "$PREVIEW_SLUG" --commit-hash "$PREVIEW_SHA"
+
+      - name: Wait for the Pages branch origin
+        env:
+          PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          PREVIEW_SLUG: ${{ needs.authorize.outputs.slug }}
+        run: |
+          set -euo pipefail
+          origin="https://${PREVIEW_SLUG}.${PAGES_PROJECT}.pages.dev/"
+          deadline=$((SECONDS + 90))
+          while (( SECONDS < deadline )); do
+            if curl --fail --silent --show-error --max-time 5 "$origin" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Pages branch origin did not become ready" >&2
+          exit 1
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Publish the web route
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+        run: >-
+          node scripts/preview-route.mjs put
+          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --commit "${{ needs.authorize.outputs.commit_sha }}"
+          --rollback-file _artifact/route-rollback.json
+
+      - id: health
+        name: Accept the public preview URL
+        continue-on-error: true
+        env:
+          APP_URL: ${{ needs.authorize.outputs.app_url }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 90))
+          while (( SECONDS < deadline )); do
+            if curl --fail --silent --show-error --max-time 5 "$APP_URL" | grep -q '<title>openom'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Public preview URL did not become ready" >&2
+          exit 1
+
+      - name: Restore the previous route after failed acceptance
+        if: steps.health.outcome == 'failure'
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+        run: >-
+          node scripts/preview-route.mjs rollback
+          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --rollback-file _artifact/route-rollback.json
+
+      - name: Fail a rejected preview
+        if: always() && steps.health.outcome == 'failure'
+        run: exit 1
+
+      - name: Publish the native GitHub deployment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          node scripts/preview-deployment.mjs
+          --app-url "${{ needs.authorize.outputs.app_url }}"
+          --commit "${{ needs.authorize.outputs.commit_sha }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --slug "${{ needs.authorize.outputs.slug }}"
+
+      - name: Write preview summary
+        env:
+          API_URL: ${{ needs.authorize.outputs.api_url }}
+          APP_URL: ${{ needs.authorize.outputs.app_url }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          PREVIEW_SHA: ${{ needs.authorize.outputs.commit_sha }}
+        run: |
+          {
+            echo '## Web preview'
+            echo
+            echo "- App: $APP_URL"
+            echo "- API: $API_URL (not provisioned)"
+            echo "- Commit: \`$PREVIEW_SHA\`"
+            echo "- Artifact: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"

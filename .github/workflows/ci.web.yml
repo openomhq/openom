@@ -49,6 +49,17 @@ jobs:
           node --test scripts/deployment-config.test.mjs
           node scripts/deployment-config.mjs --check
 
+      - name: Preview workflow security and lifecycle contracts
+        run: |
+          node --test \
+            scripts/preview-deployment.test.mjs \
+            scripts/preview-name.test.mjs \
+            scripts/preview-request.test.mjs \
+            scripts/preview-route-reconcile.test.mjs \
+            scripts/preview-router.test.mjs \
+            scripts/preview-sink.test.mjs \
+            scripts/preview-workflow-policy.test.mjs
+
       # Kein `.stack` darf je in die UI gerendert werden (nur Dev-Konsole).
       - name: Error hygiene
         run: node scripts/check-error-hygiene.mjs

@@ -18,6 +18,11 @@ object-store prefixes; preview workflows own those ephemeral resources.
 The root is applied administratively. Pull-request code must never run OpenTofu here or receive its
 Cloudflare and standing-infrastructure credentials.
 
+The GitHub `preview` environment is the credential boundary. It accepts only `main`, and lifecycle jobs use
+`environment.deployment: false` so accessing its variables, secrets, and AWS OIDC identity does not create a
+misleading deployment for `main`. Successful previews are instead recorded against the exact pull-request SHA
+in the separate, non-secret `preview-deployments` record environment.
+
 The shared distribution serves only HTTP/2, keeps caching disabled, and points both unproxied wildcard DNS
 records at the same edge. Unknown routes terminate at the edge. The declared origin is a protected Lambda
 that always returns 404; its only purpose is to supply the OAC configuration inherited by dynamically selected
@@ -77,3 +82,16 @@ Run the exact router-source tests from the repository root:
 node --test scripts/preview-router.test.mjs
 node --test scripts/preview-sink.test.mjs
 ```
+
+## Web-preview lifecycle
+
+Web previews are deliberately not automatic. A maintainer adds the `preview` label when a same-repository pull
+request is ready, then manually runs `preview.deploy` from `main` with the pull-request number. The workflow
+rechecks that the actor has `maintain` or `admin` permission, resolves the current head SHA, and builds that SHA
+without credentials. Only trusted automation checked out from `main` can deploy the artifact and update the
+route store.
+
+Later commits do not alter the deployed preview. A maintainer explicitly dispatches the workflow again to pin
+and deploy the new head. The successful run exposes the app URL through a native GitHub deployment and reports
+both friendly URLs in its job summary; the API URL remains a deterministic 404 until full-stack provisioning is
+implemented.
