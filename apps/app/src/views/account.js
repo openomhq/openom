@@ -79,18 +79,23 @@ const linkGhost = (label, onClick, disabled) => h('button', { class: 'lock-ghost
 // Title-bar status chip
 // ---------------------------------------------------------------------------
 
-// Precedence is explicit (contract): conflict > expired > pending > DevAuth > signedOut > backedUp > bound > else.
-// "Synced" ONLY when binding==='backedUp' AND no pending AND no conflict.
+// Precedence is explicit (contract): conflict/security > expired > pending > tree-sync failure >
+// DevAuth > signedOut > active tree sync > backed-up account > bound > else.
 /** @param {AccountViewHost} app */
 function chipState(app) {
   const s = app.account.state();
   const caps = app.auth.capabilities();
-  if (s.conflict) return { key: 'account-chip-attention', tone: 'warn' };
+  const treeSync = app.syncStatus?.state ?? null;
+  if (s.conflict || treeSync === 'security') return { key: 'account-chip-attention', tone: 'warn' };
   if (s.auth === 'expired') return { key: 'account-chip-expired', tone: 'warn' };
   if (s.pending.size > 0) return { key: 'account-chip-syncing', tone: 'busy' };
+  if (treeSync === 'offline' || treeSync === 'error' || treeSync === 'auth-error') {
+    return { key: 'account-chip-sync-error', tone: 'warn' };
+  }
   if (!caps.canLogin) return { key: 'account-chip-local', tone: 'muted' };
   if (s.auth === 'signedOut') return { key: 'account-chip-signin', tone: 'accent' };
-  if (s.binding === 'backedUp') return { key: 'account-chip-synced', tone: 'ok' };
+  if (s.binding === 'backedUp' && treeSync === 'synced') return { key: 'account-chip-synced', tone: 'ok' };
+  if (s.binding === 'backedUp') return { key: 'account-chip-sync-on', tone: 'ok' };
   if (s.binding === 'bound') return { key: 'account-chip-backup-needed', tone: 'warn' };
   return { key: 'account-chip-sync-off', tone: 'muted' };
 }
@@ -241,6 +246,10 @@ function overviewScreen(app, ui) {
   const extras = [];
   if (s.conflict) extras.push(noteRow(t('account-conflict-title'), 'warn'));
   if (s.storagePersistence === 'denied') extras.push(noteRow(t('account-storage-denied'), 'warn'));
+  if (app.syncStatus?.state === 'offline' || app.syncStatus?.state === 'error'
+    || app.syncStatus?.state === 'auth-error' || app.syncStatus?.state === 'security') {
+    extras.push(noteRow(t('account-tree-sync-error'), 'warn'));
+  }
 
   return h('div', { class: 'stack', style: { gap: '16px' } },
     h('div', { class: 'stack', style: { gap: '10px' } }, ...rows),

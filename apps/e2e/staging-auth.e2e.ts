@@ -73,7 +73,7 @@ async function composeAccount(page: Page) {
       createAuth: (account) => createAuthProvider(account),
       createRemote: (auth) => new RemoteStore({ baseUrl: serverUrl, auth }),
     });
-    window.stagingAuthAcceptance = { ...composition, remote, worker };
+    window.stagingAuthAcceptance = { ...composition, worker };
   });
 }
 
@@ -119,7 +119,7 @@ async function accountRoundTrip(page: Page, allowCreate: boolean): Promise<Deplo
 async function writeTreeMarker(page: Page, memberId: string): Promise<DeployedTreeMarker> {
   return page.evaluate(async ({ durableMemberId }) => {
     const composition = window.stagingAuthAcceptance;
-    const [{ TreeLibrary }, { treeIdToUuid }, { remoteTransport }, Comlink] = await Promise.all([
+    const [{ TreeLibrary }, { treeIdToUuid, uuidToTreeId }, { remoteTransport }, Comlink] = await Promise.all([
       import('/src/core/library.js'),
       import('/src/core/keyringPublish.js'),
       import('/src/core/appCoreClient.js'),
@@ -130,20 +130,24 @@ async function writeTreeMarker(page: Page, memberId: string): Promise<DeployedTr
       new TextEncoder().encode(`openom deployed acceptance tree v1\0${durableMemberId}`),
     );
     const treeId = new Uint8Array(digest).slice(0, 16);
-    const identity = { bytes: treeId, uuid: treeIdToUuid(treeId) };
-    await composition.worker.attachTransport(identity.uuid, Comlink.proxy(remoteTransport(composition.remote)));
     const ownedTrees = await composition.remote.listOwnedTrees();
+    if (ownedTrees.length > 1) {
+      throw new Error('the deployed fixture account has multiple owner trees');
+    }
+    const ownedTree = ownedTrees[0];
+    const identity = ownedTree
+      ? { bytes: uuidToTreeId(ownedTree.id), uuid: ownedTree.id }
+      : { bytes: treeId, uuid: treeIdToUuid(treeId) };
+    await composition.worker.attachTransport(identity.uuid, Comlink.proxy(remoteTransport(composition.remote)));
     let didKey: string;
-    if (ownedTrees.length === 0) {
+    if (!ownedTree) {
       ({ didKey } = await composition.worker.provisionTree({
         treeId: identity.bytes,
         docId: identity.uuid,
         engine: 'chain',
       }));
     } else {
-      if (ownedTrees.length !== 1 || ownedTrees[0]?.id !== identity.uuid || ownedTrees[0]?.engine !== 'chain') {
-        throw new Error('the deployed fixture account has an unexpected owner-tree selection');
-      }
+      if (ownedTree.engine !== 'chain') throw new Error('the deployed fixture tree is not a chain tree');
       ({ didKey } = await composition.worker.restoreTree({
         treeId: identity.bytes,
         docId: identity.uuid,
@@ -152,7 +156,8 @@ async function writeTreeMarker(page: Page, memberId: string): Promise<DeployedTr
     }
     const tree = await new TreeLibrary(composition.worker).open(identity.uuid, didKey);
     const marker = `deployed-sync-${Date.now()}-${crypto.randomUUID()}`;
-    await tree.createPerson({ given: marker, surname: 'acceptance' });
+    const person = await tree.createPerson({ given: marker, surname: 'acceptance-created' });
+    await tree.updatePerson(person.id, { surname: 'acceptance-renamed' });
     const synced = await composition.worker.syncNow(identity.uuid);
     if (synced?.state !== 'ok') throw new Error(`tree write did not sync: ${JSON.stringify(synced)}`);
     return { docId: identity.uuid, marker };
@@ -224,7 +229,7 @@ test('deployed app persists account custody and tree writes into a fresh context
     expect(restored.memberId).toBe(source.memberId);
     expect(restored.authSubject).toBe(source.authSubject);
     expect(restored.state).toEqual({ auth: 'signedIn', account: 'unlocked', binding: 'backedUp', pending: [] });
-    expect(await readTreeMarker(second.page, treeMarker)).toContain(`${treeMarker.marker} acceptance`);
+    expect(await readTreeMarker(second.page, treeMarker)).toContain(`${treeMarker.marker} acceptance-renamed`);
     expect(first.errors).toEqual([]);
     expect(second.errors).toEqual([]);
   } finally {

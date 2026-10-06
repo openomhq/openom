@@ -329,6 +329,10 @@ function accountRows(app) {
     const syncKey = s.binding === 'backedUp' ? 'account-sync-backedup' : s.binding === 'bound' ? 'account-sync-bound' : 'account-sync-off';
     rows.push(h('div', { class: 'muted', style: { fontSize: 'var(--t-small)' } }, t(syncKey)));
   }
+  if (app.syncStatus?.state === 'offline' || app.syncStatus?.state === 'error'
+    || app.syncStatus?.state === 'auth-error' || app.syncStatus?.state === 'security') {
+    rows.push(h('div', { class: 'account-note account-note-warn' }, t('account-tree-sync-error')));
+  }
   return rows;
 }
 
