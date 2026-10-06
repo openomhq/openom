@@ -3,12 +3,14 @@ name: ci.server
 # The server contract suite (openom/tests/api.rs + the storage checksum test) against a LIVE Postgres + MinIO.
 # These are the `#[ignore]`d integration tests the compile/unit jobs never run, so without this gate a
 # client<->server contract regression (the BlobStore-over-HTTP conformance, keyring/access/media/proposals/GC
-# semantics) is only caught by running `node scripts/itest.mjs` locally. This runs them on every push/PR.
+# semantics) is only caught by running `node scripts/itest.mjs` locally. It runs for each PR update and again
+# for the merge queue's final integrated candidate, but not redundantly after that candidate lands on main.
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
   workflow_dispatch:
 
 jobs:

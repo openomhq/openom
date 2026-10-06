@@ -4,9 +4,11 @@ name: ci.web
 # jede Datei laedt und die Uebersetzungen vollstaendig sind.
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   # The buildless runtime still has a strict author-time type gate. Build the gitignored wasm-bindgen
@@ -52,6 +54,8 @@ jobs:
       - name: Preview workflow security and lifecycle contracts
         run: |
           node --test \
+            scripts/ci-scope.test.mjs \
+            scripts/ci-workflow-policy.test.mjs \
             scripts/preview-deployment.test.mjs \
             scripts/preview-name.test.mjs \
             scripts/preview-request.test.mjs \

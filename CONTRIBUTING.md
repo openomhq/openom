@@ -95,6 +95,11 @@ Use a draft pull request while the design or implementation is incomplete. Move 
 ready for review and to `Test` while its automated and manual acceptance is being completed. Pull-request code
 must never be given deployment secrets merely to make a check pass.
 
+Every pull-request update receives the fast web, server, and relevant Linux Clippy checks. When the final
+candidate is ready, add it to the `main` merge queue; the queue runs the full Windows, macOS, and Linux desktop
+matrix against the candidate combined with current `main`. That matrix is not repeated after merge. A later
+commit invalidates the candidate and requires fresh queue acceptance.
+
 ## Request a preview
 
 Hosted previews are explicit review tools, not an automatic consequence of opening or updating a pull request.
@@ -113,10 +118,10 @@ Preview cleanup is currently tracked by OPE-638.
 
 ## Merge and finish
 
-Merge only after required CI is green, review findings are resolved, and task-specific acceptance passes. For
-changes requiring staging verification, move the task to `Staging` after merge and complete that verification
-before resolution. Otherwise resolve the task when the merged behavior is accepted. Move completed work to
-`Done`, set its State to `Fixed`, and delete the merged branch.
+Merge only through the `main` merge queue after required CI is green, review findings are resolved, and
+task-specific acceptance passes. For changes requiring staging verification, move the task to `Staging` after
+merge and complete that verification before resolution. Otherwise resolve the task when the merged behavior is
+accepted. Move completed work to `Done`, set its State to `Fixed`, and delete the merged branch.
 
 If a pull request is abandoned, close it, remove any preview approval, and update the task instead of leaving
 its status ambiguous.
