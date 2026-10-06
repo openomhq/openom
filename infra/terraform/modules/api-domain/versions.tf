@@ -6,7 +6,7 @@ terraform {
     # CloudFront viewer certs can only be issued there. CloudFront itself is global.
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 5.0, < 7.0"
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"

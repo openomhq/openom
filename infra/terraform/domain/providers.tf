@@ -24,5 +24,12 @@ provider "aws" {
   }
 }
 
+# The remote-state bucket lives with the app in eu-central-1. This provider intentionally has no
+# default tags: importing the existing bucket must not add unrelated changes to the state store.
+provider "aws" {
+  alias  = "state_region"
+  region = var.state_bucket_region
+}
+
 # DNS for openom.org. Reads the token from CLOUDFLARE_API_TOKEN in the environment (never committed).
 provider "cloudflare" {}

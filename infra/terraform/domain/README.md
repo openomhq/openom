@@ -1,8 +1,9 @@
-# API custom domain
+# Administrative AWS and domain controls
 
 Puts `api.<stack>.openom.org` in front of the Lambda **Function URL** via CloudFront + a DNS-validated
-ACM cert, with Cloudflare DNS. The resources live in the reusable `../modules/api-domain` module; this
-root is a thin per-env caller (read the Function URL, call the module once, wire providers + backend).
+ACM cert, with Cloudflare DNS. For staging, this root also owns the existing shared OpenTofu state
+bucket's protective configuration. The domain resources live in the reusable `../modules/api-domain`
+module; this root wires those resources and the account-level administrative controls together.
 
 ## Why this is a separate OpenTofu root
 
@@ -13,27 +14,62 @@ rights and there is no `CLOUDFLARE_API_TOKEN` in CI. This root is therefore **ad
 CI can't read or corrupt it), and reads the app Lambda's Function URL with a direct
 `aws_lambda_function_url` data lookup.
 
+The shared state bucket also belongs here because this root is admin-applied and outside the CI role's
+state prefix. `manage_state_bucket` is true only for staging: exactly one persistent state may own the
+account-level bucket, even after production domain configuration is added. Keeping that ownership in an
+existing root avoids a fifth state object, a fifth passphrase, and a circular bootstrap root.
+
 Deploy the app stack first: if the `openom-<stack>-api` Lambda / `live` alias doesn't exist, the read
 fails with a clear "not found" and nothing is created.
 
 ## Apply (admin, local)
 
 ```sh
-# 1. Cloudflare token with DNS:Edit on the openom.org zone (never commit it).
-export CLOUDFLARE_API_TOKEN=...
-
-# 2. AWS admin creds for the workload account (CloudFront/ACM are global/us-east-1).
+# 1. AWS admin creds for the workload account (CloudFront/ACM are global/us-east-1).
 aws sso login --profile openom-admin
+export AWS_PROFILE=openom-admin
 
-# 3. Fill cloudflare_zone_id in env/staging.tfvars (the openom.org zone id — not a secret).
+# 2. Fill cloudflare_zone_id in env/staging.tfvars (the openom.org zone id — not a secret).
 
 cd infra/terraform/domain
-tofu init -backend-config=env/staging.s3.tfbackend
-tofu apply -var-file=env/staging.tfvars
+infisical run --env=prod --path=/admin --command \
+  "tofu init -backend-config=env/staging.s3.tfbackend && tofu apply -var-file=env/staging.tfvars"
 ```
 
 The apply creates the ACM validation records, waits for the cert to issue, brings up CloudFront, then
 points `api.staging.openom.org` at it (a DNS-only CNAME).
+
+## Remote-state bucket
+
+`state-storage.tf` manages `openom-tfstate-841547768414` in place. The staging domain state is its
+single owner and preserves these controls:
+
+- versioning enabled;
+- SSE-S3 (`AES256`) default encryption with SSE-C uploads blocked;
+- every S3 public-access block enabled;
+- bucket-owner-enforced object ownership;
+- deletion blocked by `prevent_destroy`; and
+- obsolete versions of state and lock objects expired after 30 days, with no expiration rule for
+  current object versions.
+
+The root is intentionally self-hosted: `domain/staging.tfstate` lives in the bucket it describes. This
+does not block normal recovery because the bucket already exists before backend initialization. If the
+current domain state object is damaged or deleted, restore a prior S3 object version first, then run
+`tofu init -reconfigure -backend-config=env/staging.s3.tfbackend` and a read-only `tofu plan`. Do not
+create a replacement bucket. If no state version is recoverable, initialize an empty domain state and
+import every existing domain and bucket resource before any apply; the state-bucket addresses are:
+
+```text
+aws_s3_bucket.state[0]
+aws_s3_bucket_versioning.state[0]
+aws_s3_bucket_server_side_encryption_configuration.state[0]
+aws_s3_bucket_public_access_block.state[0]
+aws_s3_bucket_ownership_controls.state[0]
+aws_s3_bucket_lifecycle_configuration.state[0]
+```
+
+Each uses the bucket name as its import ID. Review the resulting plan and require zero replacement or
+destruction before proceeding.
 
 ## After applying — verify
 
@@ -50,7 +86,8 @@ Resource logic is in `../modules/api-domain`, so new environments add only thin 
 
 - **production** (`api.openom.org`): add `env/production.tfvars` (api_domain, the same openom.org zone
   id) + `env/production.s3.tfbackend` (`key = "domain/production.tfstate"`). Same commands with
-  `production` in place of `staging`.
+  `production` in place of `staging`; leave `manage_state_bucket = false` so staging remains the only
+  owner of the shared bucket.
 - **preview** (`<pr>.api.dev.openom.org`): does **not** drop in cleanly here — per-PR domains would need
   a workflow holding CloudFront/Cloudflare rights (which this split exists to avoid), and a
   cert+distribution per PR is slow and quota-heavy. When preview lands, the likely shape is a single

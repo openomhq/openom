@@ -4,13 +4,15 @@ terraform {
 
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+      source = "hashicorp/aws"
+      # v6.22 added declarative support for preserving S3's SSE-C upload block.
+      version = "~> 6.22"
     }
     # DNS for the API custom domain (ACM validation record + the CNAME to CloudFront).
     cloudflare = {
-      source  = "cloudflare/cloudflare"
-      version = "~> 5.0"
+      source = "cloudflare/cloudflare"
+      # Upgrade deliberately: newer releases add computed DNS metadata that otherwise churns plans.
+      version = "5.25.0"
     }
   }
 }

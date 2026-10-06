@@ -18,3 +18,21 @@ variable "app_region" {
   type        = string
   default     = "eu-central-1"
 }
+
+variable "state_bucket_name" {
+  description = "Existing S3 bucket that stores every persistent OpenTofu root's remote state."
+  type        = string
+  default     = ""
+}
+
+variable "manage_state_bucket" {
+  description = "Whether this domain state is the single administrative owner of the shared state bucket."
+  type        = bool
+  default     = false
+}
+
+variable "state_bucket_region" {
+  description = "AWS region containing the shared OpenTofu state bucket."
+  type        = string
+  default     = "eu-central-1"
+}

@@ -21,7 +21,7 @@ infra/terraform/
 ├── modules/
 │   └── api-domain/          REUSABLE module: CloudFront + DNS-validated ACM cert + Cloudflare DNS
 │                            in front of a Lambda Function URL. Instantiated per (env, domain).
-├── domain/                  domain ROOT — a thin admin-applied caller of modules/api-domain.
+├── domain/                  admin ROOT — API domain plus the shared state bucket's controls.
 ├── web/                     web ROOT — the admin-applied Cloudflare Pages project and custom domain.
 └── preview/                 preview-platform ROOT — shared routing and deployment infrastructure.
 ```
@@ -41,6 +41,10 @@ having each apply plan to destroy the other's resources. Separate roots keep eac
 radius to its own state. The domain root reads only the server Lambda's Function URL — via a direct
 `aws_lambda_function_url` data lookup, **not** `terraform_remote_state`, so server-root secrets never get
 copied into the domain state.
+
+The existing shared state bucket is managed from the staging `domain/` state. This keeps its control
+plane outside CI without introducing a fifth persistent root or encryption passphrase. Other domain
+environments must leave `manage_state_bucket = false`.
 
 ## Design principles
 
@@ -132,8 +136,10 @@ Cloudflare DNS at it. Deploy the server stack first (the domain reads its Functi
 
 ## Prerequisites (AWS side, done once)
 
-1. An S3 **state bucket** (versioning + encryption + block-public-access). Put its name in both
-   `env/staging.s3.tfbackend` (`bucket`) and `env/staging.tfvars` (`tf_state_bucket`).
+1. An S3 **state bucket** for first bootstrap. It is subsequently managed in place by the staging
+   `domain/` root with versioning, encryption, SSE-C blocking, public-access blocking, ownership
+   controls, and noncurrent-version retention. Put its name in each root's backend config and the
+   server root's `tf_state_bucket` variable.
 2. The OpenTofu version pinned in `.opentofu-version` and the AWS CLI, with an Identity Center admin
    profile (`aws configure sso`).
 3. **GitHub `staging` environment protection** limiting it to `main` (see OIDC trust note above).
