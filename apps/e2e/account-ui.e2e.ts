@@ -4,6 +4,7 @@ interface AccountUiHarness {
   setPending(actions: string[]): void;
   setConflict(reason: string | null): void;
   show(screen: string): void;
+  restoredPassphrase(): string | null;
 }
 
 declare global {
@@ -55,6 +56,7 @@ test('account overlay routes forms and renders pending and conflict states safel
       notice: null,
       discovery: 'unknown',
     };
+    let restoredPassphrase: string | null = null;
     const render = () => {
       const node = accountOverlayView(app);
       root.replaceChildren(...(node ? [node] : []));
@@ -69,6 +71,7 @@ test('account overlay routes forms and renders pending and conflict states safel
       doSignIn: async () => null,
       doSignOut: async () => null,
       doEnableSync: async () => null,
+      doRestore: async (passphrase: string) => { restoredPassphrase = passphrase; return null; },
     };
     window.accountUiHarness = {
       setPending(actions) {
@@ -86,6 +89,7 @@ test('account overlay routes forms and renders pending and conflict states safel
         uiState.screen = screen;
         render();
       },
+      restoredPassphrase: () => restoredPassphrase,
     };
     render();
   });
@@ -95,6 +99,15 @@ test('account overlay routes forms and renders pending and conflict states safel
   await expect(page.locator('#account-email')).toBeFocused();
   await page.getByRole('button', { name: /new here/i }).click();
   await expect(page.getByRole('dialog', { name: 'Sign up' })).toBeVisible();
+
+  await page.evaluate(() => window.accountUiHarness.show('restore'));
+  await expect(page.getByRole('dialog', { name: 'Restore your synced account' })).toBeVisible();
+  const restorePassphrase = page.locator('#account-restore-passphrase');
+  await expect(restorePassphrase).toBeFocused();
+  await restorePassphrase.fill('restored account passphrase');
+  await page.getByRole('button', { name: 'Restore account' }).click();
+  await expect.poll(() => page.evaluate(() => window.accountUiHarness.restoredPassphrase()))
+    .toBe('restored account passphrase');
 
   await page.evaluate(() => window.accountUiHarness.setPending(['register', 'restore']));
   await expect(page.getByText('Finishing account registration…')).toBeVisible();

@@ -155,7 +155,7 @@ export function accountOverlayView(app) {
     case 'signIn': title = t('auth-signin-title'); body = signInScreen(app, ui); break;
     case 'signUp': title = t('auth-signup-title'); body = signUpScreen(app, ui); break;
     case 'confirmationRequired': title = t('auth-confirm-title'); body = confirmationScreen(app, busy); break;
-    case 'restore': title = t('account-restore-title'); body = placeholderScreen('account-restore-body', app, busy); break;
+    case 'restore': title = t('account-restore-title'); body = restoreScreen(app, ui); break;
     case 'conflict': title = t('account-conflict-title'); body = conflictScreen(app, busy); break;
     default: title = t('account-title'); body = overviewScreen(app, ui);
   }
@@ -306,14 +306,18 @@ function confirmationScreen(app, busy) {
       secondary(t('auth-confirm-back'), () => app.showAccountView('signIn'), { disabled: busy })));
 }
 
-// ---- Non-destructive placeholders: explain arrival and always offer back/close ----
+// ---- Restore an existing synced account ----
 
-/** @param {string} bodyKey @param {AccountViewHost} app @param {boolean} busy */
-function placeholderScreen(bodyKey, app, busy) {
+/** @param {AccountViewHost} app @param {Readonly<AccountUiState>} ui */
+function restoreScreen(app, ui) {
+  const passphrase = passField('account-restore-passphrase', t('gate-enter-pass'), 'current-password');
+  const busy = ui.busy === 'restore';
+  const submit = () => app.doRestore(passphrase.input.value);
   return h('div', { class: 'stack', style: { gap: '14px' } },
-    h('div', { class: 'muted', style: { textWrap: 'pretty' } }, t(bodyKey)),
-    h('div', { class: 'row', style: { gap: '10px' } },
-      secondary(t('account-action-back'), () => app.showAccountView('overview'), { disabled: busy })));
+    h('div', { class: 'muted', style: { textWrap: 'pretty' } }, t('account-restore-body')),
+    form(submit, passphrase.node, errorLine(ui),
+      primary(busy ? t('account-restore-busy') : t('account-restore-submit'), { disabled: ui.busy !== null })),
+    linkGhost(t('account-action-back'), () => app.showAccountView('overview'), ui.busy !== null));
 }
 
 /** @param {AccountViewHost} app @param {boolean} busy */

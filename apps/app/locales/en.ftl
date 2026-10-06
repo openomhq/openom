@@ -324,8 +324,10 @@ auth-confirm-title = Check your email
 auth-confirm-body = We sent a confirmation link. Confirm your email, then come back and sign in.
 auth-confirm-back = Back to sign in
 
-# Restore / conflict (placeholder screens — actions arrive in a later step; local data is untouched)
+# Restore / conflict
 account-restore-title = Restore your synced account
-account-restore-body = There's an existing synced account for this sign-in. Restoring it here isn't available yet — it's coming in a later step. Your local data is safe.
+account-restore-body = Enter the account passphrase that encrypts your synced data on this device.
+account-restore-submit = Restore account
+account-restore-busy = Restoring…
 account-conflict-title = Account needs attention
 account-conflict-body = This device and your synced account don't match. Resolving it here isn't available yet — nothing has been changed and your local data is untouched.
