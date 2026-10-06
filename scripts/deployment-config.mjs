@@ -49,6 +49,34 @@ export function workflowJobSources(source) {
   return jobs;
 }
 
+export function workflowValidationStepSources(source) {
+  const lines = source.split(/\r?\n/);
+  const steps = {};
+  let stepSource = '';
+
+  const collect = () => {
+    const match = stepSource.match(/--validate-job\s+([A-Za-z0-9_.-]+)/);
+    if (match) steps[match[1]] = stepSource;
+  };
+
+  for (const line of lines) {
+    if (/^      - /.test(line)) {
+      collect();
+      stepSource = `${line}\n`;
+    } else if (stepSource) {
+      stepSource += `${line}\n`;
+    }
+  }
+  collect();
+  return steps;
+}
+
+function validationEnvironmentReferences(source) {
+  return Object.fromEntries([...source.matchAll(
+    /^          ([A-Z][A-Z0-9_]*):\s*\$\{\{\s*(secrets|vars)\.([A-Z][A-Z0-9_]*)\s*\}\}\s*$/gm,
+  )].map((match) => [match[1], `${match[2]}.${match[3]}`]));
+}
+
 export function assertPinnedActions(workflowName, source) {
   const unpinned = [...source.matchAll(/^\s*-?\s*uses:\s*([^\s#]+).*$/gm)]
     .map((match) => match[1])
@@ -78,6 +106,33 @@ export function assertJobPrivileges(workflowName, workflow, source, jobSources) 
       throw new DeploymentConfigError(
         'workflow_job_privilege_drift',
         `${workflowName}.${jobName} privilege boundary drifted (environment=${hasEnvironment}, oidc=${hasOidc})`,
+      );
+    }
+  }
+}
+
+export function assertValidationStepConfiguration(workflowName, workflow, validationSources) {
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    const expected = [
+      ...job.secrets.map((name) => [name, `secrets.${name}`]),
+      ...job.variables.map((name) => [name, `vars.${name}`]),
+    ];
+    if (expected.length === 0) continue;
+
+    const workflowJobName = `${workflowName}.${jobName}`;
+    const source = validationSources[workflowJobName];
+    if (!source) {
+      throw new DeploymentConfigError(
+        'workflow_validation_step_missing',
+        `${workflowJobName} must validate its deployment configuration`,
+      );
+    }
+    const actual = validationEnvironmentReferences(source);
+    const invalid = expected.filter(([name, reference]) => actual[name] !== reference);
+    if (invalid.length > 0) {
+      throw new DeploymentConfigError(
+        'workflow_validation_step_configuration',
+        `${workflowJobName} validation step must expose: ${invalid.map(([name]) => name).join(', ')}`,
       );
     }
   }
@@ -146,6 +201,11 @@ export function checkDeploymentContract(contract, root = ROOT) {
     const jobSources = workflowJobSources(source);
     assertSameNames(workflowName, 'jobs', Object.keys(workflow.jobs), Object.keys(jobSources));
     assertJobPrivileges(workflowName, workflow, source, jobSources);
+    assertValidationStepConfiguration(
+      workflowName,
+      workflow,
+      workflowValidationStepSources(source),
+    );
     for (const [jobName, job] of Object.entries(workflow.jobs)) {
       assertSameNames(
         `${workflowName}.${jobName}`,

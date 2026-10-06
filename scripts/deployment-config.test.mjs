@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   assertPinnedActions,
   assertJobPrivileges,
+  assertValidationStepConfiguration,
   DeploymentConfigError,
   checkDeploymentContract,
   loadDeploymentContract,
@@ -13,6 +14,7 @@ import {
   validateWorkflowJobEnvironment,
   workflowJobSources,
   workflowReferences,
+  workflowValidationStepSources,
 } from './deployment-config.mjs';
 
 const validValues = {
@@ -64,6 +66,40 @@ test('extracts workflow jobs without merging their configuration', () => {
   assert.deepEqual(Object.keys(jobs), ['build', 'deploy']);
   assert.match(jobs.build, /vars\.BUILD/);
   assert.doesNotMatch(jobs.build, /secrets\.DEPLOY/);
+});
+
+test('requires validation steps to expose every job value under its contract name', () => {
+  const workflow = {
+    jobs: {
+      deploy: {
+        secrets: ['TOKEN'],
+        variables: ['ENDPOINT'],
+      },
+    },
+  };
+  const source = `jobs:
+  deploy:
+    steps:
+      - name: Verify deployment configuration
+        env:
+          ENDPOINT: \${{ vars.ENDPOINT }}
+        run: node scripts/deployment-config.mjs --validate-job example.deploy
+`;
+  const validationSources = workflowValidationStepSources(source);
+  assert.throws(
+    () => assertValidationStepConfiguration('example', workflow, validationSources),
+    (error) => error instanceof DeploymentConfigError
+      && error.code === 'workflow_validation_step_configuration'
+      && error.message.includes('TOKEN'),
+  );
+
+  validationSources['example.deploy'] = validationSources['example.deploy'].replace(
+    'env:\n',
+    'env:\n          TOKEN: ${{ secrets.TOKEN }}\n',
+  );
+  assert.doesNotThrow(() => {
+    assertValidationStepConfiguration('example', workflow, validationSources);
+  });
 });
 
 test('requires external actions to be pinned to immutable commits', () => {

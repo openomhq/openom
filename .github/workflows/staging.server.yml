@@ -85,6 +85,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TOFU_STATE_PASSPHRASE_SERVER: ${{ secrets.TOFU_STATE_PASSPHRASE_SERVER }}
           AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
           OPENOM_INTERNAL_GC_TOKEN: ${{ secrets.OPENOM_INTERNAL_GC_TOKEN }}
           AXIOM_DATASET: ${{ vars.AXIOM_DATASET }}
