@@ -4,9 +4,9 @@ Puts `api.<stack>.openom.org` in front of the Lambda **Function URL** via CloudF
 ACM cert, with Cloudflare DNS. The resources live in the reusable `../modules/api-domain` module; this
 root is a thin per-env caller (read the Function URL, call the module once, wire providers + backend).
 
-## Why this is a separate Terraform root
+## Why this is a separate OpenTofu root
 
-The app root (`infra/terraform/`) is applied by the **CI OIDC role on every deploy**, and that role is
+The server root (`infra/terraform/`) is applied by the **CI OIDC role on every deploy**, and that role is
 deliberately narrow (Lambda + logs + its own state). CloudFront, ACM, and Cloudflare are **not** in its
 rights and there is no `CLOUDFLARE_API_TOKEN` in CI. This root is therefore **admin-applied**, keeps its
 **own state object** (`domain/staging.tfstate` — outside the `staging/*` prefix the CI role can reach, so
@@ -28,8 +28,8 @@ aws sso login --profile openom-admin
 # 3. Fill cloudflare_zone_id in env/staging.tfvars (the openom.org zone id — not a secret).
 
 cd infra/terraform/domain
-terraform init  -backend-config=env/staging.s3.tfbackend
-terraform apply -var-file=env/staging.tfvars
+tofu init -backend-config=env/staging.s3.tfbackend
+tofu apply -var-file=env/staging.tfvars
 ```
 
 The apply creates the ACM validation records, waits for the cert to issue, brings up CloudFront, then
@@ -68,9 +68,9 @@ Resource logic is in `../modules/api-domain`, so new environments add only thin 
   must receive the request directly.
 - **Origin lock (OAC)**: this root also creates a CloudFront **Origin Access Control** on the origin
   and grants the CloudFront service principal (scoped to this distribution) invoke rights on the
-  Function URL. That's additive and harmless while the app root's Function URL is still `NONE`; it
-  becomes the *only* allowed caller once the app root flips `lambda_url_auth_type` to `AWS_IAM`. See
-  the app root's README "Origin-lock cutover". OAC claims `Authorization`, so clients send the JWT in
+  Function URL. That's additive and harmless while the server root's Function URL is still `NONE`; it
+  becomes the *only* allowed caller once the server root flips `lambda_url_auth_type` to `AWS_IAM`. See
+  the server root's README "Origin-lock cutover". OAC claims `Authorization`, so clients send the JWT in
   `Openom-Auth` and a body digest in `x-amz-content-sha256`.
 - **Staleness**: the domain reads the Function URL live at plan time, so a re-apply always tracks the
   current URL. If the Lambda function is ever destroyed + recreated, re-apply this root to repoint the

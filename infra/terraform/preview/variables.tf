@@ -63,7 +63,7 @@ variable "artifacts_bucket_name" {
 }
 
 variable "terraform_state_bucket" {
-  description = "Existing AWS S3 bucket that stores Terraform state."
+  description = "Existing AWS S3 bucket that stores OpenTofu state."
   type        = string
 }
 

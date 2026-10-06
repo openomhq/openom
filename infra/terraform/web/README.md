@@ -36,15 +36,15 @@ Committed in `env/staging.tfvars`: `cloudflare_account_id`, `cloudflare_zone_id`
 - `CLOUDFLARE_PAGES_TOKEN` — a Pages-Edit-only token managed in Infisical and synchronized to the
   GitHub `staging` environment for `staging.web`.
 - `CLOUDFLARE_API_TOKEN` — an unsynchronized local operator credential from `prod:/admin`. The
-  Terraform Cloudflare provider reads it when an administrator runs this root.
+  OpenTofu Cloudflare provider reads it when an administrator runs this root.
 
 ## Apply (admin, local)
 
 ```sh
 export CLOUDFLARE_API_TOKEN=…        # Pages + DNS edit
 cd infra/terraform/web
-terraform init  -backend-config=env/staging.s3.tfbackend
-terraform apply -var-file=env/staging.tfvars
+tofu init -backend-config=env/staging.s3.tfbackend
+tofu apply -var-file=env/staging.tfvars
 ```
 
 For content deployment, Infisical delivers `CLOUDFLARE_PAGES_TOKEN` and

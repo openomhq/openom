@@ -55,5 +55,5 @@ state is a rollback and can omit newer infrastructure changes, so always inspect
 apply. Encryption protects confidentiality; S3 versioning provides recovery and replay protection remains an
 operator responsibility.
 
-The executable proof is `scripts/tofu-state-encryption.test.mjs`. It uses disposable local state to verify
+The executable proof is `infra/terraform/tests/state-encryption.test.mjs`. It uses disposable local state to verify
 plaintext migration, enforced encryption, missing- and wrong-passphrase rejection, and passphrase rollover.

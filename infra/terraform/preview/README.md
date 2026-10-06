@@ -2,12 +2,12 @@
 
 ## What it is — and is not
 
-This Terraform root owns the shared infrastructure used by every pull-request preview: the edge router,
+This OpenTofu root owns the shared infrastructure used by every pull-request preview: the edge router,
 wildcard domains, Pages project, preview object-store bucket, artifact bucket, and tightly scoped deployment
 roles. It does not create per-preview Lambda functions, Neon branches, Pages deployments, KVS entries, or
 object-store prefixes; preview workflows own those ephemeral resources.
 
-The root is applied administratively. Pull-request code must never run Terraform here or receive its
+The root is applied administratively. Pull-request code must never run OpenTofu here or receive its
 Cloudflare and standing-infrastructure credentials.
 
 The shared distribution serves only HTTP/2, keeps caching disabled, and points both unproxied wildcard DNS
@@ -54,9 +54,9 @@ with the preview backend configuration:
 ```sh
 export AWS_PROFILE=openom-admin
 export CLOUDFLARE_API_TOKEN=...
-terraform -chdir=infra/terraform/preview init -backend-config=env/preview.s3.tfbackend
-terraform -chdir=infra/terraform/preview plan -var-file=env/preview.tfvars -out=.terraform/preview.tfplan
-terraform -chdir=infra/terraform/preview show -json .terraform/preview.tfplan | node scripts/preview-plan-check.mjs
+tofu -chdir=infra/terraform/preview init -backend-config=env/preview.s3.tfbackend
+tofu -chdir=infra/terraform/preview plan -var-file=env/preview.tfvars -out=.terraform/preview.tfplan
+tofu -chdir=infra/terraform/preview show -json .terraform/preview.tfplan | node scripts/preview-plan-check.mjs
 ```
 
 The token is deliberately vendor-prefixed. The per-preview application namespace is not: workflows set the

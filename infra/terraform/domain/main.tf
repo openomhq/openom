@@ -3,8 +3,8 @@ locals {
 }
 
 # Read the app Lambda's alias Function URL directly. NOT via terraform_remote_state — that copies the
-# app root's ENTIRE state (which holds plaintext DB/R2/token secrets) into this root's state. A direct
-# data lookup takes only the URL, and stays correct if the app root's backend layout ever changes.
+# server root's ENTIRE state (which holds DB/R2/token secrets) into this root's state. A direct data lookup
+# takes only the URL and stays correct if the server root's backend layout ever changes.
 #
 # This read fails with a clear "not found" if the Lambda/alias doesn't exist yet — deploy the app
 # stack before applying the domain.
@@ -30,7 +30,7 @@ module "api_domain" {
 
 # Lock the origin to CloudFront: allow ONLY the CloudFront service principal (this distribution) to
 # invoke the Function URL. Created in the Lambda's region (aws.app_region), scoped to the alias. This
-# is additive while the URL is still NONE — pair it with the app root flipping the URL to AWS_IAM.
+# is additive while the URL is still NONE — pair it with the server root flipping the URL to AWS_IAM.
 # Both actions per the Oct-2025 Function-URL dual-permission rule (as with the public grants).
 resource "aws_lambda_permission" "cloudfront_invoke_url" {
   provider      = aws.app_region

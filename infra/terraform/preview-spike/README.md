@@ -9,7 +9,7 @@ origin.
 
 It is not the permanent preview environment. It creates no DNS records, certificates, GitHub environments,
 Neon branches, R2 objects, Cloudflare Pages projects, or Supabase resources. The final preview infrastructure
-must not depend on this Terraform state.
+must not depend on this OpenTofu state.
 
 ## What the runner proves
 
@@ -46,7 +46,7 @@ The runner refuses any AWS account other than the configured openom account, ini
 local-state root, performs the live assertions, and destroys the stack in a `finally` block. CloudFront
 deployment and deletion each take several minutes.
 
-To inspect the Terraform plan without creating resources:
+To inspect the OpenTofu plan without creating resources:
 
 ```sh
 node scripts/preview-spike.mjs plan
@@ -58,7 +58,7 @@ If the process or machine stops before automatic cleanup completes, authenticate
 node scripts/preview-spike.mjs destroy
 ```
 
-Local Terraform state is intentionally gitignored. Do not delete it until `destroy` succeeds.
+Local OpenTofu state is intentionally gitignored. Do not delete it until `destroy` succeeds.
 
 ## Result
 

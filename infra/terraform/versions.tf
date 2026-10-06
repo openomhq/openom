@@ -1,6 +1,6 @@
 terraform {
-  # >= 1.10 for NATIVE S3 state locking (use_lockfile) — no DynamoDB lock table required.
-  required_version = ">= 1.10.0"
+  # OpenTofu 1.13 supplies native S3 locking and client-side state encryption.
+  required_version = "~> 1.13.0"
 
   required_providers {
     aws = {

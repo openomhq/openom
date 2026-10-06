@@ -5,14 +5,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TERRAFORM_ROOT = path.join(REPO, 'infra', 'terraform', 'preview-spike');
+const TOFU_ROOT = path.join(REPO, 'infra', 'terraform', 'preview-spike');
 const EXPECTED_ACCOUNT = '841547768414';
 const KVS_REGION = 'us-east-1';
 const WAIT_TIMEOUT_MS = 180_000;
 
 function command(commandName, args, { capture = false, allowFailure = false } = {}) {
   const result = spawnSync(commandName, args, {
-    cwd: TERRAFORM_ROOT,
+    cwd: TOFU_ROOT,
     encoding: 'utf8',
     stdio: capture ? 'pipe' : 'inherit',
   });
@@ -24,8 +24,8 @@ function command(commandName, args, { capture = false, allowFailure = false } = 
   return result;
 }
 
-function terraform(args, options) {
-  return command('terraform', args, options);
+function tofu(args, options) {
+  return command('tofu', args, options);
 }
 
 function aws(args, options) {
@@ -52,16 +52,16 @@ function assertAccount() {
 }
 
 function initAndValidate() {
-  terraform(['init', '-input=false']);
-  terraform(['fmt', '-check', '-recursive']);
-  terraform(['validate']);
+  tofu(['init', '-input=false']);
+  tofu(['fmt', '-check', '-recursive']);
+  tofu(['validate']);
 }
 
 function outputs() {
-  const all = parseJson(terraform(['output', '-json'], { capture: true }), 'Terraform output');
+  const all = parseJson(tofu(['output', '-json'], { capture: true }), 'OpenTofu output');
   const value = all.spike?.value;
   if (!value || typeof value.distribution_url !== 'string' || typeof value.kvs_arn !== 'string') {
-    throw new Error('Terraform did not return the expected spike output');
+    throw new Error('OpenTofu did not return the expected spike output');
   }
   return value;
 }
@@ -237,7 +237,7 @@ async function verify() {
 }
 
 function destroy() {
-  terraform(['destroy', '-auto-approve', '-input=false']);
+  tofu(['destroy', '-auto-approve', '-input=false']);
 }
 
 async function run() {
@@ -250,7 +250,7 @@ async function run() {
   initAndValidate();
 
   if (operation === 'plan') {
-    terraform(['plan', '-input=false']);
+    tofu(['plan', '-input=false']);
     return;
   }
   if (operation === 'destroy') {
@@ -261,7 +261,7 @@ async function run() {
   let applyStarted = false;
   try {
     applyStarted = true;
-    terraform(['apply', '-auto-approve', '-input=false']);
+    tofu(['apply', '-auto-approve', '-input=false']);
     await verify();
   } finally {
     if (applyStarted) {

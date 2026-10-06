@@ -1,5 +1,5 @@
 # The Cloudflare Pages project the web app is published to (CI uploads content to this name via
-# wrangler; Terraform owns the project + its custom domain). The staging login gate is a Pages Function
+# wrangler; OpenTofu owns the project + its custom domain). The staging login gate is a Pages Function
 # (apps/staging-gate) with a shared password set as a Pages secret via `wrangler pages secret put` —
 # not an Access wall, and not managed here.
 resource "cloudflare_pages_project" "app" {

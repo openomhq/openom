@@ -1,5 +1,5 @@
 # Backend settings for the shared preview-platform state.
-# Passed via `terraform init -backend-config=env/preview.s3.tfbackend`.
+# Passed via `tofu init -backend-config=env/preview.s3.tfbackend`.
 bucket = "openom-tfstate-841547768414"
 key    = "preview/terraform.tfstate"
 region = "eu-central-1"

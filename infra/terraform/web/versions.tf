@@ -1,6 +1,6 @@
 terraform {
-  # >= 1.10 for NATIVE S3 state locking (use_lockfile), matching the other roots.
-  required_version = ">= 1.10.0"
+  # Match the OpenTofu minor used by every persistent infrastructure root.
+  required_version = "~> 1.13.0"
 
   required_providers {
     # Cloudflare Pages (the web app host), its custom domain, and DNS.
