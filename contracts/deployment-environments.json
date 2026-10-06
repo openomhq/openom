@@ -55,7 +55,8 @@
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "STAGING_APP_GATE_PASSWORD",
-        "SUPABASE_TEST_PASSWORD"
+        "SUPABASE_TEST_PASSWORD",
+        "TOFU_STATE_PASSPHRASE_SERVER"
       ],
       "variables": [
         "AXIOM_DATASET",
@@ -264,6 +265,16 @@
       "smoke": "provider sign-in and deployed account acceptance",
       "materializes": ["GitHub runner environment"]
     },
+    "TOFU_STATE_PASSPHRASE_SERVER": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "OpenTofu",
+      "source": "random passphrase dedicated to the staging server state",
+      "infisical": "staging:/github",
+      "rotationUnit": "tofu-state-server",
+      "smoke": "staging server apply followed by a clean OpenTofu plan",
+      "materializes": ["OpenTofu state encryption"]
+    },
     "OPENOM_TEST_ACCOUNT_PASSPHRASE": {
       "required": true,
       "validator": "account-passphrase",
@@ -360,7 +371,8 @@
         "DATABASE_URL_MIGRATION",
         "OPENOM_INTERNAL_GC_TOKEN",
         "R2_ACCESS_KEY_ID",
-        "R2_SECRET_ACCESS_KEY"
+        "R2_SECRET_ACCESS_KEY",
+        "TOFU_STATE_PASSPHRASE_SERVER"
       ],
       "variables": [
         "AXIOM_DATASET",
@@ -384,7 +396,8 @@
             "DATABASE_URL_MIGRATION",
             "OPENOM_INTERNAL_GC_TOKEN",
             "R2_ACCESS_KEY_ID",
-            "R2_SECRET_ACCESS_KEY"
+            "R2_SECRET_ACCESS_KEY",
+            "TOFU_STATE_PASSPHRASE_SERVER"
           ],
           "variables": [
             "AXIOM_DATASET",

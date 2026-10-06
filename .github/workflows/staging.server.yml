@@ -117,10 +117,10 @@ jobs:
           DATABASE_URL_MIGRATION: ${{ secrets.DATABASE_URL_MIGRATION }}
         run: sqlx migrate run --source openom/migrations --database-url "$DATABASE_URL_MIGRATION"
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
-          terraform_version: 1.16.2
-          terraform_wrapper: false
+          tofu_version_file: .opentofu-version
+          tofu_wrapper: false
 
       - name: Apply staging infrastructure
         working-directory: infra/terraform
@@ -140,9 +140,10 @@ jobs:
           TF_VAR_jwt_issuer: ${{ vars.SUPABASE_JWT_ISS }}
           TF_VAR_jwt_audience: ${{ vars.SUPABASE_JWT_AUD }}
           TF_VAR_web_origins: ${{ vars.OPENOM_WEB_ORIGINS }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE_SERVER }}
         run: |
-          terraform init -backend-config=env/staging.s3.tfbackend
-          terraform apply -auto-approve -var-file=env/staging.tfvars
+          tofu init -backend-config=env/staging.s3.tfbackend
+          tofu apply -auto-approve -var-file=env/staging.tfvars
 
   acceptance:
     needs: deploy

@@ -134,7 +134,8 @@ Cloudflare DNS at it. Deploy the server stack first (the domain reads its Functi
 
 1. An S3 **state bucket** (versioning + encryption + block-public-access). Put its name in both
    `env/staging.s3.tfbackend` (`bucket`) and `env/staging.tfvars` (`tf_state_bucket`).
-2. OpenTofu 1.13 and the AWS CLI, with an Identity Center admin profile (`aws configure sso`).
+2. The OpenTofu version pinned in `.opentofu-version` and the AWS CLI, with an Identity Center admin
+   profile (`aws configure sso`).
 3. **GitHub `staging` environment protection** limiting it to `main` (see OIDC trust note above).
 
 ## Preview dynamic-origin spike
