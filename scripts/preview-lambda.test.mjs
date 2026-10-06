@@ -126,8 +126,10 @@ test('creates a protected aliased function and both CloudFront grants', () => {
 
 test('updates configuration before code and atomically promotes the live alias', () => {
   const operations = [];
+  const calls = [];
   const checkpoints = [];
   const execute = (binary, args) => {
+    calls.push(args);
     operations.push(operation(args));
     switch (operation(args)) {
       case 'lambda get-function': return result(0, {
@@ -177,6 +179,37 @@ test('updates configuration before code and atomically promotes the live alias',
   assert.ok(operations.indexOf('lambda update-alias') < operations.indexOf('checkpoint'));
   assert.ok(operations.indexOf('checkpoint') < operations.indexOf('lambda get-function-url-config'));
   assert.equal(operations.filter((value) => value === 'lambda add-permission').length, 0);
+  const configuration = calls.find((args) => operation(args) === 'lambda update-function-configuration');
+  const code = calls.find((args) => operation(args) === 'lambda update-function-code');
+  assert.equal(argument(configuration, '--architectures'), undefined);
+  assert.equal(argument(code, '--architectures'), 'arm64');
+});
+
+test('reports safe AWS CLI diagnostics when an update command is rejected locally', () => {
+  const execute = (binary, args) => {
+    switch (operation(args)) {
+      case 'lambda get-function': return result(0, {
+        Configuration: { FunctionArn: FUNCTION_ARN },
+        Tags: OWNER_TAGS,
+      });
+      case 'lambda get-alias': return result(0, { FunctionVersion: '7' });
+      case 'logs create-log-group': return result(254, {}, 'ResourceAlreadyExistsException');
+      case 'logs put-retention-policy': return result();
+      case 'lambda update-function-configuration': return result(
+        252,
+        {},
+        'Unknown options: arm64, --architectures',
+      );
+      default: throw new Error(`unexpected command: ${operation(args)}`);
+    }
+  };
+
+  assert.throws(
+    () => reconcilePreviewLambda({ ...CONFIG, execute }),
+    (error) => error instanceof PreviewLambdaError
+      && error.code === 'aws_command_failed'
+      && error.message === 'Lambda configuration update failed: Unknown options: arm64, --architectures',
+  );
 });
 
 test('rejects a same-named function with different ownership before any mutation', () => {

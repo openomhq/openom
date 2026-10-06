@@ -54,7 +54,14 @@ function parseJson(result, operation) {
     throw new PreviewLambdaError('aws_command_failed', `${operation} failed to start`);
   }
   if (result.status !== 0) {
-    throw new PreviewLambdaError('aws_command_failed', `${operation} failed`);
+    const stderr = (result.stderr || '').trim();
+    const safeDetail = /DATABASE_URL|S3_SECRET_KEY|R2_SECRET_ACCESS_KEY/.test(stderr)
+      ? ''
+      : stderr.replace(/\s+/g, ' ').slice(0, 1000);
+    throw new PreviewLambdaError(
+      'aws_command_failed',
+      `${operation} failed${safeDetail ? `: ${safeDetail}` : ''}`,
+    );
   }
   try {
     return result.stdout.trim() ? JSON.parse(result.stdout) : {};
@@ -169,7 +176,6 @@ function updateFunction(execute, config, existing) {
   assertFunctionOwner(existing, config);
   runAws(execute, 'lambda', 'update-function-configuration', [
     '--function-name', config.functionName,
-    '--architectures', 'arm64',
     '--runtime', 'provided.al2023',
     '--handler', 'bootstrap',
     '--role', config.executionRoleArn,
@@ -182,6 +188,7 @@ function updateFunction(execute, config, existing) {
     '--function-name', config.functionName,
     '--s3-bucket', config.artifactBucket,
     '--s3-key', config.artifactKey,
+    '--architectures', 'arm64',
     '--publish',
   ], 'Lambda code update');
   waitForUpdate(execute, config.functionName);
