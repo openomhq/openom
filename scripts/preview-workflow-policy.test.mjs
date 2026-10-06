@@ -68,6 +68,13 @@ test('deployment inventory records the canonical source branch', () => {
 });
 
 test('full acceptance drops AWS credentials before deployed pull-request code runs', () => {
+  const storageCheck = jobs['deploy-full'].indexOf('name: Verify preview object-store access');
+  const lambdaReconcile = jobs['deploy-full'].indexOf('name: Reconcile the protected Lambda');
+  assert.ok(storageCheck !== -1 && storageCheck < lambdaReconcile);
+  assert.match(jobs['deploy-full'], /key="previews\/\$\{PREVIEW_SLUG\}\/acceptance\/storage-\$\{GITHUB_RUN_ID\}\.txt"/);
+  assert.match(jobs['deploy-full'], /s3api put-object/);
+  assert.match(jobs['deploy-full'], /s3api get-object/);
+  assert.match(jobs['deploy-full'], /s3api delete-object/);
   assert.match(jobs['deploy-full'], /OPENOM_DEPLOYED_AUTH_ACCEPTANCE: '1'/);
   assert.match(jobs['deploy-full'], /AWS_ACCESS_KEY_ID: ''/);
   assert.match(jobs['deploy-full'], /AWS_SECRET_ACCESS_KEY: ''/);
