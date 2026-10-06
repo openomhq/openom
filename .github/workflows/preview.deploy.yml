@@ -445,6 +445,30 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      - name: Verify preview object-store access
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: 'true'
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          PREVIEW_SLUG: ${{ needs.authorize.outputs.slug }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          image='amazon/aws-cli:2.31.22@sha256:bf253be91e12d49ba1bd6dc939a76ea9777901772032692b14639e643118e1c1'
+          key="previews/${PREVIEW_SLUG}/acceptance/storage-${GITHUB_RUN_ID}.txt"
+          printf 'preview storage acceptance %s\n' "$(date -u +%FT%TZ)" > "$RUNNER_TEMP/preview-storage.txt"
+          cleanup() {
+            docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_EC2_METADATA_DISABLED -e AWS_REQUEST_CHECKSUM_CALCULATION -e AWS_RESPONSE_CHECKSUM_VALIDATION "$image" s3api delete-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_EC2_METADATA_DISABLED -e AWS_REQUEST_CHECKSUM_CALCULATION -e AWS_RESPONSE_CHECKSUM_VALIDATION -v "$RUNNER_TEMP:/work" "$image" s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" --body /work/preview-storage.txt >/dev/null
+          docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_EC2_METADATA_DISABLED -e AWS_REQUEST_CHECKSUM_CALCULATION -e AWS_RESPONSE_CHECKSUM_VALIDATION -v "$RUNNER_TEMP:/work" "$image" s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$key" /work/preview-storage-downloaded.txt >/dev/null
+          diff "$RUNNER_TEMP/preview-storage.txt" "$RUNNER_TEMP/preview-storage-downloaded.txt"
+
       - name: Upload the SHA-keyed Lambda artifact
         env:
           ARTIFACTS_BUCKET: ${{ vars.AWS_PREVIEW_ARTIFACTS_BUCKET }}
