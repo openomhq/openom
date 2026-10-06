@@ -61,6 +61,7 @@ test('authorizes a maintainer and pins the current same-repository pull request 
     apiUrl: 'https://feat-ope-513.api.dev.openom.org',
     appUrl: 'https://feat-ope-513.app.dev.openom.org',
     commitSha: SHA,
+    mode: 'web',
     pullRequestNumber: 42,
     slug: 'feat-ope-513',
     sourceBranch: 'feat/ope-513',
@@ -90,6 +91,26 @@ for (const [name, overrides, code] of [
   });
 }
 
+test('requires the dedicated full-preview approval for a full stack', async () => {
+  const full = await request({
+    fetchImplementation: githubFetch({ labels: ['full-preview'] }),
+    mode: 'full',
+  });
+  assert.equal(full.mode, 'full');
+
+  await assert.rejects(
+    request({ mode: 'full' }),
+    (error) => error instanceof PreviewRequestError && error.code === 'preview_approval_missing',
+  );
+});
+
+test('rejects an unknown preview mode before reading pull-request state', async () => {
+  await assert.rejects(
+    request({ mode: 'automatic' }),
+    (error) => error instanceof PreviewRequestError && error.code === 'invalid_preview_mode',
+  );
+});
+
 test('writes only validated values to GitHub outputs', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'openom-preview-request-'));
   const output = path.join(directory, 'output');
@@ -106,6 +127,7 @@ test('writes only validated values to GitHub outputs', async () => {
       'api_url=https://feat-ope-513.api.dev.openom.org',
       'app_url=https://feat-ope-513.app.dev.openom.org',
       `commit_sha=${SHA}`,
+      'mode=web',
       'pull_request_number=42',
       'slug=feat-ope-513',
       'source_branch=feat/ope-513',

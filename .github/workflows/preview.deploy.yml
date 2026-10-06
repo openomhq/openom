@@ -7,6 +7,14 @@ on:
         description: Pull request number to deploy
         required: true
         type: string
+      mode:
+        description: Preview resources to deploy
+        required: true
+        default: web
+        type: choice
+        options:
+          - web
+          - full
 
 concurrency:
   group: preview-${{ inputs.pull_request }}
@@ -26,6 +34,7 @@ jobs:
       api_url: ${{ steps.request.outputs.api_url }}
       app_url: ${{ steps.request.outputs.app_url }}
       commit_sha: ${{ steps.request.outputs.commit_sha }}
+      mode: ${{ steps.request.outputs.mode }}
       pull_request_number: ${{ steps.request.outputs.pull_request_number }}
       slug: ${{ steps.request.outputs.slug }}
       source_branch: ${{ steps.request.outputs.source_branch }}
@@ -39,7 +48,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
-        run: node scripts/preview-request.mjs --pull-request "${{ inputs.pull_request }}"
+        run: >-
+          node scripts/preview-request.mjs
+          --pull-request "${{ inputs.pull_request }}"
+          --mode "${{ inputs.mode }}"
 
   build:
     needs: authorize

@@ -11,6 +11,8 @@ test('preview deployment is manual and cannot run from pull request events', () 
   assert.match(source, /^  workflow_dispatch:\s*$/m);
   assert.doesNotMatch(source, /^  pull_request(?:_target)?:/m);
   assert.match(source, /^  group: preview-\$\{\{ inputs\.pull_request \}\}\s*$/m);
+  assert.match(source, /^      mode:\s*$/m);
+  assert.match(jobs.authorize, /--mode "\$\{\{ inputs\.mode \}\}"/);
 });
 
 test('authorization and deployment automation are pinned to main', () => {

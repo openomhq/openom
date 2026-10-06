@@ -24,8 +24,10 @@
         "AWS_REGION",
         "CLOUDFLARE_ACCOUNT_ID",
         "CLOUDFLARE_PAGES_PROJECT",
+        "NEON_DATABASE_NAME",
         "NEON_PREVIEW_BASE_BRANCH_ID",
         "NEON_PROJECT_ID",
+        "NEON_ROLE_NAME",
         "OPENOM_TEST_ACCOUNT_PASSPHRASE",
         "PREVIEW_MAX_FULL_STACKS",
         "R2_BUCKET",
@@ -223,11 +225,23 @@
       "provider": "Neon",
       "source": "dedicated preview project identifier"
     },
+    "NEON_DATABASE_NAME": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Neon",
+      "source": "database inherited by per-preview branches"
+    },
     "NEON_PREVIEW_BASE_BRANCH_ID": {
       "required": true,
       "validator": "nonempty",
       "provider": "Neon",
       "source": "schema-only preview-base branch identifier"
+    },
+    "NEON_ROLE_NAME": {
+      "required": true,
+      "validator": "nonempty",
+      "provider": "Neon",
+      "source": "database role inherited by per-preview branches"
     },
     "PREVIEW_MAX_FULL_STACKS": {
       "required": true,

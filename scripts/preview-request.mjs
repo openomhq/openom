@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 import { previewIdentity } from './preview-name.mjs';
 
+const PREVIEW_MODE_LABELS = Object.freeze({
+  full: 'full-preview',
+  web: 'preview',
+});
+
 export class PreviewRequestError extends Error {
   constructor(code, message) {
     super(message);
@@ -22,6 +27,11 @@ function pullRequestNumber(value) {
   const parsed = Number(value);
   if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
   throw new PreviewRequestError('invalid_pull_request', 'pull request number must be a positive integer');
+}
+
+function previewMode(value = 'web') {
+  if (Object.hasOwn(PREVIEW_MODE_LABELS, value)) return value;
+  throw new PreviewRequestError('invalid_preview_mode', 'preview mode must be web or full');
 }
 
 async function githubJson(fetchImplementation, apiUrl, token, route) {
@@ -82,7 +92,7 @@ export async function resolvePreviewRequest({
   pullRequest,
   ref,
   repository,
-  requiredLabel = 'preview',
+  mode = 'web',
   token,
 }) {
   if (ref !== 'refs/heads/main') {
@@ -103,6 +113,7 @@ export async function resolvePreviewRequest({
   );
   const bearer = requiredString(token, 'missing_github_token', 'GITHUB_TOKEN is required');
   const number = pullRequestNumber(pullRequest);
+  const requestedMode = previewMode(mode);
   const permission = await githubJson(
     fetchImplementation,
     apiUrl,
@@ -116,13 +127,18 @@ export async function resolvePreviewRequest({
     bearer,
     `/repos/${repositoryName}/pulls/${number}`,
   );
-  assertEligiblePullRequest(pullRequestRecord, repositoryName, requiredLabel);
+  assertEligiblePullRequest(
+    pullRequestRecord,
+    repositoryName,
+    PREVIEW_MODE_LABELS[requestedMode],
+  );
   const identity = previewIdentity(pullRequestRecord.head.ref, number);
   return {
     actor: actorName,
     apiUrl: identity.apiUrl,
     appUrl: identity.appUrl,
     commitSha: pullRequestRecord.head.sha,
+    mode: requestedMode,
     pullRequestNumber: number,
     slug: identity.slug,
     sourceBranch: pullRequestRecord.head.ref,
@@ -144,6 +160,7 @@ function writeOutputs(outputPath, request) {
     api_url: request.apiUrl,
     app_url: request.appUrl,
     commit_sha: request.commitSha,
+    mode: request.mode,
     pull_request_number: request.pullRequestNumber,
     slug: request.slug,
     source_branch: request.sourceBranch,
@@ -166,7 +183,7 @@ export async function runPreviewRequestCli(
     pullRequest: argumentValue(args, '--pull-request'),
     ref: environment.GITHUB_REF,
     repository: environment.GITHUB_REPOSITORY,
-    requiredLabel: argumentValue(args, '--label') ?? 'preview',
+    mode: argumentValue(args, '--mode') ?? 'web',
     token: environment.GITHUB_TOKEN,
   });
   const outputPath = requiredString(
