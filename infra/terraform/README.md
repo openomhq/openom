@@ -4,6 +4,9 @@ The server deployment as code: the API on AWS Lambda (behind a Function URL), th
 assumes to deploy it, the SHA-keyed artifact bucket, and the custom API domain (CloudFront + ACM +
 Cloudflare DNS).
 
+Use OpenTofu 1.13 or newer. The Terraform CLI is not a supported substitute because the state-encryption
+configuration is OpenTofu-specific. The existing `infra/terraform/` path remains to avoid needless path churn.
+
 > A deeper, step-by-step operator guide (first-time account bring-up, secrets, promotion, rollback,
 > incident runbooks) will live in a separate `DEPLOYMENT.md`. This file explains **how the code is
 > laid out and why**; that one will explain **how to run a deploy end to end**.

@@ -172,7 +172,7 @@ pub struct Config {
     /// Environment identity (`OPENOM_ENV`). Required when `runtime == Remote`; defaults to
     /// `Development` locally. Drives sandbox-vs-live payments, the telemetry env tag, noindex.
     pub env: OpenomEnv,
-    /// Free-form deployment/stack label (`OPENOM_STACK` = the Terraform `stack_name`), surfaced
+    /// Free-form deployment/stack label (`OPENOM_STACK` = the `OpenTofu` `stack_name`), surfaced
     /// as the OTEL `service.instance.id` so preview/branch traffic is separable from laptops.
     pub stack: Option<String>,
     /// Storage axis (independent of `runtime`; defaults from it, `STORAGE` overrides).

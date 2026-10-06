@@ -50,10 +50,25 @@ new alias or alternate between two aliases after the previous envelope is no lon
 ## Recovery
 
 If the current state object is damaged, select a known-good S3 version and the passphrase that encrypted that
-version. Restore or copy that version only after confirming the active root and backend key. An older encrypted
-state is a rollback and can omit newer infrastructure changes, so always inspect the resulting plan before an
-apply. Encryption protects confidentiality; S3 versioning provides recovery and replay protection remains an
-operator responsibility.
+version. Rehearse the candidate without replacing the live object:
+
+1. Create a clean checkout outside the repository and download the selected object version to a temporary file.
+   Never print or check in the file.
+2. Configure that checkout with a local backend and the encryption method that matches the selected version. A
+   pre-encryption version may use the unencrypted fallback only in this isolated recovery checkout.
+3. Run `tofu init`, then `tofu state list -state=<temporary-file>`. Compare resource addresses with current state;
+   do not render resource values merely to prove readability.
+4. Delete the checkout and downloaded state after the rehearsal.
+
+For an actual restore, freeze applies and confirm the active root, bucket, key, version ID, and matching
+passphrase before copying the selected version onto the active key. S3 creates a new current version, so the
+displaced state remains recoverable. Reinitialize the backend and inspect the full plan. An older state can omit
+newer resources; import those resources before applying rather than recreating or replacing them. If the restored
+version is plaintext, enable the migration fallback only long enough to run a refresh-only encryption apply, then
+remove it and restore enforced mode.
+
+Encryption protects confidentiality; S3 versioning provides recovery, while replay and rollback decisions remain
+an operator responsibility.
 
 The executable proof is `infra/terraform/tests/state-encryption.test.mjs`. It uses disposable local state to verify
 plaintext migration, enforced encryption, missing- and wrong-passphrase rejection, and passphrase rollover.
