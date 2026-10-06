@@ -72,6 +72,11 @@ refresh tokens, JWKS verification, and the openom server's unregistered-account 
 and the social previews — shared by the web app (served at `/assets`), the docs, and GitHub. The Tauri shell
 generates its own `apps/src-tauri/icons/` from `assets/icon.svg`.
 
+## Contributing
+
+Changes use an issue-first pull-request workflow with task-linked branches and commits. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, validation, preview, and tracker conventions.
+
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0 or later.
