@@ -1,5 +1,13 @@
 # Preview standing infrastructure
 
+## Deployment status
+
+The standing platform was first applied on 2026/10/06. Its encrypted OpenTofu state is stored under
+`preview/terraform.tfstate`, and the non-secret outputs consumed by lifecycle workflows are published as
+variables on the GitHub `preview` environment. A post-apply plan is clean. Both wildcard hosts return the
+router's deterministic, non-cacheable 404 for unknown slugs, while direct access to the protected sink
+Function URL is rejected with `403 Forbidden`.
+
 ## What it is — and is not
 
 This OpenTofu root owns the shared infrastructure used by every pull-request preview: the edge router,

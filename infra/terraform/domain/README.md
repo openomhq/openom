@@ -88,11 +88,10 @@ Resource logic is in `../modules/api-domain`, so new environments add only thin 
   id) + `env/production.s3.tfbackend` (`key = "domain/production.tfstate"`). Same commands with
   `production` in place of `staging`; leave `manage_state_bucket = false` so staging remains the only
   owner of the shared bucket.
-- **preview** (`<pr>.api.dev.openom.org`): does **not** drop in cleanly here — per-PR domains would need
-  a workflow holding CloudFront/Cloudflare rights (which this split exists to avoid), and a
-  cert+distribution per PR is slow and quota-heavy. When preview lands, the likely shape is a single
-  admin-minted `*.api.dev.openom.org` wildcard cert + one CloudFront distribution routing by `Host`
-  (a small module extension), or previews simply using the raw Function URL. Not built here.
+- **preview** (`<slug>.api.dev.openom.org`): intentionally does not reuse this root. The deployed
+  `../preview` root owns one admin-provisioned wildcard certificate and CloudFront distribution, then routes
+  branch-derived hosts through a KeyValueStore. Per-preview workflows cannot modify the standing edge and
+  never create a certificate or distribution per pull request.
 
 ## Notes
 
