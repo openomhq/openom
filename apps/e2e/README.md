@@ -1,7 +1,7 @@
 # apps/e2e
 > one-line: the Playwright browser e2e suite
 **Status:** built · test harness · (no design ref)
-**Last updated:** 2026-09-24
+**Last updated:** 2026-10-06
 
 ## Run
 One-time: `cd apps && pnpm install --ignore-scripts && pnpm exec playwright install chromium`
@@ -37,8 +37,8 @@ pnpm test:e2e
   OPFS-SAHPool VFS, run in a module Worker; asserts data survives a page reload, header-free
   (no COOP/COEP).
 - `smoke.e2e.ts` (`@integration`, `test:e2e:full` only) — boots the whole app: welcome/demo gate,
-  create → recovery code → onboarding → reload/unlock, change-passphrase, lock-now, and
-  forgot-passphrase recovery.
+  create → recovery code → onboarding → reload/unlock, direct tree creation for an already-unlocked account,
+  change-passphrase, lock-now, and forgot-passphrase recovery.
 - `account-roundtrip.e2e.ts` + `account-roundtrip-harness.html` (`@integration`, dedicated
   `test:e2e:account`) — uses the production account facade, worker, remote store, and tree projection
   against the Docker server. Two isolated browser contexts prove register → backup → fresh-device restore
