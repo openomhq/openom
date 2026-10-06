@@ -66,7 +66,7 @@ resource "aws_iam_role" "ci_deploy" {
 }
 
 # --- CI deploy role: permissions ---
-# SKELETON scope only — what CI needs to `terraform plan/apply` the resources THIS config manages:
+# SKELETON scope only — what CI needs to `tofu plan/apply` the resources THIS config manages:
 # the per-env state, the artifacts bucket (+ its sub-resources), and read-only refresh of the OIDC
 # provider + its own role. Deliberately NO iam:CreateRole/AttachRolePolicy/lambda/secrets here: the
 # exec role and compute resources are added by the Lambda config (lambda.tf), which extends this policy with a DISJOINT
