@@ -56,6 +56,8 @@ environments must leave `manage_state_bucket = false`.
   (`aws sso login`); CI thereafter federates via GitHub OIDC. No static credentials anywhere.
 - **State-key layout enforces the split.** The CI role's state grant is scoped to `staging/*`, so the
   server state (`staging/terraform.tfstate`) is reachable by CI but the admin roots are not.
+- **State is encrypted client-side.** Each root requires its own sensitive, ephemeral passphrase before
+  OpenTofu can read state. See `STATE_ENCRYPTION.md` for custody, rotation, and recovery.
 - **Reusable where reuse is natural.** The CloudFront/ACM/DNS logic is a module so staging, production,
   and preview envs share one implementation. The Lambda server root is a flat per-env root (production is
   just new `env/*` files) — not modularized, because a single stack per env is the natural shape.
@@ -83,8 +85,8 @@ cd infra/terraform
 aws sso login --profile <admin-profile>
 export AWS_PROFILE=<admin-profile>
 
-tofu init -backend-config=env/staging.s3.tfbackend
-tofu output -raw ci_deploy_role_arn
+infisical run --env=staging --path=/github --command \
+  'export TF_VAR_state_passphrase="$TOFU_STATE_PASSPHRASE_SERVER"; tofu init -backend-config=env/staging.s3.tfbackend && tofu output -raw ci_deploy_role_arn'
 ```
 
 The output is non-secret configuration. Store it as the GitHub `staging` environment variable

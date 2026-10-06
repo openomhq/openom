@@ -48,14 +48,15 @@ the protected Lambda origin's OAC. API routes replace only the origin hostname a
 
 ## Administrative use
 
-Authenticate the administrator profiles, export the provider-standard `CLOUDFLARE_API_TOKEN`, and initialize
-with the preview backend configuration:
+Authenticate the administrator profile, then initialize through Infisical so the provider token and independent
+preview-state passphrase exist only in the child shell:
 
 ```sh
 export AWS_PROFILE=openom-admin
-export CLOUDFLARE_API_TOKEN=...
-tofu -chdir=infra/terraform/preview init -backend-config=env/preview.s3.tfbackend
-tofu -chdir=infra/terraform/preview plan -var-file=env/preview.tfvars -out=.terraform/preview.tfplan
+cd infra/terraform/preview
+infisical run --env=prod --path=/admin --command \
+  'export TF_VAR_state_passphrase="$TOFU_STATE_PASSPHRASE_PREVIEW_PLATFORM"; tofu init -backend-config=env/preview.s3.tfbackend && tofu plan -var-file=env/preview.tfvars -out=.terraform/preview.tfplan'
+cd ../../..
 tofu -chdir=infra/terraform/preview show -json .terraform/preview.tfplan | node scripts/preview-plan-check.mjs
 ```
 

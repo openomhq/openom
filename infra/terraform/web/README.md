@@ -41,11 +41,12 @@ Committed in `env/staging.tfvars`: `cloudflare_account_id`, `cloudflare_zone_id`
 ## Apply (admin, local)
 
 ```sh
-export CLOUDFLARE_API_TOKEN=…        # Pages + DNS edit
 cd infra/terraform/web
-tofu init -backend-config=env/staging.s3.tfbackend
-tofu apply -var-file=env/staging.tfvars
+infisical run --env=prod --path=/admin --command \
+  'export TF_VAR_state_passphrase="$TOFU_STATE_PASSPHRASE_WEB"; tofu init -backend-config=env/staging.s3.tfbackend && tofu apply -var-file=env/staging.tfvars'
 ```
+
+Infisical supplies both `CLOUDFLARE_API_TOKEN` and the root-specific state passphrase to the child shell.
 
 For content deployment, Infisical delivers `CLOUDFLARE_PAGES_TOKEN` and
 `STAGING_APP_GATE_PASSWORD` to the GitHub `staging` environment. Keep `CLOUDFLARE_ACCOUNT_ID` and

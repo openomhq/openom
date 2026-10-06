@@ -21,11 +21,11 @@ Migrate one root at a time:
 
 1. Confirm the expected state object and record its current S3 version ID. Do not print or download it into the
    repository.
-2. Supply the root's passphrase as a sensitive OpenTofu variable. Never put it in HCL, a tfvars file, a saved
-   plan command, or process output.
+2. Supply the root's passphrase as a sensitive, ephemeral OpenTofu variable. Never put it in HCL, a tfvars file,
+   a saved plan command, or process output. Ephemeral variables are omitted from state and plan files.
 3. Configure PBKDF2 as the primary key provider and AES-GCM as the primary state method. Temporarily configure
    `unencrypted` only as the state fallback.
-4. Run `tofu apply`. Even an otherwise empty apply rewrites the state with the primary encrypted method.
+4. Run `tofu apply -refresh-only`. It refreshes and rewrites state without changing remote infrastructure.
 5. Inspect the stored object structurally: it must contain the OpenTofu encryption envelope and must not expose
    normal state fields or known fixture values.
 6. Remove the unencrypted method and fallback, set `enforced = true`, and run `tofu plan` again.

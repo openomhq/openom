@@ -50,6 +50,7 @@ function passphraseVariable(name) {
   return `variable "${name}" {
   type      = string
   sensitive = true
+  ephemeral = true
 }
 `;
 }

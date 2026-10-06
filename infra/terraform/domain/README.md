@@ -33,7 +33,7 @@ export AWS_PROFILE=openom-admin
 
 cd infra/terraform/domain
 infisical run --env=prod --path=/admin --command \
-  "tofu init -backend-config=env/staging.s3.tfbackend && tofu apply -var-file=env/staging.tfvars"
+  'export TF_VAR_state_passphrase="$TOFU_STATE_PASSPHRASE_DOMAIN"; tofu init -backend-config=env/staging.s3.tfbackend && tofu apply -var-file=env/staging.tfvars'
 ```
 
 The apply creates the ACM validation records, waits for the cert to issue, brings up CloudFront, then
