@@ -180,8 +180,8 @@ class App {
     this.lockPolicy = createLockPolicy({ onLock: (reason) => this.lockNow(reason) });
     this.lockPolicy.setIdleMinutes(this.autoLockMinutes);
     // The first-run LANDING experience is a build-time enum substituted into index.html (%LANDING% →
-    // the openom:landing meta): 'live' = production (real onboarding only), 'demo' = a demo/preview build
-    // (the sample-tree demo only), 'test' = the e2e build (both, so the demo + onboarding integration tests
+    // the openom:landing meta): 'live' = real onboarding, 'demo' = the public sample-tree demo only,
+    // 'test' = the e2e build (both, so the demo + onboarding integration tests
     // coexist). The demo and start affordances are INDEPENDENT flags derived from it; the ?demo=1 shortcut
     // below is inert unless the demo affordance is on. Missing meta ⇒ 'live' (the safe, no-demo default).
     const landing = document.querySelector('meta[name="openom:landing"]')?.content;
@@ -328,8 +328,22 @@ class App {
     if (!this.gateBusy) this.root.querySelector('.lock-input, .lock-code')?.focus();
   }
 
-  startCreate() {
-    this.showGate('provision');
+  async startCreate() {
+    if (this.account.state().account !== 'unlocked') {
+      this.showGate('provision');
+      return;
+    }
+    this.gateBusy = true;
+    this.gateError = '';
+    this.renderGate();
+    try {
+      const opened = await this.openOrProvisionSelectedTree();
+      await this.enterApp({ docId: this.realDoc, createdBy: opened.didKey, lockable: true });
+    } catch (error) {
+      this.gateBusy = false;
+      this.gateError = this.gateErr(error, 'gate-err-create');
+      this.renderGate();
+    }
   }
 
   async startDemo() {
@@ -353,16 +367,7 @@ class App {
       } else if (this.account.state().account === 'locked') {
         await this.account.unlock(passphrase);
       }
-      const existing = await this.openSelectedTree();
-      if (existing) {
-        await this.enterApp({ docId: this.realDoc, createdBy: existing.didKey, lockable: true });
-        return;
-      }
-      // Provision only after account unlock supplies the durable identity used to key the selected-tree cache.
-      const id = await ensureTreeIdentity(this.accountMemberId());
-      this.realDoc = id.uuid;
-      this.realTreeId = id.bytes;
-      const { didKey } = await this.worker.provisionTree({ treeId: this.realTreeId, docId: this.realDoc });
+      const { didKey } = await this.openOrProvisionSelectedTree();
       this.pendingDid = didKey;
       if (newRecoveryCode) {
         this.gateRecoveryCode = newRecoveryCode;
@@ -387,6 +392,16 @@ class App {
       this.gateError = this.gateErr(e, 'gate-err-create');
       this.renderGate();
     }
+  }
+
+  async openOrProvisionSelectedTree() {
+    const existing = await this.openSelectedTree();
+    if (existing) return existing;
+    // Provision only after account unlock supplies the durable identity used to key the selected-tree cache.
+    const id = await ensureTreeIdentity(this.accountMemberId());
+    this.realDoc = id.uuid;
+    this.realTreeId = id.bytes;
+    return this.worker.provisionTree({ treeId: this.realTreeId, docId: this.realDoc });
   }
 
   async gateContinue() {

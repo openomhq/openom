@@ -156,6 +156,13 @@ It is **not** a general-purpose SPA: there is no client-side router beyond the a
 `data-view` state, no CSS framework, and no dependency-injection container — `src/ui/dom.js`'s `h()`
 plus `tree.revision`-driven re-render is the entire rendering model.
 
+The assembled `openom:landing` value controls welcome affordances, not custody: `demo` exposes only the
+bundled sample tree, `live` exposes real local-first tree creation plus optional provider sign-in, and `test`
+exposes both for browser acceptance. Restoring an account first attempts to discover and open its single synced
+owner tree. When no tree exists, the already-unlocked account returns to the real-creation welcome; starting there
+provisions an empty tree without asking for the verified account passphrase again, then enters the normal
+"start with yourself" onboarding view. A signed-in welcome never offers a redundant second sign-in action.
+
 ## Layout
 
 ```

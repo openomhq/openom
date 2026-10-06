@@ -44,6 +44,23 @@ test('start → passphrase → recovery code → onboarding → reload → unloc
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('an unlocked account without a tree starts directly in onboarding @integration', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(String(error)));
+
+  await page.goto('/app/index.html');
+  await expect(page.getByRole('button', { name: /start your family tree/i })).toBeVisible({ timeout: 20_000 });
+  await page.evaluate(async () => {
+    await window.openom.account.createAccount('restored account passphrase');
+    window.openom.showGate('welcome');
+  });
+  await page.getByRole('button', { name: /start your family tree/i }).click();
+
+  await expect(page.locator('#gate-pass')).toHaveCount(0);
+  await expect(page.locator('#first-name')).toBeVisible({ timeout: 20_000 });
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('settings → change passphrase → old rejected, new unlocks without recovery rotation @integration', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

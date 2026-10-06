@@ -80,7 +80,7 @@ export function gateView(app) {
 
 function welcomeScreen(app) {
   const kids = [mark(), title(t('gate-welcome-title'))];
-  // On a DEMO/preview deploy (dev/marketing build-time flag, no managed server → local-only) we lead with the
+  // On a public DEMO deploy (dev/marketing build-time flag, no managed server → local-only) we lead with the
   // demo: it opens the FULL app on a sample tree with zero friction. Surfacing "start a real tree" there would
   // only mint fragile local-only data on a throwaway domain; the real get-started CTA belongs on the shipped
   // apps. The two affordances are INDEPENDENT flags derived from the openom:landing mode (see main.js):
@@ -90,11 +90,14 @@ function welcomeScreen(app) {
     kids.push(primary(t('gate-demo'), { type: 'button', onClick: () => app.startDemo() }));
   }
   if (app.startEnabled) {
-    kids.push(primary(t('gate-start'), { type: 'button', onClick: () => app.startCreate() }));
+    kids.push(primary(app.gateBusy ? t('gate-securing') : t('gate-start'), {
+      type: 'button', disabled: app.gateBusy, onClick: () => app.startCreate(),
+    }));
+    if (app.gateError) kids.push(errorLine(app));
   }
-  // Returning on a new device (or already have a sync login): a quiet entry to the account page,
-  // only where the provider actually supports interactive sign-in (hidden under local DevAuth).
-  if (app.auth?.capabilities?.().canLogin) {
+  // Returning on a new device: a quiet entry to the account page only when the provider supports
+  // interactive sign-in and this session is not already authenticated (hidden under local DevAuth).
+  if (app.auth?.capabilities?.().canLogin && app.account?.state?.().auth !== 'signedIn') {
     kids.push(ghost(t('account-welcome-signin'), () => app.showAccountView('signIn')));
   }
   return shell(...kids);

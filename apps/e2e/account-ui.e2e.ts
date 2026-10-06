@@ -10,6 +10,7 @@ interface AccountUiHarness {
 declare global {
   interface Window {
     accountUiHarness: AccountUiHarness;
+    accountWelcomeHarness: { setAuth(auth: 'signedOut' | 'signedIn'): void };
   }
 }
 
@@ -119,4 +120,42 @@ test('account overlay routes forms and renders pending and conflict states safel
   await expect(page.getByText('local_remote_identity_mismatch')).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('welcome keeps local-first creation without offering sign-in twice', async ({ page }) => {
+  await page.goto('/app/index.html');
+  await page.evaluate(async () => {
+    const [{ loadLocale }, { gateView }] = await Promise.all([
+      import('/app/src/core/i18n.js'),
+      import('/app/src/views/gate.js'),
+    ]);
+    await loadLocale('en');
+    const root = document.createElement('div');
+    document.body.replaceChildren(root);
+    const state = { auth: 'signedOut' as 'signedOut' | 'signedIn' };
+    const app = {
+      demoEnabled: false,
+      startEnabled: true,
+      gateBusy: false,
+      gateError: '',
+      account: { state: () => state },
+      auth: { capabilities: () => ({ canLogin: true }) },
+      startCreate: () => {},
+      showAccountView: () => {},
+    };
+    const render = () => root.replaceChildren(gateView(app));
+    window.accountWelcomeHarness = {
+      setAuth(auth) {
+        state.auth = auth;
+        render();
+      },
+    };
+    render();
+  });
+
+  await expect(page.getByRole('button', { name: 'Start your family tree' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign in to sync' })).toBeVisible();
+  await page.evaluate(() => window.accountWelcomeHarness.setAuth('signedIn'));
+  await expect(page.getByRole('button', { name: 'Start your family tree' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign in to sync' })).toHaveCount(0);
 });
