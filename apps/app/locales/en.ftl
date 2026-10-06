@@ -264,6 +264,8 @@ account-chip-syncing = Syncing…
 account-chip-local = Local
 account-chip-signin = Sign in
 account-chip-synced = Synced
+account-chip-sync-on = Sync on
+account-chip-sync-error = Sync unavailable
 account-chip-backup-needed = Backup needed
 account-chip-sync-off = Sync off
 
@@ -281,6 +283,7 @@ account-data-unlocked = Unlocked
 account-sync-off = Sync is off
 account-sync-bound = Registered — backup still needed
 account-sync-backedup = Backed up
+account-tree-sync-error = Your latest tree changes could not be uploaded yet. They remain safe on this device and will retry automatically.
 account-pending-register = Finishing account registration…
 account-pending-restore = Finishing account restore…
 account-pending-backup = Finishing backup…

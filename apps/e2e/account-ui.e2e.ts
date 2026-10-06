@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test';
 interface AccountUiHarness {
   setPending(actions: string[]): void;
   setConflict(reason: string | null): void;
+  setTreeSync(state: 'synced' | 'offline' | 'error' | 'auth-error' | 'security' | null): void;
   show(screen: string): void;
   restoredPassphrase(): string | null;
 }
@@ -34,12 +35,14 @@ test('account overlay routes forms and renders pending and conflict states safel
   await page.goto('/app/index.html');
   await page.evaluate(async () => {
     const { loadLocale } = await import('/app/src/core/i18n.js');
-    const { accountOverlayView } = await import('/app/src/views/account.js');
+    const { accountOverlayView, accountStatusChip } = await import('/app/src/views/account.js');
     await loadLocale('en');
 
     const root = document.createElement('div');
     root.id = 'account-ui-harness';
-    document.body.replaceChildren(root);
+    const chipRoot = document.createElement('div');
+    chipRoot.id = 'account-chip-harness';
+    document.body.replaceChildren(chipRoot, root);
     const accountState = {
       auth: 'signedOut',
       account: 'unlocked',
@@ -59,10 +62,13 @@ test('account overlay routes forms and renders pending and conflict states safel
     };
     let restoredPassphrase: string | null = null;
     const render = () => {
+      const chip = accountStatusChip(app);
+      chipRoot.replaceChildren(...(chip ? [chip] : []));
       const node = accountOverlayView(app);
       root.replaceChildren(...(node ? [node] : []));
     };
     const app = {
+      syncStatus: null as null | { state: 'synced' | 'offline' | 'error' | 'auth-error' | 'security' },
       account: { state: () => accountState },
       auth: { capabilities: () => ({ canLogin: true, canSignUp: true, sync: true }) },
       accountUiState: () => uiState,
@@ -84,6 +90,14 @@ test('account overlay routes forms and renders pending and conflict states safel
       setConflict(reason) {
         accountState.conflict = reason ? { code: 'identity_conflict', reason } : null;
         uiState.screen = reason ? 'conflict' : 'overview';
+        render();
+      },
+      setTreeSync(state) {
+        accountState.auth = 'signedIn';
+        accountState.binding = 'backedUp';
+        accountState.pending = new Set();
+        app.syncStatus = state ? { state } : null;
+        uiState.screen = 'overview';
         render();
       },
       show(screen) {
@@ -109,6 +123,14 @@ test('account overlay routes forms and renders pending and conflict states safel
   await page.getByRole('button', { name: 'Restore account' }).click();
   await expect.poll(() => page.evaluate(() => window.accountUiHarness.restoredPassphrase()))
     .toBe('restored account passphrase');
+
+  await page.evaluate(() => window.accountUiHarness.setTreeSync(null));
+  await expect(page.getByRole('button', { name: /account & sync — sync on/i })).toBeVisible();
+  await page.evaluate(() => window.accountUiHarness.setTreeSync('synced'));
+  await expect(page.getByRole('button', { name: /account & sync — synced/i })).toBeVisible();
+  await page.evaluate(() => window.accountUiHarness.setTreeSync('offline'));
+  await expect(page.getByRole('button', { name: /account & sync — sync unavailable/i })).toBeVisible();
+  await expect(page.getByText(/latest tree changes could not be uploaded/i)).toBeVisible();
 
   await page.evaluate(() => window.accountUiHarness.setPending(['register', 'restore']));
   await expect(page.getByText('Finishing account registration…')).toBeVisible();

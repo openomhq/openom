@@ -47,6 +47,9 @@ export interface AccountUiActionsOptions {
 export interface AccountViewHost {
   readonly account: { state(): AccountSessionState };
   readonly auth: { capabilities(): AuthCapabilities };
+  readonly syncStatus?: {
+    readonly state: 'synced' | 'offline' | 'error' | 'auth-error' | 'security';
+  } | null;
   accountUiState(): Readonly<AccountUiState>;
   showAccountView(screen?: AccountUiScreen): void;
   closeAccountView(): void;

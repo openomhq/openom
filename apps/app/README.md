@@ -116,6 +116,9 @@ replacement during restore, and refuses an ambiguous multi-tree result until exp
 trees remain dependent on their independently authenticated first-sight material. In development, the singleton
 `DevAuth` observes that account handle and exposes its durable member ID only as the raw development bearer; it
 does not own accounts.
+The account backup state and active-tree transport state are displayed separately: a verified account backup may
+enable sync, but the UI claims `Synced` only after the open tree completes a successful tick. A failed tree upload
+is retained locally, retried by the driver, and surfaced as unavailable rather than hidden behind backup status.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
 passphrase, snapshot, verified candidate adoption, revoke credentials, public identity, and registration proof), while
 keeping every secret handle in Rust/wasm. Candidate adoption verifies the fetched wrapped bytes before replacing
