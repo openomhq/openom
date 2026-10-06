@@ -15,6 +15,7 @@ const APPS = path.join(REPO, 'apps');
 const authProject = `openom-auth-${process.pid}`;
 const serverContainer = `${authProject}-server`;
 const keyId = `local-auth-${process.pid}`;
+const accountDatabase = `openom_auth_acceptance_${process.pid}`;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -147,6 +148,27 @@ function removeServer() {
   spawnSync('docker', ['rm', '--force', serverContainer], { cwd: REPO, stdio: 'ignore' });
 }
 
+function resetAccountDatabase() {
+  run('docker', [
+    'compose', 'exec', '-T', 'postgres',
+    'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'openom', '-d', 'postgres',
+    '-c', `DROP DATABASE IF EXISTS ${accountDatabase} WITH (FORCE);`,
+  ]);
+  run('docker', [
+    'compose', 'exec', '-T', 'postgres',
+    'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'openom', '-d', 'postgres',
+    '-c', `CREATE DATABASE ${accountDatabase} OWNER openom;`,
+  ]);
+}
+
+function removeAccountDatabase() {
+  spawnSync('docker', [
+    'compose', 'exec', '-T', 'postgres',
+    'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'openom', '-d', 'postgres',
+    '-c', `DROP DATABASE IF EXISTS ${accountDatabase} WITH (FORCE);`,
+  ], { cwd: REPO, stdio: 'ignore' });
+}
+
 function removeAuthStack(env) {
   spawnSync(
     'docker',
@@ -193,6 +215,7 @@ function cleanup() {
   if (cleaning) return;
   cleaning = true;
   removeServer();
+  removeAccountDatabase();
   removeAuthStack(composeEnv);
 }
 
@@ -221,6 +244,7 @@ try {
 
   console.error('[Auth] starting an ephemeral openom ES256/JWKS server');
   run('docker', ['compose', 'up', '-d', 'postgres', 'minio']);
+  resetAccountDatabase();
   run('docker', [
     'compose', 'run', '--build', '--detach', '--no-deps',
     '--name', serverContainer,
@@ -229,6 +253,7 @@ try {
     '-e', 'AUTH_JWKS_URL=http://supabase-auth-gateway:9999/auth/v1/.well-known/jwks.json',
     '-e', `AUTH_JWT_ISS=${authBaseUrl}`,
     '-e', 'AUTH_JWT_AUD=authenticated',
+    '-e', `DATABASE_URL=postgres://openom:openom@postgres:5432/${accountDatabase}`,
     '-e', `OPENOM_HTTP_ADDR=0.0.0.0:${serverPort}`,
     '-p', `${serverPort}:${serverPort}`,
     'server', 'cargo', 'run', '-p', 'openom', '--bin', 'openom',
