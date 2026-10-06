@@ -185,6 +185,41 @@ test('reconciles an uncertain branch create instead of issuing a duplicate creat
   assert.equal(createCalls, 1);
 });
 
+test('waits for a created branch and its ownership annotation to become visible', async () => {
+  let branchLists = 0;
+  const pauses = [];
+  const fetchImplementation = async (urlValue, options) => {
+    const url = new URL(urlValue);
+    if (url.pathname.endsWith('/branches') && options.method === 'GET') {
+      branchLists += 1;
+      if (branchLists <= 2) return response(listing([baseBranch()]));
+      if (branchLists === 3) {
+        return response({ branches: [baseBranch(), previewBranch()], annotations: {} });
+      }
+      return response(listing([baseBranch(), previewBranch()]));
+    }
+    if (url.pathname.endsWith('/branches') && options.method === 'POST') {
+      return response({ branch: previewBranch() });
+    }
+    if (url.pathname.endsWith('/branches/br-preview-42/endpoints')) {
+      return response({ endpoints: [{ id: 'ep-preview-42', type: 'read_write' }] });
+    }
+    if (url.pathname.endsWith('/connection_uri')) {
+      return response({ uri: 'postgresql://owner:password@example.test/neondb' });
+    }
+    return response({}, 404);
+  };
+
+  await assert.doesNotReject(reconcilePreviewDatabase({
+    ...CONFIG,
+    attempts: 4,
+    fetchImplementation,
+    pause: async (milliseconds) => pauses.push(milliseconds),
+  }));
+  assert.equal(branchLists, 4);
+  assert.deepEqual(pauses, [250, 500]);
+});
+
 test('retries documented transient responses with a bounded delay', async () => {
   const api = successfulFetch({ existing: true });
   let first = true;

@@ -126,6 +126,7 @@ test('creates a protected aliased function and both CloudFront grants', () => {
 
 test('updates configuration before code and atomically promotes the live alias', () => {
   const operations = [];
+  const checkpoints = [];
   const execute = (binary, args) => {
     operations.push(operation(args));
     switch (operation(args)) {
@@ -151,9 +152,21 @@ test('updates configuration before code and atomically promotes the live alias',
     }
   };
 
-  const deployed = reconcilePreviewLambda({ ...CONFIG, execute });
+  const deployed = reconcilePreviewLambda({
+    ...CONFIG,
+    checkpoint: (rollback) => {
+      operations.push('checkpoint');
+      checkpoints.push(rollback);
+    },
+    execute,
+  });
   assert.equal(deployed.previousVersion, '7');
   assert.equal(deployed.installedVersion, '8');
+  assert.deepEqual(checkpoints, [{
+    functionName: FUNCTION_NAME,
+    installedVersion: '8',
+    previousVersion: '7',
+  }]);
   assert.ok(
     operations.indexOf('lambda update-function-configuration')
       < operations.indexOf('lambda update-function-code'),
@@ -161,6 +174,8 @@ test('updates configuration before code and atomically promotes the live alias',
   assert.ok(
     operations.indexOf('lambda update-function-code') < operations.indexOf('lambda update-alias'),
   );
+  assert.ok(operations.indexOf('lambda update-alias') < operations.indexOf('checkpoint'));
+  assert.ok(operations.indexOf('checkpoint') < operations.indexOf('lambda get-function-url-config'));
   assert.equal(operations.filter((value) => value === 'lambda add-permission').length, 0);
 });
 
@@ -252,6 +267,8 @@ test('deletes a newly created function and log group on rollback', () => {
   });
   assert.deepEqual(operations, [
     'lambda get-alias',
+    'lambda delete-function-url-config',
+    'lambda delete-alias',
     'lambda delete-function',
     'logs delete-log-group',
   ]);
@@ -275,6 +292,7 @@ test('builds a remote JWT environment without enabling dev auth or telemetry', (
   assert.equal(environment.Variables.OPENOM_RUNTIME, 'remote');
   assert.equal(environment.Variables.OBJECT_STORE_KEY_PREFIX, 'previews/feat-ope-637/');
   assert.equal(environment.Variables.OPENOM_WEB_ORIGINS, 'https://feat-ope-637.app.dev.openom.org');
-  assert.equal(environment.Variables.AUTH, undefined);
+  assert.equal(environment.Variables.AUTH, 'jwt');
+  assert.equal(environment.Variables.STORAGE, 'cloud');
   assert.equal(environment.Variables.OPENOM_OTEL, undefined);
 });

@@ -51,10 +51,10 @@ pnpm test:e2e
   both onboarding orders (register before the first tree, or register after an offline local tree), verifies
   the latter does not change the owner or DAG anchor, and checks passphrase change and recovery preserve the
   identity, keyring, and tree contents.
-- `staging-auth.e2e.ts` (`@staging`, deployment workflow only) — unlocks the real staging Pages gate,
-  verifies its build marker matches the dispatched commit and its secure admission cookie is set, checks the
-  assembled Supabase metadata and CSP, then uses deployed production modules to sign in, force a token refresh,
-  bind/backup the stable test identity, and restore it in a fresh browser context. The dedicated account
+- `staging-auth.e2e.ts` (`@staging`, deployment workflows only) — checks assembled Supabase metadata and CSP,
+  then uses deployed production modules to sign in, force a token refresh, bind/backup the stable test identity,
+  and restore it in a fresh browser context. Staging additionally unlocks the Pages gate and verifies its build
+  marker; full pull-request previews run the same account contract without a gate. The dedicated account
   passphrase never enters committed fixtures or test output.
 
 ## Conventions

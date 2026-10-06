@@ -83,15 +83,23 @@ node --test scripts/preview-router.test.mjs
 node --test scripts/preview-sink.test.mjs
 ```
 
-## Web-preview lifecycle
+## Preview lifecycle
 
-Web previews are deliberately not automatic. A maintainer adds the `preview` label when a same-repository pull
-request is ready, then manually runs `preview.deploy` from `main` with the pull-request number. The workflow
-rechecks that the actor has `maintain` or `admin` permission, resolves the current head SHA, and builds that SHA
-without credentials. Only trusted automation checked out from `main` can deploy the artifact and update the
-route store.
+Previews are deliberately not automatic. A maintainer adds `preview` for a web-only preview or `full-preview`
+for an isolated full stack, then manually runs `preview.deploy` from `main` with the pull-request number and
+matching mode. The workflow rechecks that the actor has `maintain` or `admin` permission, resolves the current
+head SHA, and builds that SHA without credentials. Only trusted automation checked out from `main` can access
+the `preview` environment, deploy the artifact, or update the route store.
 
 Later commits do not alter the deployed preview. A maintainer explicitly dispatches the workflow again to pin
-and deploy the new head. The successful run exposes the app URL through a native GitHub deployment and reports
-both friendly URLs in its job summary; the API URL remains a deterministic 404 until full-stack provisioning is
-implemented.
+and deploy the new head. A web-only run publishes the app and leaves the API route as a deterministic 404. A
+full-stack run reconciles the pull request's owned Neon branch, applies its migrations, deploys a protected
+versioned Lambda behind the `live` alias, assigns the dedicated R2 prefix, publishes both routes, and runs the
+deployed Supabase account round trip before advertising success. Route and Lambda rollback checkpoints are
+written before later fallible operations so an interrupted acceptance can restore the previously advertised
+stack.
+
+The Supabase credentials in the `preview` environment must belong to a dedicated disposable preview fixture,
+not the staging acceptance account. Deployed pull-request JavaScript participates in the browser acceptance;
+isolating the fixture prevents an approved but untrusted preview from acquiring credentials that can access
+staging application data.

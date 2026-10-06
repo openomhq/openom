@@ -379,18 +379,58 @@
     "preview.deploy": {
       "environment": "preview",
       "file": ".github/workflows/preview.deploy.yml",
-      "secrets": ["CLOUDFLARE_PAGES_TOKEN"],
+      "secrets": [
+        "CLOUDFLARE_PAGES_TOKEN",
+        "NEON_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_TEST_PASSWORD"
+      ],
       "variables": [
+        "AWS_CLOUDFRONT_DISTRIBUTION_ID",
         "AWS_CLOUDFRONT_KVS_ARN",
         "AWS_DEPLOY_ROLE_ARN",
+        "AWS_PREVIEW_ARTIFACTS_BUCKET",
+        "AWS_PREVIEW_EXECUTION_ROLE_ARN",
         "AWS_REGION",
         "CLOUDFLARE_ACCOUNT_ID",
-        "CLOUDFLARE_PAGES_PROJECT"
+        "CLOUDFLARE_PAGES_PROJECT",
+        "NEON_DATABASE_NAME",
+        "NEON_PREVIEW_BASE_BRANCH_ID",
+        "NEON_PROJECT_ID",
+        "NEON_ROLE_NAME",
+        "OPENOM_TEST_ACCOUNT_PASSPHRASE",
+        "PREVIEW_MAX_FULL_STACKS",
+        "R2_BUCKET",
+        "R2_ENDPOINT",
+        "SUPABASE_JWKS_URL",
+        "SUPABASE_JWT_AUD",
+        "SUPABASE_JWT_ISS",
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_TEST_EMAIL",
+        "SUPABASE_URL"
       ],
       "jobs": {
         "authorize": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
         "build": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
-        "deploy": {
+        "database": {
+          "environment": true,
+          "oidc": false,
+          "secrets": ["NEON_API_KEY", "SUPABASE_TEST_PASSWORD"],
+          "variables": [
+            "NEON_DATABASE_NAME",
+            "NEON_PREVIEW_BASE_BRANCH_ID",
+            "NEON_PROJECT_ID",
+            "NEON_ROLE_NAME",
+            "PREVIEW_MAX_FULL_STACKS",
+            "SUPABASE_JWKS_URL",
+            "SUPABASE_JWT_AUD",
+            "SUPABASE_JWT_ISS",
+            "SUPABASE_PUBLISHABLE_KEY",
+            "SUPABASE_TEST_EMAIL"
+          ]
+        },
+        "deploy-web": {
           "environment": true,
           "oidc": true,
           "secrets": ["CLOUDFLARE_PAGES_TOKEN"],
@@ -400,6 +440,41 @@
             "AWS_REGION",
             "CLOUDFLARE_ACCOUNT_ID",
             "CLOUDFLARE_PAGES_PROJECT"
+          ]
+        },
+        "deploy-full": {
+          "environment": true,
+          "oidc": true,
+          "secrets": [
+            "CLOUDFLARE_PAGES_TOKEN",
+            "NEON_API_KEY",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+            "SUPABASE_TEST_PASSWORD"
+          ],
+          "variables": [
+            "AWS_CLOUDFRONT_DISTRIBUTION_ID",
+            "AWS_CLOUDFRONT_KVS_ARN",
+            "AWS_DEPLOY_ROLE_ARN",
+            "AWS_PREVIEW_ARTIFACTS_BUCKET",
+            "AWS_PREVIEW_EXECUTION_ROLE_ARN",
+            "AWS_REGION",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_PAGES_PROJECT",
+            "NEON_DATABASE_NAME",
+            "NEON_PREVIEW_BASE_BRANCH_ID",
+            "NEON_PROJECT_ID",
+            "NEON_ROLE_NAME",
+            "OPENOM_TEST_ACCOUNT_PASSPHRASE",
+            "PREVIEW_MAX_FULL_STACKS",
+            "R2_BUCKET",
+            "R2_ENDPOINT",
+            "SUPABASE_JWKS_URL",
+            "SUPABASE_JWT_AUD",
+            "SUPABASE_JWT_ISS",
+            "SUPABASE_PUBLISHABLE_KEY",
+            "SUPABASE_TEST_EMAIL",
+            "SUPABASE_URL"
           ]
         }
       }

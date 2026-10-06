@@ -160,7 +160,7 @@ async function listBranches(client) {
   return normalizeBranchList(response);
 }
 
-function selectBranch(listing, config) {
+function selectBranch(listing, config, { allowPendingAnnotation = false } = {}) {
   if (!listing.branches.some((branch) => branch.id === config.baseBranchId)) {
     throw new PreviewNeonError(
       'preview_neon_base_missing',
@@ -175,7 +175,9 @@ function selectBranch(listing, config) {
     );
   }
   if (matches.length === 1) {
-    return assertOwnedBranch(matches[0], ownerAnnotation(listing, matches[0].id), config);
+    const annotation = ownerAnnotation(listing, matches[0].id);
+    if (allowPendingAnnotation && annotation === null) return null;
+    return assertOwnedBranch(matches[0], annotation, config);
   }
   const activePreviews = listing.branches.filter((branch) => branch.name.startsWith('preview/'));
   if (activePreviews.length >= config.maxFullStacks) {
@@ -183,6 +185,16 @@ function selectBranch(listing, config) {
       'preview_capacity_reached',
       `full-preview capacity is ${config.maxFullStacks}; clean up an existing preview first`,
     );
+  }
+  return null;
+}
+
+async function reconcileCreatedBranch(client, config) {
+  for (let attempt = 0; attempt < client.attempts; attempt += 1) {
+    const listing = await listBranches(client);
+    const branch = selectBranch(listing, config, { allowPendingAnnotation: true });
+    if (branch) return branch;
+    if (attempt + 1 < client.attempts) await client.pause(250 * (attempt + 1));
   }
   return null;
 }
@@ -220,13 +232,11 @@ async function reconcileCreate(client, config) {
       'neon_resource_conflict',
       'invalid_neon_response',
     ].includes(error.code)) throw error;
-    const listing = await listBranches(client);
-    const branch = selectBranch(listing, config);
+    const branch = await reconcileCreatedBranch(client, config);
     if (branch) return branch;
     throw error;
   }
-  const listing = await listBranches(client);
-  const branch = selectBranch(listing, config);
+  const branch = await reconcileCreatedBranch(client, config);
   if (branch) return branch;
   throw new PreviewNeonError(
     'preview_neon_branch_missing',

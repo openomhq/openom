@@ -305,6 +305,7 @@ export function lambdaEnvironment(options) {
   const appUrl = requiredString(options.appUrl, 'preview app URL');
   return {
     Variables: {
+      AUTH: 'jwt',
       AUTH_JWKS_URL: requiredString(options.jwksUrl, 'SUPABASE_JWKS_URL'),
       AUTH_JWT_ALG: 'ES256',
       AUTH_JWT_AUD: requiredString(options.jwtAudience, 'SUPABASE_JWT_AUD'),
@@ -321,6 +322,7 @@ export function lambdaEnvironment(options) {
       S3_PUBLIC_ENDPOINT: requiredString(options.r2Endpoint, 'R2_ENDPOINT'),
       S3_REGION: 'auto',
       S3_SECRET_KEY: requiredString(options.r2SecretAccessKey, 'R2_SECRET_ACCESS_KEY'),
+      STORAGE: 'cloud',
     },
   };
 }
@@ -337,6 +339,12 @@ export function reconcilePreviewLambda(options) {
     ? updateFunction(execute, config, existingFunction)
     : createFunction(execute, config);
   promoteAlias(execute, config.functionName, installedVersion, existingAlias);
+  const rollback = {
+    functionName: config.functionName,
+    installedVersion,
+    previousVersion,
+  };
+  options.checkpoint?.(rollback);
   const url = ensureFunctionUrl(execute, config.functionName);
   ensureCloudFrontPermissions(execute, config);
 
@@ -373,6 +381,20 @@ export function rollbackPreviewLambda({ execute = command, rollback }) {
   if (rollback.previousVersion) {
     promoteAlias(execute, functionName, rollback.previousVersion, alias);
     return;
+  }
+  const functionUrlDeletion = execute('aws', awsArguments('lambda', 'delete-function-url-config', [
+    '--function-name', functionName,
+    '--qualifier', ALIAS,
+  ]));
+  if (functionUrlDeletion.status !== 0 && !isMissing(functionUrlDeletion)) {
+    parseJson(functionUrlDeletion, 'Lambda Function URL rollback deletion');
+  }
+  const aliasDeletion = execute('aws', awsArguments('lambda', 'delete-alias', [
+    '--function-name', functionName,
+    '--name', ALIAS,
+  ]));
+  if (aliasDeletion.status !== 0 && !isMissing(aliasDeletion)) {
+    parseJson(aliasDeletion, 'Lambda alias rollback deletion');
   }
   runAws(execute, 'lambda', 'delete-function', ['--function-name', functionName], 'Lambda rollback deletion');
   const logGroup = `/aws/lambda/${functionName}`;
@@ -443,6 +465,9 @@ export function runPreviewLambdaCli(args, environment = process.env) {
       pullRequestNumber: argumentValue(args, '--pull-request'),
       slug: argumentValue(args, '--slug'),
       sourceBranch: argumentValue(args, '--source-branch'),
+      checkpoint: (rollback) => {
+        writeFileSync(outputFile, JSON.stringify(rollback), { encoding: 'utf8', mode: 0o600 });
+      },
     });
     writeFileSync(outputFile, JSON.stringify(result), { encoding: 'utf8', mode: 0o600 });
     return result;

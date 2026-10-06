@@ -56,7 +56,7 @@ jobs:
   build:
     needs: authorize
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     permissions:
       contents: read
     outputs:
@@ -73,7 +73,37 @@ jobs:
       - name: Build the app-core WASM
         run: node scripts/build-app-core.mjs
 
-      - name: Assemble the unprivileged web artifact
+      - if: needs.authorize.outputs.mode == 'full'
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-unknown-linux-gnu
+      - if: needs.authorize.outputs.mode == 'full'
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.8.1
+
+      - if: needs.authorize.outputs.mode == 'full'
+        name: Install checksum-verified Zig and cargo-lambda
+        run: |
+          set -euo pipefail
+          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz
+          echo 'd45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz' | sha256sum -c -
+          mkdir -p "$HOME/.zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/.zig" --strip-components=1
+          echo "$HOME/.zig" >> "$GITHUB_PATH"
+
+          curl -fsSL https://github.com/cargo-lambda/cargo-lambda/releases/download/v1.9.2/cargo-lambda-v1.9.2.x86_64-unknown-linux-musl.tar.gz -o /tmp/cargo-lambda.tar.gz
+          echo 'b5c258c424ebaef39541c3641f33c51137ee6c426016f365628fedb2c737271d  /tmp/cargo-lambda.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/cargo-lambda
+          tar -xzf /tmp/cargo-lambda.tar.gz -C /tmp/cargo-lambda
+          sudo install "$(find /tmp/cargo-lambda -type f -name cargo-lambda -print -quit)" /usr/local/bin/cargo-lambda
+
+      - if: needs.authorize.outputs.mode == 'full'
+        name: Build the Lambda
+        run: cargo lambda build --release --arm64 -p openom --bin openom --output-format zip
+
+      - name: Assemble the unprivileged artifact
+        env:
+          PREVIEW_MODE: ${{ needs.authorize.outputs.mode }}
         run: |
           set -euo pipefail
           mkdir -p _site _artifact
@@ -85,17 +115,128 @@ jobs:
             exit 1
           fi
           tar -czf _artifact/site.tar.gz -C _site .
+
+          if [[ "$PREVIEW_MODE" == 'full' ]]; then
+            zip="$(find target/lambda -name bootstrap.zip -print -quit)"
+            test -n "$zip" || { echo 'no bootstrap.zip under target/lambda' >&2; exit 1; }
+            cp "$zip" _artifact/bootstrap.zip
+            unsafe_migration="$(find openom/migrations -mindepth 1 ! -type f ! -type d -print -quit)"
+            if [[ -n "$unsafe_migration" ]]; then
+              echo 'Migration artifact contains a non-regular filesystem entry' >&2
+              exit 1
+            fi
+            tar -czf _artifact/migrations.tar.gz -C openom migrations
+          fi
+
           (cd _artifact && sha256sum site.tar.gz > SHA256SUMS)
+          if [[ "$PREVIEW_MODE" == 'full' ]]; then
+            (cd _artifact && sha256sum bootstrap.zip migrations.tar.gz >> SHA256SUMS)
+          fi
 
       - id: artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: preview-web-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
+          name: preview-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
           path: _artifact/
           if-no-files-found: error
           retention-days: 1
 
-  deploy:
+  database:
+    if: needs.authorize.outputs.mode == 'full'
+    needs: [authorize, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: preview
+      deployment: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: preview-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
+          path: _artifact
+
+      - name: Verify full-preview database configuration
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          NEON_DATABASE_NAME: ${{ vars.NEON_DATABASE_NAME }}
+          NEON_PREVIEW_BASE_BRANCH_ID: ${{ vars.NEON_PREVIEW_BASE_BRANCH_ID }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
+          PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
+        run: node scripts/deployment-config.mjs --validate-job preview.deploy.database
+
+      - name: Verify Supabase token issuance and JWKS
+        env:
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+        run: |
+          npm --prefix scripts/smoke install --no-audit --no-fund --ignore-scripts
+          node scripts/smoke/supabase-smoke.mjs
+
+      - name: Verify and extract migrations
+        run: |
+          set -euo pipefail
+          (cd _artifact && sha256sum -c SHA256SUMS)
+          mkdir -p _database
+          tar -xzf _artifact/migrations.tar.gz -C _database
+          unsafe_entry="$(find _database/migrations -mindepth 1 ! -type f ! -type d -print -quit)"
+          non_sql="$(find _database/migrations -type f ! -name '*.sql' -print -quit)"
+          if [[ -n "$unsafe_entry" || -n "$non_sql" ]]; then
+            echo 'Migration artifact contains an unsafe entry' >&2
+            exit 1
+          fi
+
+      - name: Reconcile the isolated Neon branch
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_DATABASE_NAME: ${{ vars.NEON_DATABASE_NAME }}
+          NEON_PREVIEW_BASE_BRANCH_ID: ${{ vars.NEON_PREVIEW_BASE_BRANCH_ID }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
+          PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
+        run: >-
+          node scripts/preview-neon.mjs reconcile
+          --branch "preview/${{ needs.authorize.outputs.slug }}"
+          --source-branch "${{ needs.authorize.outputs.source_branch }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --output-file _database/database.json
+
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.68.14
+        with:
+          tool: sqlx-cli@0.9.0
+
+      - name: Apply pull-request migrations with database-only credentials
+        run: |
+          set -euo pipefail
+          migration_url="$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync('_database/database.json')).migrationDatabaseUrl)")"
+          echo "::add-mask::$migration_url"
+          sqlx migrate run --source _database/migrations --database-url "$migration_url"
+
+      - if: always()
+        name: Remove generated database credentials
+        run: rm -f _database/database.json
+
+  deploy-web:
+    if: needs.authorize.outputs.mode == 'web'
     needs: [authorize, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -117,10 +258,10 @@ jobs:
           node-version: 24.11.0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: preview-web-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
+          name: preview-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
           path: _artifact
 
-      - name: Verify preview deployment configuration
+      - name: Verify web-preview configuration
         env:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
@@ -128,7 +269,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
           CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
-        run: node scripts/deployment-config.mjs --validate-job preview.deploy.deploy
+        run: node scripts/deployment-config.mjs --validate-job preview.deploy.deploy-web
 
       - name: Verify and assemble the static site
         env:
@@ -170,15 +311,7 @@ jobs:
         run: |
           set -euo pipefail
           origin="https://${PREVIEW_SLUG}.${PAGES_PROJECT}.pages.dev/"
-          deadline=$((SECONDS + 90))
-          while (( SECONDS < deadline )); do
-            if curl --fail --silent --show-error --max-time 5 "$origin" >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Pages branch origin did not become ready" >&2
-          exit 1
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "$origin" >/dev/null
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -196,36 +329,10 @@ jobs:
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --rollback-file _artifact/route-rollback.json
 
-      - id: health
-        name: Accept the public preview URL
-        continue-on-error: true
+      - name: Accept the public app URL
         env:
           APP_URL: ${{ needs.authorize.outputs.app_url }}
-        run: |
-          set -euo pipefail
-          deadline=$((SECONDS + 90))
-          while (( SECONDS < deadline )); do
-            if curl --fail --silent --show-error --max-time 5 "$APP_URL" | grep -q '<title>openom'; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Public preview URL did not become ready" >&2
-          exit 1
-
-      - name: Restore the previous route after failed acceptance
-        if: steps.health.outcome == 'failure'
-        env:
-          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
-        run: >-
-          node scripts/preview-route.mjs rollback
-          --branch "${{ needs.authorize.outputs.source_branch }}"
-          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
-          --rollback-file _artifact/route-rollback.json
-
-      - name: Fail a rejected preview
-        if: always() && steps.health.outcome == 'failure'
-        run: exit 1
+        run: curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "$APP_URL" | grep -q '<title>openom'
 
       - name: Publish the native GitHub deployment
         env:
@@ -252,3 +359,265 @@ jobs:
             echo "- Commit: \`$PREVIEW_SHA\`"
             echo "- Artifact: \`$ARTIFACT_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - if: failure() && hashFiles('_artifact/route-rollback.json') != ''
+        name: Restore the previous route
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+        run: >-
+          node scripts/preview-route.mjs rollback
+          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --rollback-file _artifact/route-rollback.json
+
+  deploy-full:
+    if: needs.authorize.outputs.mode == 'full'
+    needs: [authorize, build, database]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: preview
+      deployment: false
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: preview-${{ needs.authorize.outputs.pull_request_number }}-${{ needs.authorize.outputs.commit_sha }}
+          path: _artifact
+
+      - name: Verify full-preview configuration
+        env:
+          AWS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.AWS_CLOUDFRONT_DISTRIBUTION_ID }}
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          AWS_PREVIEW_ARTIFACTS_BUCKET: ${{ vars.AWS_PREVIEW_ARTIFACTS_BUCKET }}
+          AWS_PREVIEW_EXECUTION_ROLE_ARN: ${{ vars.AWS_PREVIEW_EXECUTION_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_DATABASE_NAME: ${{ vars.NEON_DATABASE_NAME }}
+          NEON_PREVIEW_BASE_BRANCH_ID: ${{ vars.NEON_PREVIEW_BASE_BRANCH_ID }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
+          OPENOM_TEST_ACCOUNT_PASSPHRASE: ${{ vars.OPENOM_TEST_ACCOUNT_PASSPHRASE }}
+          PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+        run: node scripts/deployment-config.mjs --validate-job preview.deploy.deploy-full
+
+      - name: Verify and extract the immutable artifact
+        run: |
+          set -euo pipefail
+          (cd _artifact && sha256sum -c SHA256SUMS)
+          mkdir _site _database
+          tar -xzf _artifact/site.tar.gz -C _site
+          unsafe_entry="$(find _site -mindepth 1 ! -type f ! -type d -print -quit)"
+          if [[ -n "$unsafe_entry" ]]; then
+            echo 'Preview artifact contains a non-regular filesystem entry' >&2
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload the SHA-keyed Lambda artifact
+        env:
+          ARTIFACTS_BUCKET: ${{ vars.AWS_PREVIEW_ARTIFACTS_BUCKET }}
+          PREVIEW_SHA: ${{ needs.authorize.outputs.commit_sha }}
+          PREVIEW_SLUG: ${{ needs.authorize.outputs.slug }}
+        run: aws s3 cp _artifact/bootstrap.zip "s3://${ARTIFACTS_BUCKET}/previews/${PREVIEW_SLUG}/${PREVIEW_SHA}.zip"
+
+      - name: Resolve the migrated preview database
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_DATABASE_NAME: ${{ vars.NEON_DATABASE_NAME }}
+          NEON_PREVIEW_BASE_BRANCH_ID: ${{ vars.NEON_PREVIEW_BASE_BRANCH_ID }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
+          PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
+        run: >-
+          node scripts/preview-neon.mjs reconcile
+          --branch "preview/${{ needs.authorize.outputs.slug }}"
+          --source-branch "${{ needs.authorize.outputs.source_branch }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --output-file _database/database.json
+
+      - id: lambda
+        name: Reconcile the protected Lambda
+        env:
+          AWS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.AWS_CLOUDFRONT_DISTRIBUTION_ID }}
+          AWS_PREVIEW_ARTIFACTS_BUCKET: ${{ vars.AWS_PREVIEW_ARTIFACTS_BUCKET }}
+          AWS_PREVIEW_EXECUTION_ROLE_ARN: ${{ vars.AWS_PREVIEW_EXECUTION_ROLE_ARN }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
+          SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
+          SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+        run: |
+          set -euo pipefail
+          node scripts/preview-lambda.mjs reconcile \
+            --function-name "openom-preview-${{ needs.authorize.outputs.slug }}-api" \
+            --slug "${{ needs.authorize.outputs.slug }}" \
+            --source-branch "${{ needs.authorize.outputs.source_branch }}" \
+            --pull-request "${{ needs.authorize.outputs.pull_request_number }}" \
+            --commit "${{ needs.authorize.outputs.commit_sha }}" \
+            --artifact-key "previews/${{ needs.authorize.outputs.slug }}/${{ needs.authorize.outputs.commit_sha }}.zip" \
+            --database-config _database/database.json \
+            --object-store-key-prefix "previews/${{ needs.authorize.outputs.slug }}/" \
+            --app-url "${{ needs.authorize.outputs.app_url }}" \
+            --output-file _artifact/lambda-rollback.json
+          api_origin="$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync('_artifact/lambda-rollback.json')).apiOrigin)")"
+          echo "api_origin=$api_origin" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble the Supabase-backed static site
+        env:
+          API_URL: ${{ needs.authorize.outputs.api_url }}
+          APP_URL: ${{ needs.authorize.outputs.app_url }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+        run: |
+          set -euo pipefail
+          SITE_URL="$APP_URL" OPENOM_LANDING=live OPENOM_SERVER="$API_URL" \
+            OPENOM_AUTH_PROVIDER=supabase SUPABASE_URL="$SUPABASE_URL" \
+            SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLISHABLE_KEY" \
+            node apps/scripts/site-url.mjs _site
+          cat > _site/_headers <<EOF
+          /*
+            Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ${API_URL} ${SUPABASE_URL} ${R2_ENDPOINT}; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+            X-Content-Type-Options: nosniff
+            Referrer-Policy: no-referrer
+          /assets/*
+            Cache-Control: public, max-age=31536000, immutable
+          EOF
+
+      - name: Deploy the immutable Pages artifact
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          PREVIEW_SHA: ${{ needs.authorize.outputs.commit_sha }}
+          PREVIEW_SLUG: ${{ needs.authorize.outputs.slug }}
+        run: npm exec --yes --ignore-scripts --package=wrangler@4.147.0 -- wrangler pages deploy _site --project-name "$PAGES_PROJECT" --branch "$PREVIEW_SLUG" --commit-hash "$PREVIEW_SHA"
+
+      - name: Wait for the Pages branch origin
+        env:
+          PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          PREVIEW_SLUG: ${{ needs.authorize.outputs.slug }}
+        run: |
+          origin="https://${PREVIEW_SLUG}.${PAGES_PROJECT}.pages.dev/"
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "$origin" >/dev/null
+
+      - name: Publish the full-stack route
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+        run: >-
+          node scripts/preview-route.mjs put
+          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --commit "${{ needs.authorize.outputs.commit_sha }}"
+          --mode full
+          --api-origin "${{ steps.lambda.outputs.api_origin }}"
+          --rollback-file _artifact/route-rollback.json
+
+      - name: Accept the public app and API health endpoints
+        env:
+          API_URL: ${{ needs.authorize.outputs.api_url }}
+          APP_URL: ${{ needs.authorize.outputs.app_url }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "$API_URL/health" >/dev/null
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "$APP_URL" | grep -q '<title>openom'
+
+      - uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
+        with:
+          version: 11.20.0
+          run_install: false
+
+      - name: Install browser acceptance dependencies
+        run: |
+          pnpm --dir apps install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps exec playwright install --with-deps chromium
+
+      - name: Accept the deployed Supabase account round trip
+        env:
+          AWS_ACCESS_KEY_ID: ''
+          AWS_SECRET_ACCESS_KEY: ''
+          AWS_SESSION_TOKEN: ''
+          OPENOM_DEPLOYED_AUTH_ACCEPTANCE: '1'
+          OPENOM_DEPLOYED_APP_URL: ${{ needs.authorize.outputs.app_url }}
+          OPENOM_TEST_ACCOUNT_PASSPHRASE: ${{ vars.OPENOM_TEST_ACCOUNT_PASSPHRASE }}
+          SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
+          SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
+        run: pnpm --dir apps exec playwright test e2e/staging-auth.e2e.ts
+
+      - name: Publish the native GitHub deployment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          node scripts/preview-deployment.mjs
+          --app-url "${{ needs.authorize.outputs.app_url }}"
+          --commit "${{ needs.authorize.outputs.commit_sha }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --slug "${{ needs.authorize.outputs.slug }}"
+
+      - name: Write preview summary
+        env:
+          API_URL: ${{ needs.authorize.outputs.api_url }}
+          APP_URL: ${{ needs.authorize.outputs.app_url }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          PREVIEW_SHA: ${{ needs.authorize.outputs.commit_sha }}
+        run: |
+          {
+            echo '## Full-stack preview'
+            echo
+            echo "- App: $APP_URL"
+            echo "- API: $API_URL"
+            echo "- Commit: \`$PREVIEW_SHA\`"
+            echo "- Artifact: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - if: failure() && hashFiles('_artifact/route-rollback.json') != ''
+        name: Restore the previous route
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+        run: >-
+          node scripts/preview-route.mjs rollback
+          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
+          --rollback-file _artifact/route-rollback.json
+
+      - if: failure() && hashFiles('_artifact/lambda-rollback.json') != ''
+        name: Restore the previous Lambda alias
+        run: node scripts/preview-lambda.mjs rollback --rollback-file _artifact/lambda-rollback.json
+
+      - if: always()
+        name: Remove generated database credentials
+        run: rm -f _database/database.json
