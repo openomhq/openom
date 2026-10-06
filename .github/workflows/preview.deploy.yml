@@ -553,8 +553,33 @@ jobs:
           APP_URL: ${{ needs.authorize.outputs.app_url }}
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "$API_URL/health" >/dev/null
-          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "$APP_URL" | grep -q '<title>openom'
+          accept_endpoint() {
+            local name="$1"
+            local url="$2"
+            local expected="$3"
+            local body="$RUNNER_TEMP/preview-${name}.body"
+            local headers="$RUNNER_TEMP/preview-${name}.headers"
+            local status=''
+
+            for attempt in $(seq 1 40); do
+              status="$(curl --silent --show-error --output "$body" --dump-header "$headers" --write-out '%{http_code}' "$url" || true)"
+              if [[ "$status" == '200' ]] && grep -Fq "$expected" "$body"; then
+                return 0
+              fi
+              if [[ "$attempt" -lt 40 ]]; then
+                sleep 3
+              fi
+            done
+
+            echo "$name preview endpoint did not converge: HTTP ${status:-transport-error}" >&2
+            sed -n '1,20p' "$headers" >&2
+            head -c 1024 "$body" >&2
+            echo >&2
+            return 1
+          }
+
+          accept_endpoint api "$API_URL/health" 'openom ok'
+          accept_endpoint app "$APP_URL" '<title>openom'
 
       - uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
         with:
