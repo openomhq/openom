@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AccountSession, classifyAccountBindingState } from '../app/src/core/accountSession.js';
+import { AccountSession, classifyAccountBindingState, treeSyncAvailable } from '../app/src/core/accountSession.js';
 import { makeError } from '../app/src/core/errorModel.js';
 
 const identity = (memberId = 'member-local') => ({
@@ -291,6 +291,22 @@ describe('AccountSession default-deny identity classification', () => {
 });
 
 describe('AccountSession local custody and observable axes', () => {
+  it('permits tree sync only for a usable remote identity binding', () => {
+    const ready = stateShape({
+      auth: 'signedIn', account: 'unlocked', binding: 'bound', memberId: 'member-local',
+    });
+    expect(treeSyncAvailable(ready)).toBe(true);
+    expect(treeSyncAvailable({ ...ready, binding: 'backedUp' })).toBe(true);
+    expect(treeSyncAvailable({ ...ready, auth: 'signedOut' })).toBe(false);
+    expect(treeSyncAvailable({ ...ready, account: 'locked' })).toBe(false);
+    expect(treeSyncAvailable({ ...ready, binding: 'unbound' })).toBe(false);
+    expect(treeSyncAvailable({ ...ready, syncDisposition: 'localOnly' })).toBe(false);
+    expect(treeSyncAvailable({
+      ...ready,
+      conflict: { code: 'identity_conflict', reason: 'mismatch' },
+    })).toBe(false);
+  });
+
   it('initializes custody and keeps provider auth independent', async () => {
     const core = backend();
     const session = new AccountSession(core);

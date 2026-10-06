@@ -135,6 +135,16 @@ function sameState(left, right) {
     && JSON.stringify(left.conflict) === JSON.stringify(right.conflict);
 }
 
+/** A tree may use the managed remote only after auth and durable identity binding agree. */
+/** @param {AccountSessionState} state */
+export function treeSyncAvailable(state) {
+  return state.auth === 'signedIn'
+    && state.account === 'unlocked'
+    && state.binding !== 'unbound'
+    && state.syncDisposition === 'remote'
+    && state.conflict === null;
+}
+
 export class AccountSession {
   /** @type {AppCoreFacade} */
   #core;
