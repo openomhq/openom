@@ -1,0 +1,47 @@
+name: preview.instructions
+
+on:
+  pull_request_target:
+    types: [labeled]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request number to receive preview instructions
+        required: true
+        type: string
+
+concurrency:
+  group: preview-instructions-${{ github.event.pull_request.number || inputs.pull_request }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  comment:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request_target' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.label.name == 'preview' || github.event.label.name == 'full-preview'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+      - name: Reconcile preview deployment instructions
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request }}
+        run: node scripts/preview-instructions.mjs --pull-request "$PULL_REQUEST_NUMBER"
