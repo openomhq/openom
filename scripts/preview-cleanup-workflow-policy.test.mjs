@@ -44,7 +44,20 @@ test('cleanup serializes with the matching preview and scopes privilege to delet
   assert.match(jobs.cleanup, /^      deployment: false\s*$/m);
   assert.match(jobs.cleanup, /^      id-token: write\s*$/m);
   assert.match(jobs.cleanup, /^      deployments: write\s*$/m);
-  assert.doesNotMatch(cleanupSource, /pull-requests: write|issues: write/);
+  assert.doesNotMatch(jobs.resolve, /pull-requests: write|issues: write/);
   assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs cleanup/);
   assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs janitor/);
+  assert.doesNotMatch(jobs.cleanup, /issues: write|preview-cleanup-comment/);
+});
+
+test('cleanup comments run separately with only issue-write privilege', () => {
+  assert.match(
+    jobs.comment,
+    /^    if: needs\.resolve\.outputs\.mode == 'cleanup' && needs\.cleanup\.result == 'success'\s*$/m,
+  );
+  assert.match(jobs.comment, /^      contents: read\s*$/m);
+  assert.match(jobs.comment, /^      issues: write\s*$/m);
+  assert.doesNotMatch(jobs.comment, /environment:|id-token: write|deployments: write|secrets\.|vars\./);
+  assert.match(jobs.comment, /^          ref: main\s*$/m);
+  assert.match(jobs.comment, /node scripts\/preview-cleanup-comment\.mjs/);
 });

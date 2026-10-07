@@ -517,7 +517,8 @@
             "R2_BUCKET",
             "R2_ENDPOINT"
           ]
-        }
+        },
+        "comment": { "environment": false, "oidc": false, "secrets": [], "variables": [] }
       }
     },
     "staging.server": {

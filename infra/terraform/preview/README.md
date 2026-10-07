@@ -119,4 +119,6 @@ missed signals and abandoned resources. A maintainer can replay the same lifecyc
 pull request before touching resources. On branch rename, the old stack remains reachable until the newly
 named route exists, after which the janitor removes the old owned stack. The direct-upload Pages branch may
 remain as a static artifact; it has no application credentials or server-side data, and the official wildcard
-route no longer resolves to it after cleanup.
+route no longer resolves to it after cleanup. Successful per-pull-request cleanup creates or updates one
+bot-owned pull-request comment with the removed routes, Berlin-local completion time, and workflow run. Janitor
+runs do not comment.

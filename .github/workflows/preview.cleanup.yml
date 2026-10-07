@@ -128,3 +128,26 @@ jobs:
             cat cleanup.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+  comment:
+    needs:
+      - resolve
+      - cleanup
+    if: needs.resolve.outputs.mode == 'cleanup' && needs.cleanup.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Reconcile pull-request cleanup comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_API_URL: ${{ needs.resolve.outputs.api_url }}
+          PREVIEW_APP_URL: ${{ needs.resolve.outputs.app_url }}
+          PREVIEW_BRANCH: ${{ needs.resolve.outputs.source_branch }}
+          PREVIEW_PULL_REQUEST: ${{ needs.resolve.outputs.pull_request_number }}
+        run: node scripts/preview-cleanup-comment.mjs
