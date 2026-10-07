@@ -7,6 +7,7 @@ import { previewIdentity } from './preview-name.mjs';
 
 const APPROVAL_LABELS = new Set(['preview', 'full-preview']);
 const MAINTAINER_PERMISSIONS = new Set(['admin', 'maintain']);
+const LIFECYCLE_RUN_TITLE = /^preview lifecycle for PR #([1-9][0-9]*)$/;
 
 export class PreviewCleanupRequestError extends Error {
   constructor(code, message) {
@@ -40,7 +41,17 @@ async function githubJson(fetchImplementation, apiUrl, token, route) {
 
 function sameRepositoryPullRequest(pullRequest, repository) {
   if (pullRequest?.head?.repo?.full_name !== repository) return null;
+  if (pullRequest?.base?.repo?.full_name !== repository || pullRequest?.base?.ref !== 'main') return null;
   return pullRequest;
+}
+
+function lifecyclePullRequestNumber(workflowRun) {
+  const pullRequests = workflowRun?.pull_requests;
+  if (Array.isArray(pullRequests) && pullRequests.length === 1) {
+    return pullRequests[0].number;
+  }
+  const match = LIFECYCLE_RUN_TITLE.exec(workflowRun?.display_title ?? '');
+  return match ? Number(match[1]) : null;
 }
 
 function approved(pullRequest) {
@@ -75,10 +86,26 @@ export async function resolvePreviewCleanupRequest({
 
   let pullRequestNumber;
   let requireMaintainer = false;
+  let workflowRun = null;
   if (eventName === 'workflow_run') {
-    const pullRequests = event?.workflow_run?.pull_requests;
-    if (!Array.isArray(pullRequests) || pullRequests.length !== 1) return outputRecord('skip');
-    pullRequestNumber = pullRequests[0].number;
+    workflowRun = event?.workflow_run;
+    if (workflowRun?.conclusion !== 'success') {
+      throw new PreviewCleanupRequestError(
+        'lifecycle_signal_failed',
+        'preview lifecycle signal did not complete successfully',
+      );
+    }
+    if (!['pull_request', 'workflow_dispatch'].includes(workflowRun?.event)) {
+      throw new PreviewCleanupRequestError(
+        'invalid_lifecycle_event',
+        'preview lifecycle signal has an invalid source event',
+      );
+    }
+    pullRequestNumber = lifecyclePullRequestNumber(workflowRun);
+    if (workflowRun.event === 'workflow_dispatch') {
+      requireMaintainer = true;
+      triggeringActor = workflowRun?.triggering_actor?.login;
+    }
   } else if (eventName === 'workflow_dispatch') {
     pullRequestNumber = Number(manualPullRequest);
     requireMaintainer = true;
@@ -114,6 +141,14 @@ export async function resolvePreviewCleanupRequest({
     `/repos/${repository}/pulls/${pullRequestNumber}`,
   ), repository);
   if (!pullRequest) return outputRecord('skip');
+  if (workflowRun?.event === 'pull_request') {
+    if (pullRequest.head?.sha !== workflowRun.head_sha || pullRequest.head?.ref !== workflowRun.head_branch) {
+      throw new PreviewCleanupRequestError(
+        'lifecycle_pull_request_mismatch',
+        'preview lifecycle signal does not match the resolved pull request head',
+      );
+    }
+  }
   if (!requireMaintainer && pullRequest.state === 'open' && approved(pullRequest)) {
     return outputRecord('skip');
   }

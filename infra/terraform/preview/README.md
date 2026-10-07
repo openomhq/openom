@@ -114,7 +114,9 @@ staging application data.
 
 Removing the last preview-approval label or closing the pull request emits an unprivileged lifecycle signal.
 Trusted automation from `main` rechecks current GitHub state before cleanup. A scheduled janitor handles
-missed signals and abandoned resources. On branch rename, the old stack remains reachable until the newly
+missed signals and abandoned resources. A maintainer can replay the same lifecycle path by manually running
+`preview.lifecycle` from `main` with the pull-request number; the trusted cleanup validates both the actor and
+pull request before touching resources. On branch rename, the old stack remains reachable until the newly
 named route exists, after which the janitor removes the old owned stack. The direct-upload Pages branch may
 remain as a static artifact; it has no application credentials or server-side data, and the official wildcard
 route no longer resolves to it after cleanup.

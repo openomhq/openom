@@ -16,6 +16,11 @@ const jobs = workflowJobSources(cleanupSource);
 
 test('unprivileged pull-request lifecycle events carry no code or credentials', () => {
   assert.match(lifecycleSource, /^  pull_request:\s*$/m);
+  assert.match(lifecycleSource, /^  workflow_dispatch:\s*$/m);
+  assert.match(
+    lifecycleSource,
+    /^run-name: preview lifecycle for PR #\$\{\{ github\.event\.pull_request\.number \|\| inputs\.pull_request \}\}\s*$/m,
+  );
   assert.match(lifecycleSource, /^permissions: \{\}\s*$/m);
   assert.doesNotMatch(lifecycleSource, /actions\/checkout|secrets\.|vars\.|id-token:/);
 });

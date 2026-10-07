@@ -1,10 +1,17 @@
 name: preview.lifecycle
+run-name: preview lifecycle for PR #${{ github.event.pull_request.number || inputs.pull_request }}
 
 on:
   pull_request:
     types:
       - closed
       - unlabeled
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request number whose preview lifecycle should be reconciled
+        required: true
+        type: string
 
 permissions: {}
 
@@ -13,5 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - name: Validate lifecycle identity
+        env:
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request }}
+        run: |
+          if [[ ! "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'Pull request number must be a positive integer.' >&2
+            exit 1
+          fi
       - name: Signal preview lifecycle reconciliation
-        run: echo 'Preview lifecycle state changed; trusted cleanup will reconcile from the default branch.'
+        run: echo 'Preview lifecycle state changed; trusted cleanup will reconcile the validated pull request from the default branch.'
