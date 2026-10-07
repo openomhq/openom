@@ -38,6 +38,13 @@ can manage only `openom-preview-*-api` functions and log groups, `previews/*` ar
 single KVS. It can pass only the shared execution role, cannot mutate IAM roles, cannot modify the standing
 CloudFront distribution, and can create or update Function URLs only with `AWS_IAM` authorization.
 
+Ephemeral resources carry the source branch, pull-request number, and normalized slug as ownership metadata.
+Cleanup removes the public route first, waits for deterministic edge 404 responses, then deletes the owned
+Lambda and logs, Neon branch, exact object-store and artifact prefixes, and finally retires the GitHub
+deployment record. A nightly janitor reconciles tagged resources against currently approved same-repository
+pull requests. These machine-readable ownership and lifecycle records are also the intended observation
+surface for future operational tooling; they are not a substitute for provider-side authorization checks.
+
 ## Route contract
 
 The CloudFront KeyValueStore uses the normalized preview slug as its key. Its value is JSON:
@@ -103,3 +110,10 @@ The Supabase credentials in the `preview` environment must belong to a dedicated
 not the staging acceptance account. Deployed pull-request JavaScript participates in the browser acceptance;
 isolating the fixture prevents an approved but untrusted preview from acquiring credentials that can access
 staging application data.
+
+Removing the last preview-approval label or closing the pull request emits an unprivileged lifecycle signal.
+Trusted automation from `main` rechecks current GitHub state before cleanup. A scheduled janitor handles
+missed signals and abandoned resources. On branch rename, the old stack remains reachable until the newly
+named route exists, after which the janitor removes the old owned stack. The direct-upload Pages branch may
+remain as a static artifact; it has no application credentials or server-side data, and the official wildcard
+route no longer resolves to it after cleanup.

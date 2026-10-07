@@ -5,6 +5,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { previewIdentity } from './preview-name.mjs';
+
 const ALIAS = 'live';
 const URL_PERMISSION_SID = 'AllowCloudFrontInvokeFunctionUrl';
 const INVOKE_PERMISSION_SID = 'AllowCloudFrontInvokeFunction';
@@ -411,6 +413,74 @@ export function rollbackPreviewLambda({ execute = command, rollback }) {
   }
 }
 
+export function listPreviewLambdas({ execute = command }) {
+  const identities = [];
+  const response = runAws(execute, 'lambda', 'list-functions', [], 'Lambda preview listing');
+  if (!Array.isArray(response.Functions)) {
+    throw new PreviewLambdaError('invalid_aws_response', 'Lambda preview listing omitted functions');
+  }
+  for (const candidate of response.Functions) {
+    if (typeof candidate?.FunctionName !== 'string') continue;
+    if (!/^openom-preview-[a-z0-9][a-z0-9-]{0,44}-api$/.test(candidate.FunctionName)) continue;
+    const existing = getFunction(execute, candidate.FunctionName);
+    if (!existing) continue;
+    const tags = existing.Tags ?? {};
+    const identity = previewIdentity(
+      tags[OWNER_TAGS.sourceBranch],
+      tags[OWNER_TAGS.pullRequest],
+    );
+    if (candidate.FunctionName !== identity.lambdaName || tags[OWNER_TAGS.slug] !== identity.slug) {
+      throw new PreviewLambdaError(
+        'preview_lambda_owner_mismatch',
+        `Lambda ${candidate.FunctionName} has inconsistent preview ownership`,
+      );
+    }
+    assertFunctionOwner(existing, {
+      functionName: candidate.FunctionName,
+      pullRequestNumber: identity.pullRequestNumber,
+      slug: identity.slug,
+      sourceBranch: identity.sourceBranch,
+    });
+    identities.push(identity);
+  }
+  return identities;
+}
+
+export function deletePreviewLambda({
+  execute = command,
+  functionName,
+  pullRequestNumber,
+  slug,
+  sourceBranch,
+}) {
+  const config = {
+    functionName: requiredString(functionName, 'function name'),
+    pullRequestNumber: positiveInteger(pullRequestNumber, 'pull request number'),
+    slug: requiredString(slug, 'preview slug'),
+    sourceBranch: requiredString(sourceBranch, 'source branch'),
+  };
+  if (config.functionName !== `openom-preview-${config.slug}-api`) {
+    throw new PreviewLambdaError('invalid_lambda_name', 'function name does not match the preview slug');
+  }
+  if (!/^[a-z0-9][a-z0-9-]{0,44}$/.test(config.slug)) {
+    throw new PreviewLambdaError('invalid_preview_slug', 'preview slug has an invalid shape');
+  }
+  const existing = getFunction(execute, config.functionName);
+  if (!existing) return { deleted: false };
+  assertFunctionOwner(existing, config);
+  runAws(execute, 'lambda', 'delete-function', [
+    '--function-name', config.functionName,
+  ], 'Lambda preview deletion');
+  const logGroup = `/aws/lambda/${config.functionName}`;
+  const logDeletion = execute('aws', awsArguments('logs', 'delete-log-group', [
+    '--log-group-name', logGroup,
+  ]));
+  if (logDeletion.status !== 0 && !detail(logDeletion).includes('ResourceNotFoundException')) {
+    parseJson(logDeletion, 'CloudWatch preview log deletion');
+  }
+  return { deleted: true };
+}
+
 function argumentValue(args, name) {
   const index = args.indexOf(name);
   if (index === -1) return undefined;
@@ -427,8 +497,16 @@ export function runPreviewLambdaCli(args, environment = process.env) {
     rollbackPreviewLambda({ rollback: JSON.parse(readFileSync(rollbackFile, 'utf8')) });
     return { rolledBack: true };
   }
+  if (args[0] === 'delete') {
+    return deletePreviewLambda({
+      functionName: argumentValue(args, '--function-name'),
+      pullRequestNumber: argumentValue(args, '--pull-request'),
+      slug: argumentValue(args, '--slug'),
+      sourceBranch: argumentValue(args, '--source-branch'),
+    });
+  }
   if (args[0] !== 'reconcile') {
-    throw new PreviewLambdaError('missing_operation', 'usage: preview-lambda.mjs reconcile|rollback ...');
+    throw new PreviewLambdaError('missing_operation', 'usage: preview-lambda.mjs reconcile|rollback|delete ...');
   }
 
   const database = JSON.parse(readFileSync(argumentValue(args, '--database-config'), 'utf8'));
@@ -489,6 +567,7 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     const result = runPreviewLambdaCli(process.argv.slice(2));
     console.log(JSON.stringify({
       apiOrigin: result.apiOrigin,
+      deleted: result.deleted,
       functionName: result.functionName,
       installedVersion: result.installedVersion,
       rolledBack: result.rolledBack,

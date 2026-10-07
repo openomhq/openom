@@ -83,6 +83,13 @@ resource "aws_iam_role" "preview_deploy" {
 
 data "aws_iam_policy_document" "preview_deploy" {
   statement {
+    sid       = "ListPreviewFunctions"
+    effect    = "Allow"
+    actions   = ["lambda:ListFunctions"]
+    resources = ["*"]
+  }
+
+  statement {
     sid    = "PreviewFunctions"
     effect = "Allow"
     actions = [

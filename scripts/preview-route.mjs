@@ -116,6 +116,50 @@ function isPreconditionFailure(result) {
   return detail.includes('PreconditionFailedException') || detail.includes('PreconditionFailed');
 }
 
+function validatedRouteIdentity(record, key) {
+  if (!record || typeof record !== 'object') {
+    throw new PreviewRouteError('invalid_existing_route', `KVS route ${key} is malformed`);
+  }
+  const identity = previewIdentity(record.sourceBranch, record.pullRequestNumber);
+  if (record.slug !== key || identity.slug !== key) {
+    throw new PreviewRouteError('invalid_existing_route', `KVS route ${key} has inconsistent identity`);
+  }
+  assertPreviewSlugAvailable(identity, [record]);
+  return identity;
+}
+
+export function listPreviewRoutes({ execute = command, kvsArn }) {
+  const identities = [];
+  let nextToken;
+  do {
+    const values = ['--kvs-arn', kvsArn, '--max-results', '50'];
+    if (nextToken) values.push('--next-token', nextToken);
+    const response = successful(
+      execute('aws', awsArguments('list-keys', values)),
+      'KVS route listing',
+    );
+    if (!Array.isArray(response.Items)) {
+      throw new PreviewRouteError('invalid_aws_response', 'KVS route listing omitted items');
+    }
+    for (const item of response.Items) {
+      if (typeof item?.Key !== 'string' || typeof item?.Value !== 'string') {
+        throw new PreviewRouteError('invalid_existing_route', 'KVS route listing contains a malformed item');
+      }
+      let record;
+      try {
+        record = JSON.parse(item.Value);
+      } catch {
+        throw new PreviewRouteError('invalid_existing_route', `KVS route ${item.Key} is malformed`);
+      }
+      identities.push(validatedRouteIdentity(record, item.Key));
+    }
+    nextToken = typeof response.NextToken === 'string' && response.NextToken.length > 0
+      ? response.NextToken
+      : undefined;
+  } while (nextToken);
+  return identities;
+}
+
 export async function putPreviewRoute({
   apiOrigin,
   attempts = DEFAULT_ATTEMPTS,
@@ -187,6 +231,36 @@ export async function restorePreviewRoute({
   );
 }
 
+export async function deletePreviewRoute({
+  attempts = DEFAULT_ATTEMPTS,
+  execute = command,
+  identity,
+  kvsArn,
+  pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+}) {
+  if (!Number.isSafeInteger(attempts) || attempts < 1) {
+    throw new PreviewRouteError('invalid_attempt_count', 'attempt count must be a positive integer');
+  }
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const existing = getExistingRoute(execute, kvsArn, identity.slug);
+    if (!existing) return { deleted: false };
+    assertPreviewSlugAvailable(identity, [existing]);
+    const etag = currentEtag(execute, kvsArn);
+    const result = execute('aws', awsArguments('delete-key', [
+      '--kvs-arn', kvsArn,
+      '--if-match', etag,
+      '--key', identity.slug,
+    ]));
+    if (result.status === 0) return { deleted: true };
+    if (!isPreconditionFailure(result)) successful(result, 'KVS route deletion');
+    if (attempt + 1 < attempts) await pause(250 * (attempt + 1));
+  }
+  throw new PreviewRouteError(
+    'preview_route_cleanup_contention',
+    `KVS route ${identity.slug} could not be deleted after ${attempts} attempts`,
+  );
+}
+
 function argumentValue(args, name) {
   const index = args.indexOf(name);
   if (index === -1) return undefined;
@@ -217,10 +291,13 @@ export async function runPreviewRouteCli(args, environment = process.env) {
     });
     return rollback;
   }
+  if (operation === 'delete') {
+    return deletePreviewRoute({ identity, kvsArn });
+  }
   if (operation !== 'put') {
     throw new PreviewRouteError(
       'missing_operation',
-      'usage: preview-route.mjs put|rollback --branch <name> --pull-request <number> ...',
+      'usage: preview-route.mjs put|rollback|delete --branch <name> --pull-request <number> ...',
     );
   }
   const result = await putPreviewRoute({

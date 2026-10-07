@@ -58,6 +58,15 @@ test('only trusted deploy jobs receive OIDC and deployment write access', () => 
   assert.doesNotMatch(source, /pull-requests: write|issues: write/);
 });
 
+test('deployment inventory records the canonical source branch', () => {
+  for (const jobName of ['deploy-web', 'deploy-full']) {
+    const publish = jobs[jobName].match(
+      /node scripts\/preview-deployment\.mjs[\s\S]*?(?=\n\s{6}- name:|$)/,
+    )?.[0] ?? '';
+    assert.match(publish, /--source-branch "\$\{\{ needs\.authorize\.outputs\.source_branch \}\}"/);
+  }
+});
+
 test('full acceptance drops AWS credentials before deployed pull-request code runs', () => {
   assert.match(jobs['deploy-full'], /OPENOM_DEPLOYED_AUTH_ACCEPTANCE: '1'/);
   assert.match(jobs['deploy-full'], /AWS_ACCESS_KEY_ID: ''/);

@@ -1,0 +1,17 @@
+name: preview.lifecycle
+
+on:
+  pull_request:
+    types:
+      - closed
+      - unlabeled
+
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Signal preview lifecycle reconciliation
+        run: echo 'Preview lifecycle state changed; trusted cleanup will reconcile from the default branch.'

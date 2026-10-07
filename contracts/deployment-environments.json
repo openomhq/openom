@@ -479,6 +479,47 @@
         }
       }
     },
+    "preview.cleanup": {
+      "environment": "preview",
+      "file": ".github/workflows/preview.cleanup.yml",
+      "secrets": [
+        "NEON_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY"
+      ],
+      "variables": [
+        "AWS_CLOUDFRONT_KVS_ARN",
+        "AWS_DEPLOY_ROLE_ARN",
+        "AWS_PREVIEW_ARTIFACTS_BUCKET",
+        "AWS_REGION",
+        "NEON_PREVIEW_BASE_BRANCH_ID",
+        "NEON_PROJECT_ID",
+        "R2_BUCKET",
+        "R2_ENDPOINT"
+      ],
+      "jobs": {
+        "resolve": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
+        "cleanup": {
+          "environment": true,
+          "oidc": true,
+          "secrets": [
+            "NEON_API_KEY",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY"
+          ],
+          "variables": [
+            "AWS_CLOUDFRONT_KVS_ARN",
+            "AWS_DEPLOY_ROLE_ARN",
+            "AWS_PREVIEW_ARTIFACTS_BUCKET",
+            "AWS_REGION",
+            "NEON_PREVIEW_BASE_BRANCH_ID",
+            "NEON_PROJECT_ID",
+            "R2_BUCKET",
+            "R2_ENDPOINT"
+          ]
+        }
+      }
+    },
     "staging.server": {
       "environment": "staging",
       "file": ".github/workflows/staging.server.yml",

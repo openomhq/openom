@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  deletePreviewDatabase,
+  listPreviewDatabases,
   PreviewNeonError,
   reconcilePreviewDatabase,
   runPreviewNeonCli,
@@ -272,4 +274,79 @@ test('writes credentials only to the requested private output file', async () =>
     globalThis.fetch = originalFetch;
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('deletes only the owned preview branch and is idempotent when absent', async () => {
+  const calls = [];
+  let exists = true;
+  const fetchImplementation = async (urlValue, options) => {
+    const url = new URL(urlValue);
+    calls.push({ method: options.method, pathname: url.pathname });
+    if (options.method === 'GET') {
+      return response(listing(exists ? [baseBranch(), previewBranch()] : [baseBranch()]));
+    }
+    if (options.method === 'DELETE' && url.pathname.endsWith('/branches/br-preview-42')) {
+      exists = false;
+      return response(null, 204);
+    }
+    return response({}, 404);
+  };
+  const options = {
+    apiKey: CONFIG.apiKey,
+    baseBranchId: CONFIG.baseBranchId,
+    branchName: CONFIG.branchName,
+    fetchImplementation,
+    projectId: CONFIG.projectId,
+    pullRequestNumber: CONFIG.pullRequestNumber,
+    sourceBranch: CONFIG.sourceBranch,
+  };
+  assert.deepEqual(await deletePreviewDatabase(options), {
+    branchId: 'br-preview-42',
+    deleted: true,
+  });
+  assert.deepEqual(await deletePreviewDatabase(options), { deleted: false });
+  assert.deepEqual(calls.map((call) => call.method), ['GET', 'DELETE', 'GET']);
+});
+
+test('refuses to delete a Neon branch owned by another preview', async () => {
+  const fetchImplementation = async () => response(listing(
+    [baseBranch(), previewBranch()],
+    { ...OWNER, 'openom-preview-pull-request': '99' },
+  ));
+  await assert.rejects(
+    deletePreviewDatabase({
+      apiKey: CONFIG.apiKey,
+      baseBranchId: CONFIG.baseBranchId,
+      branchName: CONFIG.branchName,
+      fetchImplementation,
+      projectId: CONFIG.projectId,
+      pullRequestNumber: CONFIG.pullRequestNumber,
+      sourceBranch: CONFIG.sourceBranch,
+    }),
+    (error) => error instanceof PreviewNeonError && error.code === 'preview_neon_owner_mismatch',
+  );
+});
+
+test('discovers only annotated preview branches below the configured base', async () => {
+  const fetchImplementation = async () => response(listing([
+    baseBranch(),
+    previewBranch(),
+    { id: 'br-unrelated', name: 'feature/manual', parent_id: CONFIG.baseBranchId },
+  ]));
+  assert.deepEqual(await listPreviewDatabases({
+    apiKey: CONFIG.apiKey,
+    baseBranchId: CONFIG.baseBranchId,
+    fetchImplementation,
+    projectId: CONFIG.projectId,
+  }), [{
+    apiUrl: 'https://feat-ope-637.api.dev.openom.org',
+    appUrl: 'https://feat-ope-637.app.dev.openom.org',
+    lambdaName: 'openom-preview-feat-ope-637-api',
+    neonBranch: 'preview/feat-ope-637',
+    objectStoreKeyPrefix: 'previews/feat-ope-637/',
+    pagesBranch: 'feat-ope-637',
+    pullRequestNumber: 42,
+    slug: 'feat-ope-637',
+    sourceBranch: 'feat/ope-637',
+  }]);
 });

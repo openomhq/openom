@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { previewIdentity } from './preview-name.mjs';
 import {
+  deletePreviewRoute,
+  listPreviewRoutes,
   PreviewRouteError,
   putPreviewRoute,
   restorePreviewRoute,
@@ -181,4 +183,63 @@ test('refuses rollback after another deployment changed the route', async () => 
     }),
     (error) => error instanceof PreviewRouteError && error.code === 'preview_route_changed',
   );
+});
+
+test('deletes only the route owned by the requested pull request', async () => {
+  const existing = {
+    version: 1,
+    slug: IDENTITY.slug,
+    sourceBranch: IDENTITY.sourceBranch,
+    pullRequestNumber: IDENTITY.pullRequestNumber,
+  };
+  const operations = [];
+  const execute = (binary, args) => {
+    operations.push(commandName(args));
+    if (commandName(args) === 'get-key') return result(0, { Value: JSON.stringify(existing) });
+    if (commandName(args) === 'describe-key-value-store') return result(0, { ETag: 'KV1' });
+    return result(0, { ETag: 'KV2' });
+  };
+  assert.deepEqual(await deletePreviewRoute({
+    execute,
+    identity: IDENTITY,
+    kvsArn: 'arn:aws:cloudfront::123456789012:key-value-store/example',
+  }), { deleted: true });
+  assert.deepEqual(operations, ['get-key', 'describe-key-value-store', 'delete-key']);
+
+  await assert.rejects(
+    deletePreviewRoute({
+      execute: () => result(0, { Value: JSON.stringify({
+        ...existing,
+        pullRequestNumber: 99,
+      }) }),
+      identity: IDENTITY,
+      kvsArn: 'arn:aws:cloudfront::123456789012:key-value-store/example',
+    }),
+    (error) => error.code === 'preview_slug_collision',
+  );
+});
+
+test('treats an already absent route as cleaned', async () => {
+  const cleaned = await deletePreviewRoute({
+    execute: () => result(254, {}, 'ResourceNotFoundException'),
+    identity: IDENTITY,
+    kvsArn: 'arn:aws:cloudfront::123456789012:key-value-store/example',
+  });
+  assert.deepEqual(cleaned, { deleted: false });
+});
+
+test('discovers owned routes for lifecycle reconciliation', () => {
+  const record = {
+    version: 1,
+    slug: IDENTITY.slug,
+    sourceBranch: IDENTITY.sourceBranch,
+    pullRequestNumber: IDENTITY.pullRequestNumber,
+  };
+  const listed = listPreviewRoutes({
+    execute: () => result(0, {
+      Items: [{ Key: IDENTITY.slug, Value: JSON.stringify(record) }],
+    }),
+    kvsArn: 'arn:aws:cloudfront::123456789012:key-value-store/example',
+  });
+  assert.deepEqual(listed, [IDENTITY]);
 });

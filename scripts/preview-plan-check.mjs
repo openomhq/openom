@@ -64,6 +64,12 @@ assert.equal(
   'repo:openomhq@*/openom@*:environment:preview',
 );
 
+const deployPolicy = JSON.parse(resource('aws_iam_role_policy.preview_deploy').policy);
+const listFunctions = deployPolicy.Statement.find((statement) => statement.Sid === 'ListPreviewFunctions');
+assert.ok(listFunctions, 'preview deploy policy cannot discover Lambda functions');
+assert.equal(listFunctions.Action, 'lambda:ListFunctions');
+assert.equal(listFunctions.Resource, '*');
+
 const pages = resource('cloudflare_pages_project.preview');
 assert.equal(pages.name, 'openom-preview');
 assert.equal(pages.source, null);

@@ -56,10 +56,15 @@ jobs:
           node --test \
             scripts/ci-scope.test.mjs \
             scripts/ci-workflow-policy.test.mjs \
+            scripts/preview-cleanup-request.test.mjs \
+            scripts/preview-cleanup-workflow-policy.test.mjs \
+            scripts/preview-cleanup.test.mjs \
             scripts/preview-deployment.test.mjs \
             scripts/preview-instructions.test.mjs \
             scripts/preview-instructions-workflow-policy.test.mjs \
+            scripts/preview-lambda.test.mjs \
             scripts/preview-name.test.mjs \
+            scripts/preview-neon.test.mjs \
             scripts/preview-request.test.mjs \
             scripts/preview-route-reconcile.test.mjs \
             scripts/preview-router.test.mjs \

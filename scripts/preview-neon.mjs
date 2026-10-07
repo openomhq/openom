@@ -3,6 +3,8 @@ import { chmodSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { previewIdentity } from './preview-name.mjs';
+
 const DEFAULT_API_URL = 'https://console.neon.tech/api/v2';
 const RETRYABLE_STATUSES = new Set([423, 503]);
 const OWNERSHIP_KEYS = Object.freeze({
@@ -60,6 +62,7 @@ async function requestJson({
   pathname,
   query,
   attempts = 3,
+  allowNotFound = false,
   pause,
 }) {
   const url = new URL(`${apiUrl}${pathname}`);
@@ -91,7 +94,8 @@ async function requestJson({
       );
     }
 
-    if (response.ok) return responseJson(response, operation);
+    if (response.ok) return response.status === 204 ? null : responseJson(response, operation);
+    if (allowNotFound && response.status === 404) return null;
     if (RETRYABLE_STATUSES.has(response.status) && attempt + 1 < attempts) {
       await pause(250 * (attempt + 1));
       continue;
@@ -347,6 +351,79 @@ export async function reconcilePreviewDatabase(options) {
   };
 }
 
+export async function deletePreviewDatabase(options) {
+  const config = {
+    apiKey: requiredString(options.apiKey, 'NEON_API_KEY'),
+    apiUrl: requiredString(options.apiUrl ?? DEFAULT_API_URL, 'Neon API URL').replace(/\/$/, ''),
+    baseBranchId: assertIdentifier(options.baseBranchId, 'NEON_PREVIEW_BASE_BRANCH_ID'),
+    branchName: assertBranchName(options.branchName),
+    projectId: assertIdentifier(options.projectId, 'NEON_PROJECT_ID'),
+    pullRequestNumber: positiveInteger(options.pullRequestNumber, 'pull request number'),
+    sourceBranch: requiredString(options.sourceBranch, 'source branch'),
+  };
+  const client = {
+    apiKey: config.apiKey,
+    apiUrl: config.apiUrl,
+    attempts: options.attempts ?? 3,
+    fetchImplementation: options.fetchImplementation ?? fetch,
+    pause: options.pause ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
+    projectId: config.projectId,
+  };
+  const listing = await listBranches(client);
+  const matches = listing.branches.filter((branch) => branch.name === config.branchName);
+  if (matches.length === 0) return { deleted: false };
+  if (matches.length > 1) {
+    throw new PreviewNeonError(
+      'preview_neon_duplicate_branch',
+      `Neon returned multiple branches named ${config.branchName}`,
+    );
+  }
+  const branch = assertOwnedBranch(matches[0], ownerAnnotation(listing, matches[0].id), config);
+  await requestJson({
+    ...client,
+    allowNotFound: true,
+    method: 'DELETE',
+    operation: 'Neon preview branch deletion',
+    pathname: `/projects/${client.projectId}/branches/${branch.id}`,
+  });
+  return { branchId: branch.id, deleted: true };
+}
+
+export async function listPreviewDatabases(options) {
+  const client = {
+    apiKey: requiredString(options.apiKey, 'NEON_API_KEY'),
+    apiUrl: requiredString(options.apiUrl ?? DEFAULT_API_URL, 'Neon API URL').replace(/\/$/, ''),
+    attempts: options.attempts ?? 3,
+    fetchImplementation: options.fetchImplementation ?? fetch,
+    pause: options.pause ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
+    projectId: assertIdentifier(options.projectId, 'NEON_PROJECT_ID'),
+  };
+  const baseBranchId = assertIdentifier(options.baseBranchId, 'NEON_PREVIEW_BASE_BRANCH_ID');
+  const listing = await listBranches(client);
+  if (!listing.branches.some((branch) => branch.id === baseBranchId)) {
+    throw new PreviewNeonError(
+      'preview_neon_base_missing',
+      'configured preview base branch was not found in the Neon project',
+    );
+  }
+  return listing.branches
+    .filter((branch) => branch.name.startsWith('preview/'))
+    .map((branch) => {
+      const annotation = ownerAnnotation(listing, branch.id);
+      const identity = previewIdentity(
+        annotation?.[OWNERSHIP_KEYS.sourceBranch],
+        annotation?.[OWNERSHIP_KEYS.pullRequest],
+      );
+      if (branch.parent_id !== baseBranchId || branch.name !== identity.neonBranch) {
+        throw new PreviewNeonError(
+          'preview_neon_owner_mismatch',
+          `Neon branch ${branch.name} has inconsistent preview ownership`,
+        );
+      }
+      return identity;
+    });
+}
+
 function argumentValue(args, name) {
   const index = args.indexOf(name);
   if (index === -1) return undefined;
@@ -358,10 +435,20 @@ function argumentValue(args, name) {
 }
 
 export async function runPreviewNeonCli(args, environment = process.env) {
+  if (args[0] === 'delete') {
+    return deletePreviewDatabase({
+      apiKey: environment.NEON_API_KEY,
+      baseBranchId: environment.NEON_PREVIEW_BASE_BRANCH_ID,
+      branchName: argumentValue(args, '--branch'),
+      projectId: environment.NEON_PROJECT_ID,
+      pullRequestNumber: argumentValue(args, '--pull-request'),
+      sourceBranch: argumentValue(args, '--source-branch'),
+    });
+  }
   if (args[0] !== 'reconcile') {
     throw new PreviewNeonError(
       'missing_operation',
-      'usage: preview-neon.mjs reconcile --branch <name> --source-branch <name> --pull-request <number> --output-file <path>',
+      'usage: preview-neon.mjs reconcile|delete --branch <name> --source-branch <name> --pull-request <number> ...',
     );
   }
   const outputFile = argumentValue(args, '--output-file');

@@ -1,0 +1,130 @@
+name: preview.cleanup
+
+on:
+  workflow_run:
+    workflows:
+      - preview.lifecycle
+    types:
+      - completed
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request number to clean up
+        required: true
+        type: string
+      source_branch:
+        description: Previous source branch after a rename; otherwise leave empty
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      api_url: ${{ steps.request.outputs.api_url }}
+      app_url: ${{ steps.request.outputs.app_url }}
+      mode: ${{ steps.request.outputs.mode }}
+      pull_request_number: ${{ steps.request.outputs.pull_request_number }}
+      should_cleanup: ${{ steps.request.outputs.should_cleanup }}
+      slug: ${{ steps.request.outputs.slug }}
+      source_branch: ${{ steps.request.outputs.source_branch }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - id: request
+        name: Resolve cleanup from current repository state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_PULL_REQUEST: ${{ inputs.pull_request }}
+          INPUT_SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: node scripts/preview-cleanup-request.mjs
+
+  cleanup:
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'cleanup' || needs.resolve.outputs.mode == 'janitor'
+    concurrency:
+      group: preview-${{ needs.resolve.outputs.pull_request_number || 'janitor' }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: preview
+      deployment: false
+    permissions:
+      contents: read
+      deployments: write
+      id-token: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Verify preview-cleanup configuration
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          AWS_PREVIEW_ARTIFACTS_BUCKET: ${{ vars.AWS_PREVIEW_ARTIFACTS_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PREVIEW_BASE_BRANCH_ID: ${{ vars.NEON_PREVIEW_BASE_BRANCH_ID }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: node scripts/deployment-config.mjs --validate-job preview.cleanup.cleanup
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v5.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: cleanup
+        name: Remove preview routes and resources
+        env:
+          AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          AWS_PREVIEW_ARTIFACTS_BUCKET: ${{ vars.AWS_PREVIEW_ARTIFACTS_BUCKET }}
+          GITHUB_TOKEN: ${{ github.token }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PREVIEW_BASE_BRANCH_ID: ${{ vars.NEON_PREVIEW_BASE_BRANCH_ID }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ '${{ needs.resolve.outputs.mode }}' == 'janitor' ]]; then
+            node scripts/preview-cleanup.mjs janitor | tee cleanup.json
+          else
+            node scripts/preview-cleanup.mjs cleanup \
+              --branch '${{ needs.resolve.outputs.source_branch }}' \
+              --pull-request '${{ needs.resolve.outputs.pull_request_number }}' | tee cleanup.json
+          fi
+      - name: Write cleanup summary
+        env:
+          API_URL: ${{ needs.resolve.outputs.api_url }}
+          APP_URL: ${{ needs.resolve.outputs.app_url }}
+          CLEANUP_MODE: ${{ needs.resolve.outputs.mode }}
+        run: |
+          {
+            echo '## Preview cleanup'
+            echo
+            echo "- Mode: \`$CLEANUP_MODE\`"
+            if [[ -n "$APP_URL" ]]; then echo "- App removed: $APP_URL"; fi
+            if [[ -n "$API_URL" ]]; then echo "- API removed: $API_URL"; fi
+            echo '- Result:'
+            echo '```json'
+            cat cleanup.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

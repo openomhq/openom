@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  deletePreviewLambda,
   lambdaEnvironment,
+  listPreviewLambdas,
   PreviewLambdaError,
   reconcilePreviewLambda,
   rollbackPreviewLambda,
 } from './preview-lambda.mjs';
+import { previewIdentity } from './preview-name.mjs';
 
 const FUNCTION_NAME = 'openom-preview-feat-ope-637-api';
 const FUNCTION_ARN = `arn:aws:lambda:eu-central-1:841547768414:function:${FUNCTION_NAME}`;
@@ -328,4 +331,69 @@ test('builds a remote JWT environment without enabling dev auth or telemetry', (
   assert.equal(environment.Variables.AUTH, 'jwt');
   assert.equal(environment.Variables.STORAGE, 'cloud');
   assert.equal(environment.Variables.OPENOM_OTEL, undefined);
+});
+
+test('deletes only an owned preview function and its log group', () => {
+  const operations = [];
+  const execute = (binary, args) => {
+    operations.push(operation(args));
+    if (operation(args) === 'lambda get-function') {
+      return result(0, { Configuration: { FunctionArn: FUNCTION_ARN }, Tags: OWNER_TAGS });
+    }
+    return result();
+  };
+  assert.deepEqual(deletePreviewLambda({
+    execute,
+    functionName: FUNCTION_NAME,
+    pullRequestNumber: 42,
+    slug: 'feat-ope-637',
+    sourceBranch: 'feat/ope-637',
+  }), { deleted: true });
+  assert.deepEqual(operations, [
+    'lambda get-function',
+    'lambda delete-function',
+    'logs delete-log-group',
+  ]);
+});
+
+test('refuses to delete a preview function owned by another pull request', () => {
+  assert.throws(
+    () => deletePreviewLambda({
+      execute: () => result(0, {
+        Configuration: { FunctionArn: FUNCTION_ARN },
+        Tags: { ...OWNER_TAGS, 'openom-preview-pull-request': '99' },
+      }),
+      functionName: FUNCTION_NAME,
+      pullRequestNumber: 42,
+      slug: 'feat-ope-637',
+      sourceBranch: 'feat/ope-637',
+    }),
+    (error) => error instanceof PreviewLambdaError && error.code === 'preview_lambda_owner_mismatch',
+  );
+});
+
+test('discovers only owned ephemeral preview API functions', () => {
+  const operations = [];
+  const execute = (binary, args) => {
+    operations.push([operation(args), argument(args, '--function-name')]);
+    if (operation(args) === 'lambda list-functions') {
+      return result(0, {
+        Functions: [
+          { FunctionName: 'openom-preview-sink' },
+          { FunctionName: 'openom-preview-feat-ope-637-worker' },
+          { FunctionName: FUNCTION_NAME },
+        ],
+      });
+    }
+    if (operation(args) === 'lambda get-function') {
+      return result(0, { Configuration: { FunctionArn: FUNCTION_ARN }, Tags: OWNER_TAGS });
+    }
+    throw new Error(`unexpected command: ${operation(args)}`);
+  };
+
+  assert.deepEqual(listPreviewLambdas({ execute }), [previewIdentity('feat/ope-637', 42)]);
+  assert.deepEqual(operations, [
+    ['lambda list-functions', undefined],
+    ['lambda get-function', FUNCTION_NAME],
+  ]);
 });

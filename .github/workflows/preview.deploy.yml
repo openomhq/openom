@@ -343,6 +343,7 @@ jobs:
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --slug "${{ needs.authorize.outputs.slug }}"
+          --source-branch "${{ needs.authorize.outputs.source_branch }}"
 
       - name: Write preview summary
         env:
@@ -612,6 +613,7 @@ jobs:
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --slug "${{ needs.authorize.outputs.slug }}"
+          --source-branch "${{ needs.authorize.outputs.source_branch }}"
 
       - name: Write preview summary
         env:
