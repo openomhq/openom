@@ -50,13 +50,14 @@ test('cleanup serializes with the matching preview and scopes privilege to delet
   assert.doesNotMatch(jobs.cleanup, /issues: write|preview-cleanup-comment/);
 });
 
-test('cleanup comments run separately with only issue-write privilege', () => {
+test('cleanup comments run separately with only pull-request-write privilege', () => {
   assert.match(
     jobs.comment,
     /^    if: needs\.resolve\.outputs\.mode == 'cleanup' && needs\.cleanup\.result == 'success'\s*$/m,
   );
   assert.match(jobs.comment, /^      contents: read\s*$/m);
-  assert.match(jobs.comment, /^      issues: write\s*$/m);
+  assert.match(jobs.comment, /^      pull-requests: write\s*$/m);
+  assert.doesNotMatch(jobs.comment, /issues: write/);
   assert.doesNotMatch(jobs.comment, /environment:|id-token: write|deployments: write|secrets\.|vars\./);
   assert.match(jobs.comment, /^          ref: main\s*$/m);
   assert.match(jobs.comment, /node scripts\/preview-cleanup-comment\.mjs/);
