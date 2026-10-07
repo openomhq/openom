@@ -119,6 +119,8 @@ does not own accounts.
 The account backup state and active-tree transport state are displayed separately: a verified account backup may
 enable sync, but the UI claims `Synced` only after the open tree completes a successful tick. A failed tree upload
 is retained locally, retried by the driver, and surfaced as unavailable rather than hidden behind backup status.
+A fresh-device owner restore pulls tree data before its first projection is materialized; later ticks that fold
+remote entries re-materialize the active projection so another device's edits appear without a reload or re-unlock.
 The worker and native adapter expose the same account lifecycle boundary (create, unlock, recover, change
 passphrase, snapshot, verified candidate adoption, revoke credentials, public identity, and registration proof), while
 keeping every secret handle in Rust/wasm. Candidate adoption verifies the fetched wrapped bytes before replacing

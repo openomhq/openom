@@ -11,7 +11,7 @@ import { createNativeAppCore, isNativeHost } from './nativeAppCore.js';
 /** @typedef {import('./types/domain.js').DocId} DocId */
 /** @typedef {import('./remoteStore.js').RemoteStore} RemoteStore */
 /** @typedef {{ readonly state: 'synced', readonly at: number, readonly anomalies: number } | { readonly state: 'offline' | 'error', readonly error: unknown }} SyncDriverStatus */
-/** @typedef {{ readonly subscribeEdits?: (callback: () => void) => (() => void), readonly onStatus?: (status: SyncDriverStatus) => void, readonly onAuthError?: (error: unknown) => void, readonly onSecurity?: (error: unknown) => void, readonly onTick?: () => void, readonly cadenceMs?: number }} SyncDriverOptions */
+/** @typedef {{ readonly subscribeEdits?: (callback: () => void) => (() => void), readonly onRemoteChange?: () => Promise<void> | void, readonly onStatus?: (status: SyncDriverStatus) => void, readonly onAuthError?: (error: unknown) => void, readonly onSecurity?: (error: unknown) => void, readonly onTick?: () => void, readonly cadenceMs?: number }} SyncDriverOptions */
 /** @typedef {{ syncNow(): void, stop(): void }} SyncDriver */
 
 /** @type {Worker | null} */
@@ -165,7 +165,7 @@ export function startSyncDriver(
   docId,
   /** @type {SyncDriverOptions} */
   {
-    subscribeEdits, onStatus, onAuthError, onSecurity, onTick,
+    subscribeEdits, onRemoteChange, onStatus, onAuthError, onSecurity, onTick,
     cadenceMs = DEFAULT_SYNC_CADENCE_MS,
   } = {},
 ) /** @type {SyncDriver} */ {
@@ -203,7 +203,10 @@ export function startSyncDriver(
         onTick?.();
         const res = await worker.syncNow(docId);
         if (stopped) return;
-        if (res?.state === 'ok') onStatus?.({ state: 'synced', at: Date.now(), anomalies: res.anomalies ?? 0 });
+        if (res?.state === 'ok') {
+          if ((res.folded ?? 0) > 0) await onRemoteChange?.();
+          onStatus?.({ state: 'synced', at: Date.now(), anomalies: res.anomalies ?? 0 });
+        }
         else if (res?.state === 'error') routeError(res.error);
       } while (dirty && !stopped);
     } catch (e) {

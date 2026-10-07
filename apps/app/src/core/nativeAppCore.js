@@ -835,7 +835,9 @@ export function createNativeAppCore() {
           if (b) remote.push([localKey, bytes(b)]);
         }
         // The core owns the whole keyspace + head-monotonicity decision; this is a dumb ferry.
-        const { uploads, covered } = await call('core_sync', { doc: docId, remote, present, compactK });
+        const { uploads, folded, covered } = await call('core_sync', {
+          doc: docId, remote, present, compactK,
+        });
         // PUSH: re-key each upload back to the shared namespace; the CORE decided pointer; the snapshot carries
         // the covered header (a well-known object key — the one key the worker itself checks, for the header).
         for (const o of uploads) {
@@ -853,7 +855,7 @@ export function createNativeAppCore() {
             reportedFrontier.set(docId, sig);
           }
         } catch { /* advisory telemetry — swallow; gate 2 stays conservative without it */ }
-        return { state: 'ok', anomalies: await api.anomalies(docId) };
+        return { state: 'ok', anomalies: await api.anomalies(docId), folded };
       } catch (err) {
         return { state: 'error', error: err };
       } finally {

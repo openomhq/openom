@@ -2127,19 +2127,22 @@ async function runTick(c) {
       }
       c.treeEnsured = true; // reached only if createTree didn't throw (or wasn't needed)
     }
+    let folded = 0;
     do {
       c.dirty = false;
       if (c.aborted) break;
       await reconcileMembershipForTick(c); // keyring-before-data: authorize arrivals before data transfer
       if (c.aborted) break;
-      await syncData(c);
+      folded += await syncData(c);
     } while (c.dirty);
     if (c.aborted) return { state: 'stopped' }; // torn down mid-tick — don't touch the (maybe-freed) handle
     // OPE-293: flush a signer's pending advisory-summary assert (self-heals a crash/offline/pre-create-tree
     // 404 between the keyring change and the push). A no-op unless this device recorded an unconfirmed intent.
     await flushPendingMembership(c);
     // `anomalies` (quarantined / undecodable / §B3-rejected entries) is surfaced, never swallowed.
-    return { state: 'ok', pending: c.handle.pendingCount(), anomalies: c.handle.anomalies() };
+    return {
+      state: 'ok', pending: c.handle.pendingCount(), anomalies: c.handle.anomalies(), folded,
+    };
   } catch (e) {
     // The transport (main-thread RemoteStore) now throws plain AppErrors, which survive the Comlink hop back
     // into the worker; anything else (an internal tick bug) is normalized. The driver classifies on
@@ -2157,7 +2160,7 @@ async function runTick(c) {
 /** @param {Core} c @param {number} [compactKOverride] */
 async function syncData(c, compactKOverride) {
   const transport = transportFor(c.docId);
-  if (!transport) return;
+  if (!transport) return 0;
   // The compaction cadence: the global tick K, or a caller override. removeMember forces a compaction (K=1)
   // BEFORE rotating so the departing member's folded history is pinned into an owner-authored snapshot.
   const k = compactKOverride === undefined ? compactK : compactKOverride;
@@ -2173,19 +2176,19 @@ async function syncData(c, compactKOverride) {
   /** @type {Array<{ key: TreeObjectKey, bytes: TreeObjectBytes }>} */
   const remote = [];
   for (const { key } of listed) {
-    if (c.aborted) return;
+    if (c.aborted) return 0;
     const localKey = treeObjectKey(localPrefix + key.slice(remotePrefix.length));
     if (!toFetch.has(localKey)) continue;
     const bytes = await transport.blobGet(key);
     if (bytes) remote.push({ key: localKey, bytes });
   }
-  if (c.aborted) return;
+  if (c.aborted) return 0;
   // The tick also compacts once ≥ compactK log objects have accrued since the last snapshot (OPE-409): the
   // fresh snapshot is in `put`, and `covered` is the SUBSUMED frontier to send as the x-openom-covered header
   // on that snapshot upload (the server's GC gate 1 trusts only what a snapshot actually folds).
-  const { put, covered } = c.handle.sync(remote, present, k); // { put: [{ key, bytes, pointer }], folded, covered }
+  const { put, folded, covered } = c.handle.sync(remote, present, k); // { put: [{ key, bytes, pointer }], folded, covered }
   for (const o of put) {
-    if (c.aborted) return;
+    if (c.aborted) return folded;
     // Re-key the core's object back into the shared tree namespace for upload; the snapshot carries the header.
     const coveredHeader = o.key.endsWith('/snapshot') ? covered : undefined;
     await transport.blobPut(
@@ -2195,13 +2198,13 @@ async function syncData(c, compactKOverride) {
       coveredHeader,
     );
   }
-  if (c.aborted) return;
+  if (c.aborted) return folded;
   await persistBlobs(c);
 
   // Report our PULL frontier as gate-2 liveness telemetry so the server's log-GC keeps a slow member's
   // un-pulled log tail alive (OPE-409 gate 2). Advisory + best-effort: only when it advanced (change-guarded),
   // and a failure NEVER fails the tick — the floor just stays conservatively low for this member.
-  if (c.aborted) return;
+  if (c.aborted) return folded;
   const pull = c.handle.pullFrontier(); // JSON `{replica_hex: counter}`
   if (pull && pull !== '{}' && pull !== c.reportedFrontier) {
     try {
@@ -2211,6 +2214,7 @@ async function syncData(c, compactKOverride) {
       /* advisory telemetry — swallow; gate 2 stays conservative without this report */
     }
   }
+  return folded;
 }
 
 // Normalize EVERY exposed method's throws/rejections to a plain AppError BEFORE Comlink's own error handler
