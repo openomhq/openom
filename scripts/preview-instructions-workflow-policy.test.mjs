@@ -26,8 +26,8 @@ test('preview instructions use trusted label and manual triggers', () => {
 
 test('privileged comment automation executes only trusted main code', () => {
   assert.match(source, /^permissions: \{\}\s*$/m);
-  assert.match(jobs.comment, /^      issues: write\s*$/m);
-  assert.match(jobs.comment, /^      pull-requests: read\s*$/m);
+  assert.match(jobs.comment, /^      pull-requests: write\s*$/m);
+  assert.doesNotMatch(jobs.comment, /^      issues: write\s*$/m);
   assert.match(jobs.comment, /^          ref: main\s*$/m);
   assert.match(jobs.comment, /persist-credentials: false/);
   assert.doesNotMatch(
