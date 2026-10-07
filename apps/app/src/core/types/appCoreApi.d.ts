@@ -195,6 +195,7 @@ export interface SyncOk {
   readonly state: 'ok';
   readonly pending?: number;
   readonly anomalies: number;
+  readonly folded: number;
 }
 
 export interface SyncError {

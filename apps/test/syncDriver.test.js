@@ -125,4 +125,21 @@ describe('sync driver cadence', () => {
     expect(onTick).toHaveBeenCalledTimes(2);
     driver.stop();
   });
+
+  it('refreshes the active projection only when remote entries folded', async () => {
+    const results = [
+      { state: 'ok', anomalies: 0, folded: 2 },
+      { state: 'ok', anomalies: 0, folded: 0 },
+    ];
+    const worker = fakeWorker(() => results.shift());
+    const onRemoteChange = vi.fn(async () => {});
+    const driver = startSyncDriver(worker, 'doc', { onRemoteChange });
+
+    await advance(0);
+    expect(onRemoteChange).toHaveBeenCalledTimes(1);
+    driver.syncNow();
+    await advance(DEFAULT_SYNC_CADENCE_MS + 100);
+    expect(onRemoteChange).toHaveBeenCalledTimes(1);
+    driver.stop();
+  });
 });

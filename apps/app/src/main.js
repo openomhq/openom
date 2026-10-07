@@ -236,11 +236,14 @@ class App {
       selected.uuid,
       Comlink.proxy(remoteTransport(this.remote)),
     );
-    return this.worker.restoreTree({
+    const opened = await this.worker.restoreTree({
       treeId: selected.bytes,
       docId: selected.uuid,
       engine: selected.engine,
     });
+    const synced = await this.worker.syncNow(selected.uuid);
+    if (synced.state === 'error') throw synced.error;
+    return opened;
   }
 
   // Tree lookup is deliberately delayed until account unlock reveals the durable member id.
@@ -694,6 +697,14 @@ class App {
       this.worker.attachTransport(this.realDoc, Comlink.proxy(remoteTransport(remote)));
       this.syncDriver = startSyncDriver(this.worker, this.realDoc, {
         subscribeEdits: (fn) => this.tree.onRevision(fn),
+        onRemoteChange: async () => {
+          const tree = this.tree;
+          if (!tree) return;
+          await tree.hydrate();
+          if (tree !== this.tree) return;
+          if (!this.focusId) this.focusId = tree.allPeople()[0]?.id ?? null;
+          if (this.view === 'onboarding' && tree.allPeople().length > 0) this.view = 'tree';
+        },
         onStatus: (s) => { this.syncStatus = s; this.render(); },
         // A dead BACKEND session is independent of the vault (per-backend auth): record it for the UI
         // to offer re-connect; do NOT lock the passphrase core.
