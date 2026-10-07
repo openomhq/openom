@@ -11,7 +11,7 @@ Function URL is rejected with `403 Forbidden`.
 ## What it is — and is not
 
 This OpenTofu root owns the shared infrastructure used by every pull-request preview: the edge router,
-wildcard domains, Pages project, preview object-store bucket, artifact bucket, and tightly scoped deployment
+wildcard domains, Pages project, EU-jurisdiction preview object-store bucket, artifact bucket, and tightly scoped deployment
 roles. It does not create per-preview Lambda functions, Neon branches, Pages deployments, KVS entries, or
 object-store prefixes; preview workflows own those ephemeral resources.
 
@@ -29,8 +29,9 @@ that always returns 404; its only purpose is to supply the OAC configuration inh
 preview API origins.
 
 The Pages project is direct-upload only; GitHub integration is intentionally absent so untrusted pull-request
-code cannot trigger provider-side deployments. R2 permits presigned media access only from the preview app
-wildcard. Every server still receives its own `OBJECT_STORE_KEY_PREFIX`; CORS is not an isolation boundary.
+code cannot trigger provider-side deployments. R2 is created with the `eu` jurisdiction restriction and permits
+presigned media access only from the preview app wildcard. Every server still receives its own
+`OBJECT_STORE_KEY_PREFIX`; CORS is not an isolation boundary.
 Lambda artifacts are private, encrypted at rest, and expire after seven days.
 
 The shared API execution role can write only matching preview Lambda logs. The GitHub OIDC deployment role

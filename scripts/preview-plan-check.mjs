@@ -41,6 +41,7 @@ for (const address of ['cloudflare_dns_record.preview_app', 'cloudflare_dns_reco
 }
 
 const cors = resource('cloudflare_r2_bucket_cors.preview').rules[0];
+assert.equal(resource('cloudflare_r2_bucket_cors.preview').jurisdiction, 'eu');
 assert.deepEqual(cors.allowed.origins, ['https://*.app.dev.openom.org']);
 assert.deepEqual(cors.allowed.methods, ['GET', 'HEAD', 'PUT']);
 assert.deepEqual(cors.allowed.headers, ['content-type', 'x-amz-checksum-sha256']);
@@ -76,6 +77,8 @@ assert.equal(pages.source, null);
 
 const objectStore = resource('cloudflare_r2_bucket.preview');
 assert.equal(objectStore.name, 'openom-preview');
+assert.equal(objectStore.jurisdiction, 'eu');
+assert.ok(['EEUR', 'WEUR'].includes(objectStore.location.toUpperCase()));
 assert.equal(objectStore.storage_class, 'Standard');
 
 process.stdout.write('[Preview] standing infrastructure plan satisfies the security contract\n');
