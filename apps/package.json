@@ -18,6 +18,7 @@
     "test:e2e:account": "node ../scripts/account-acceptance.mjs",
     "test:e2e:durable-identity": "node ../scripts/durable-identity-acceptance.mjs",
     "test:e2e:supabase-auth": "node ../scripts/supabase-auth-acceptance.mjs",
+    "preview:open": "node scripts/open-preview.mjs",
     "typecheck": "node ../scripts/typecheck.mjs",
     "check:locales": "node scripts/check-locales.mjs",
     "serve": "node scripts/serve.mjs",

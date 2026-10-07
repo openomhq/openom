@@ -7,7 +7,7 @@
 (the module-level `§`-refs — SERVER-DATA-FORMAT, the launch-gate design — live inline in the
 `core/` files they govern, not in one apps/app-level doc)
 
-**Last updated:** 2026-09-24
+**Last updated:** 2026-10-07
 
 ## Run / verify
 
@@ -25,7 +25,16 @@ pnpm test:e2e               # Playwright, browser-driven (excludes @integration-
 pnpm test:e2e:full          # Playwright, the full suite including @integration specs
 pnpm typecheck              # strict main-thread + Web Worker checking, without emitting build output
 pnpm check:locales          # every locale in app/locales/ carries the same keys as en.ftl
+pnpm preview:open           # opens this branch's deployed preview in a persistent Chromium profile
 ```
+
+`pnpm preview:open` requires a non-`main` branch and derives the preview hostname with the same
+normalization used by deployment. It resolves the current edge through encrypted DNS, verifies that the
+preview is online, and stores its browser profile under the repository's ignored `tmp/playwright/` directory.
+It runs the preview in headless Chromium and opens an interactive DevTools screencast in the system browser;
+stop that local session with `Ctrl+C`. Use `pnpm preview:open --profile <name>` for an independent login and
+local-storage context. Developers without local browser filtering can instead open the pull request's deployment
+URL normally.
 
 `pnpm test:core` runs vitest **inside a Docker container** (`node ../scripts/vitest.mjs`) — not
 because of cargo, but because this host's supply-chain policy makes `pnpm install`'s esbuild

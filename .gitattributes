@@ -3,3 +3,6 @@
 # && buf generate`). Mark it generated so review tools collapse it and language
 # stats ignore it.
 packages/openom-protocol/src/generated/** linguist-generated=true
+
+# Node executes these files directly; keep shebangs portable and Vitest-importable on Windows.
+*.mjs text eol=lf
