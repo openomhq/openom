@@ -37,7 +37,7 @@ output "preview_object_store" {
   description = "Non-secret R2 endpoint and bucket consumed by preview deployment workflows."
   value = {
     bucket   = cloudflare_r2_bucket.preview.name
-    endpoint = "https://${var.cloudflare_account_id}.r2.cloudflarestorage.com"
+    endpoint = "https://${var.cloudflare_account_id}.eu.r2.cloudflarestorage.com"
     region   = "auto"
   }
 }

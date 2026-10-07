@@ -1,13 +1,15 @@
 resource "cloudflare_r2_bucket" "preview" {
   account_id    = var.cloudflare_account_id
   name          = var.r2_bucket_name
+  jurisdiction  = "eu"
   location      = "weur"
   storage_class = "Standard"
 }
 
 resource "cloudflare_r2_bucket_cors" "preview" {
-  account_id  = var.cloudflare_account_id
-  bucket_name = cloudflare_r2_bucket.preview.name
+  account_id   = var.cloudflare_account_id
+  bucket_name  = cloudflare_r2_bucket.preview.name
+  jurisdiction = "eu"
 
   rules = [{
     id = "preview-app-media"
