@@ -32,6 +32,7 @@ jobs:
     outputs:
       api_url: ${{ steps.request.outputs.api_url }}
       app_url: ${{ steps.request.outputs.app_url }}
+      desired_mode: ${{ steps.request.outputs.desired_mode }}
       mode: ${{ steps.request.outputs.mode }}
       pull_request_number: ${{ steps.request.outputs.pull_request_number }}
       should_cleanup: ${{ steps.request.outputs.should_cleanup }}
@@ -52,7 +53,7 @@ jobs:
 
   cleanup:
     needs: resolve
-    if: needs.resolve.outputs.mode == 'cleanup' || needs.resolve.outputs.mode == 'janitor'
+    if: needs.resolve.outputs.mode == 'cleanup' || needs.resolve.outputs.mode == 'janitor' || needs.resolve.outputs.mode == 'reconcile'
     concurrency:
       group: preview-${{ needs.resolve.outputs.pull_request_number || 'janitor' }}
       cancel-in-progress: false
@@ -66,6 +67,8 @@ jobs:
       deployments: write
       id-token: write
       pull-requests: read
+    outputs:
+      comments: ${{ steps.cleanup.outputs.comments }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
         with:
@@ -90,7 +93,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
       - id: cleanup
-        name: Remove preview routes and resources
+        name: Reconcile preview routes and resources
         env:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
           AWS_PREVIEW_ARTIFACTS_BUCKET: ${{ vars.AWS_PREVIEW_ARTIFACTS_BUCKET }}
@@ -102,38 +105,75 @@ jobs:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
           R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PREVIEW_DESIRED_MODE: ${{ needs.resolve.outputs.desired_mode }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.resolve.outputs.source_branch }}
         run: |
           set -euo pipefail
-          if [[ '${{ needs.resolve.outputs.mode }}' == 'janitor' ]]; then
-            node scripts/preview-cleanup.mjs janitor | tee cleanup.json
-          else
-            node scripts/preview-cleanup.mjs cleanup \
-              --branch "$PREVIEW_SOURCE_BRANCH" \
-              --pull-request '${{ needs.resolve.outputs.pull_request_number }}' | tee cleanup.json
-          fi
+          case '${{ needs.resolve.outputs.mode }}' in
+            janitor)
+              node scripts/preview-cleanup.mjs janitor | tee cleanup.json
+              ;;
+            reconcile)
+              node scripts/preview-cleanup.mjs reconcile \
+                --branch "$PREVIEW_SOURCE_BRANCH" \
+                --pull-request '${{ needs.resolve.outputs.pull_request_number }}' \
+                --desired-mode "$PREVIEW_DESIRED_MODE" | tee cleanup.json
+              ;;
+            cleanup)
+              node scripts/preview-cleanup.mjs cleanup \
+                --branch "$PREVIEW_SOURCE_BRANCH" \
+                --pull-request '${{ needs.resolve.outputs.pull_request_number }}' \
+                --desired-mode "$PREVIEW_DESIRED_MODE" | tee cleanup.json
+              ;;
+          esac
+          comments="$(node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync('cleanup.json')); process.stdout.write(JSON.stringify(value.comments ?? []))")"
+          echo "comments=$comments" >> "$GITHUB_OUTPUT"
       - name: Write cleanup summary
         env:
-          API_URL: ${{ needs.resolve.outputs.api_url }}
-          APP_URL: ${{ needs.resolve.outputs.app_url }}
           CLEANUP_MODE: ${{ needs.resolve.outputs.mode }}
         run: |
           {
             echo '## Preview cleanup'
             echo
             echo "- Mode: \`$CLEANUP_MODE\`"
-            if [[ -n "$APP_URL" ]]; then echo "- App removed: $APP_URL"; fi
-            if [[ -n "$API_URL" ]]; then echo "- API removed: $API_URL"; fi
             echo '- Result:'
             echo '```json'
             cat cleanup.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  instructions:
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'reconcile' && needs.resolve.outputs.desired_mode != 'none'
+    concurrency:
+      group: preview-instructions-${{ needs.resolve.outputs.pull_request_number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+      - name: Reconcile preview deployment instructions
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PREVIEW_PULL_REQUEST: ${{ needs.resolve.outputs.pull_request_number }}
+        run: node scripts/preview-instructions.mjs --pull-request "$PREVIEW_PULL_REQUEST"
+
   comment:
     needs:
       - resolve
       - cleanup
-    if: needs.resolve.outputs.mode == 'cleanup' && needs.cleanup.result == 'success'
+    if: needs.cleanup.result == 'success' && needs.cleanup.outputs.comments != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -147,8 +187,5 @@ jobs:
       - name: Reconcile pull-request cleanup comment
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PREVIEW_API_URL: ${{ needs.resolve.outputs.api_url }}
-          PREVIEW_APP_URL: ${{ needs.resolve.outputs.app_url }}
-          PREVIEW_BRANCH: ${{ needs.resolve.outputs.source_branch }}
-          PREVIEW_PULL_REQUEST: ${{ needs.resolve.outputs.pull_request_number }}
+          PREVIEW_CLEANUPS: ${{ needs.cleanup.outputs.comments }}
         run: node scripts/preview-cleanup-comment.mjs

@@ -9,6 +9,7 @@ import {
   janitorPreviewResources,
   listDesiredPullRequests,
   PreviewCleanupError,
+  reconcilePreviewResources,
   selectOrphanedPreviews,
 } from './preview-cleanup.mjs';
 
@@ -87,7 +88,7 @@ test('keeps deletion commands inside exact preview prefixes', () => {
   assert.ok(calls[1].args.includes('s3://openom-preview-artifacts/previews/feat-ope-638/'));
 });
 
-test('lists desired modes only for approved same-repository pull requests', async () => {
+test('lists desired modes for every open same-repository pull request', async () => {
   const fetchImplementation = async () => ({
     ok: true,
     status: 200,
@@ -104,7 +105,55 @@ test('lists desired modes only for approved same-repository pull requests', asyn
     repository: 'openomhq/openom',
     token: 'token',
   });
-  assert.deepEqual(listed.map(({ identity, mode }) => [identity.pullRequestNumber, mode]), [[1, 'web']]);
+  assert.deepEqual(listed.map(({ identity, mode }) => [identity.pullRequestNumber, mode]), [
+    [1, 'web'],
+    [3, 'none'],
+  ]);
+});
+
+test('reconciles actual resources against the current desired mode', async () => {
+  const scenarios = [
+    {
+      desiredMode: 'full',
+      discovered: { database: [IDENTITY], deployment: [IDENTITY], lambda: [IDENTITY], route: [{ identity: IDENTITY, mode: 'full' }] },
+      expectedCleanup: false,
+    },
+    {
+      desiredMode: 'web',
+      discovered: { database: [], deployment: [IDENTITY], lambda: [], route: [{ identity: IDENTITY, mode: 'web' }] },
+      expectedCleanup: false,
+    },
+    {
+      desiredMode: 'web',
+      discovered: { database: [IDENTITY], deployment: [IDENTITY], lambda: [IDENTITY], route: [{ identity: IDENTITY, mode: 'full' }] },
+      expectedCleanup: true,
+    },
+    {
+      desiredMode: 'none',
+      discovered: { database: [], deployment: [IDENTITY], lambda: [], route: [{ identity: IDENTITY, mode: 'web' }] },
+      expectedCleanup: true,
+    },
+  ];
+  for (const scenario of scenarios) {
+    const cleaned = [];
+    const result = await reconcilePreviewResources({
+      desiredMode: scenario.desiredMode,
+      environment: ENVIRONMENT,
+      identity: IDENTITY,
+      operations: {
+        cleanup: async ({ identity }) => {
+          cleaned.push(identity.slug);
+          return { identity };
+        },
+        discover: async () => scenario.discovered,
+      },
+    });
+    assert.equal(cleaned.length > 0, scenario.expectedCleanup);
+    assert.equal(result.comments.length > 0, scenario.expectedCleanup);
+    if (scenario.desiredMode === 'web' && scenario.expectedCleanup) {
+      assert.equal(result.comments[0].redeployMode, 'web');
+    }
+  }
 });
 
 test('janitor removes full-stack resources that exceed preview-only approval', () => {
@@ -163,6 +212,31 @@ test('janitor cleans closed and unapproved resource owners once', async () => {
   assert.deepEqual(cleaned, ['feat-orphan']);
   assert.equal(result.discovered, 2);
   assert.equal(result.cleaned.length, 1);
+  assert.deepEqual(result.comments, []);
+});
+
+test('janitor comments when it cleans a downgraded open pull request', async () => {
+  const identity = previewIdentity('feat/web-only', 7);
+  const result = await janitorPreviewResources({
+    environment: ENVIRONMENT,
+    operations: {
+      cleanup: async ({ identity: cleanedIdentity }) => ({ identity: cleanedIdentity }),
+      discover: async () => ({
+        database: [identity],
+        deployment: [identity],
+        lambda: [identity],
+        route: [{ identity, mode: 'full' }],
+      }),
+      listDesired: async () => [{ identity, mode: 'web' }],
+    },
+  });
+  assert.deepEqual(result.comments, [{
+    apiUrl: identity.apiUrl,
+    appUrl: identity.appUrl,
+    branch: identity.sourceBranch,
+    pullRequestNumber: 7,
+    redeployMode: 'web',
+  }]);
 });
 
 test('janitor resumes cleanup when only the deployment inventory survived', async () => {

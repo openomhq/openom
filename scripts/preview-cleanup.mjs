@@ -257,7 +257,6 @@ export async function listDesiredPullRequests({
     for (const pull of pulls) {
       if (pull.head?.repo?.full_name !== repository) continue;
       const mode = desiredPreviewMode(pull);
-      if (mode === 'none') continue;
       identities.push({ identity: previewIdentity(pull.head.ref, pull.number), mode });
     }
     if (pulls.length < 100) break;
@@ -267,6 +266,10 @@ export async function listDesiredPullRequests({
 
 function identityKey(identity) {
   return `${identity.pullRequestNumber}:${identity.sourceBranch}`;
+}
+
+function desiredRecord(value) {
+  return value.identity ? value : { identity: value, mode: 'full' };
 }
 
 function mergeDiscoveredIdentities(groups) {
@@ -295,8 +298,8 @@ function mergeDiscoveredIdentities(groups) {
 
 export function selectOrphanedPreviews({ desired, discovered }) {
   const desiredByPullRequest = new Map(desired.map((value) => {
-    const desired = value.identity ? value : { identity: value, mode: 'full' };
-    return [desired.identity.pullRequestNumber, desired];
+    const record = desiredRecord(value);
+    return [record.identity.pullRequestNumber, record];
   }));
   const readyReplacements = new Set(discovered
     .filter((record) => record.sources.has('route'))
@@ -304,6 +307,7 @@ export function selectOrphanedPreviews({ desired, discovered }) {
   return discovered.filter((record) => {
     const expected = desiredByPullRequest.get(record.identity.pullRequestNumber);
     if (!expected) return true;
+    if (expected.mode === 'none') return true;
     if (identityKey(expected.identity) !== identityKey(record.identity)) {
       return readyReplacements.has(identityKey(expected.identity));
     }
@@ -314,14 +318,14 @@ export function selectOrphanedPreviews({ desired, discovered }) {
   });
 }
 
-export async function janitorPreviewResources({
-  environment = process.env,
-  execute = command,
-  fetchImplementation = fetch,
-  operations = {},
+async function discoverPreviewResourceGroups({
+  config,
+  execute,
+  fetchImplementation,
+  discover,
 }) {
-  const config = cleanupConfiguration(environment);
-  const discover = operations.discover ?? (async () => ({
+  if (discover) return discover();
+  return {
     database: await listPreviewDatabases({
       apiKey: config.neonApiKey,
       baseBranchId: config.neonBaseBranchId,
@@ -336,7 +340,91 @@ export async function janitorPreviewResources({
     }),
     lambda: listPreviewLambdas({ execute }),
     route: listPreviewRouteRecords({ execute, kvsArn: config.kvsArn }),
-  }));
+  };
+}
+
+function cleanupComment(identity, desiredMode) {
+  return {
+    apiUrl: identity.apiUrl,
+    appUrl: identity.appUrl,
+    branch: identity.sourceBranch,
+    pullRequestNumber: identity.pullRequestNumber,
+    redeployMode: desiredMode === 'web' ? 'web' : null,
+  };
+}
+
+async function cleanupRecords({
+  cleanup,
+  desiredByPullRequest,
+  environment,
+  execute,
+  fetchImplementation,
+  records,
+}) {
+  const cleaned = [];
+  const comments = [];
+  for (const record of records) {
+    const desiredMode = desiredByPullRequest.get(record.identity.pullRequestNumber)?.mode ?? 'none';
+    cleaned.push(await cleanup({
+      environment,
+      execute,
+      fetchImplementation,
+      identity: record.identity,
+    }));
+    if (desiredByPullRequest.has(record.identity.pullRequestNumber)) {
+      comments.push(cleanupComment(record.identity, desiredMode));
+    }
+  }
+  return { cleaned, comments };
+}
+
+export async function reconcilePreviewResources({
+  desiredMode,
+  environment = process.env,
+  execute = command,
+  fetchImplementation = fetch,
+  identity,
+  operations = {},
+}) {
+  if (!['none', 'web', 'full'].includes(desiredMode)) {
+    throw new PreviewCleanupError('invalid_desired_mode', 'desired preview mode must be none, web, or full');
+  }
+  const config = cleanupConfiguration(environment);
+  const groups = await discoverPreviewResourceGroups({
+    config,
+    discover: operations.discover,
+    execute,
+    fetchImplementation,
+  });
+  const discovered = mergeDiscoveredIdentities(groups)
+    .filter((record) => record.identity.pullRequestNumber === identity.pullRequestNumber);
+  const desired = [{ identity, mode: desiredMode }];
+  const selected = selectOrphanedPreviews({ desired, discovered });
+  const cleanup = operations.cleanup ?? cleanupPreview;
+  const { cleaned, comments } = await cleanupRecords({
+    cleanup,
+    desiredByPullRequest: new Map([[identity.pullRequestNumber, desired[0]]]),
+    environment,
+    execute,
+    fetchImplementation,
+    records: selected,
+  });
+  return {
+    cleaned,
+    comments,
+    desiredMode,
+    discovered: discovered.length,
+    pullRequestNumber: identity.pullRequestNumber,
+  };
+}
+
+export async function janitorPreviewResources({
+  environment = process.env,
+  execute = command,
+  fetchImplementation = fetch,
+  operations = {},
+}) {
+  const config = cleanupConfiguration(environment);
   const listDesired = operations.listDesired ?? listDesiredPullRequests;
   const cleanup = operations.cleanup ?? cleanupPreview;
   const [desired, groups] = await Promise.all([
@@ -346,20 +434,31 @@ export async function janitorPreviewResources({
       repository: config.githubRepository,
       token: config.githubToken,
     }),
-    discover(),
+    discoverPreviewResourceGroups({
+      config,
+      discover: operations.discover,
+      execute,
+      fetchImplementation,
+    }),
   ]);
   const discovered = mergeDiscoveredIdentities(groups);
   const orphaned = selectOrphanedPreviews({ desired, discovered });
-  const cleaned = [];
-  for (const record of orphaned) {
-    cleaned.push(await cleanup({
-      environment,
-      execute,
-      fetchImplementation,
-      identity: record.identity,
-    }));
-  }
+  const desiredByPullRequest = new Map(
+    desired.map((value) => {
+      const record = desiredRecord(value);
+      return [record.identity.pullRequestNumber, record];
+    }),
+  );
+  const { cleaned, comments } = await cleanupRecords({
+    cleanup,
+    desiredByPullRequest,
+    environment,
+    execute,
+    fetchImplementation,
+    records: orphaned,
+  });
   return {
+    comments,
     desired: desired.length,
     cleaned,
     discovered: discovered.length,
@@ -378,17 +477,26 @@ function argumentValue(args, name) {
 
 export async function runPreviewCleanupCli(args, environment = process.env) {
   if (args[0] === 'janitor') return janitorPreviewResources({ environment });
-  if (args[0] !== 'cleanup') {
+  if (!['cleanup', 'reconcile'].includes(args[0])) {
     throw new PreviewCleanupError(
       'missing_operation',
-      'usage: preview-cleanup.mjs cleanup --branch <name> --pull-request <number> | janitor',
+      'usage: preview-cleanup.mjs cleanup|reconcile --branch <name> --pull-request <number> --desired-mode <mode> | janitor',
     );
   }
   const identity = previewIdentity(
     argumentValue(args, '--branch'),
     argumentValue(args, '--pull-request'),
   );
-  return cleanupPreview({ environment, identity });
+  const desiredMode = argumentValue(args, '--desired-mode') ?? 'none';
+  if (args[0] === 'reconcile') {
+    return reconcilePreviewResources({ desiredMode, environment, identity });
+  }
+  const result = await cleanupPreview({ environment, identity });
+  return {
+    ...result,
+    comments: [cleanupComment(identity, desiredMode)],
+    desiredMode,
+  };
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;

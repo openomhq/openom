@@ -7,7 +7,7 @@ import { previewIdentity } from './preview-name.mjs';
 import { desiredPreviewMode } from './preview-policy.mjs';
 
 const MAINTAINER_PERMISSIONS = new Set(['admin', 'maintain']);
-const LIFECYCLE_RUN_TITLE = /^preview lifecycle for PR #([1-9][0-9]*)(?: after removing (.+))?$/;
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 export class PreviewCleanupRequestError extends Error {
   constructor(code, message) {
@@ -45,22 +45,44 @@ function sameRepositoryPullRequest(pullRequest, repository) {
   return pullRequest;
 }
 
-function lifecyclePullRequestNumber(workflowRun) {
-  const pullRequests = workflowRun?.pull_requests;
-  if (Array.isArray(pullRequests) && pullRequests.length === 1) {
-    return {
-      number: pullRequests[0].number,
-      removedLabel: LIFECYCLE_RUN_TITLE.exec(workflowRun?.display_title ?? '')?.[2] ?? null,
-    };
-  }
-  const match = LIFECYCLE_RUN_TITLE.exec(workflowRun?.display_title ?? '');
-  return match ? { number: Number(match[1]), removedLabel: match[2] ?? null } : null;
+function associatedPullRequestNumber(workflowRun) {
+  const numbers = [...new Set(
+    (Array.isArray(workflowRun?.pull_requests) ? workflowRun.pull_requests : [])
+      .map((pullRequest) => Number(pullRequest?.number))
+      .filter((number) => Number.isSafeInteger(number) && number > 0),
+  )];
+  return numbers.length === 1 ? numbers[0] : null;
 }
 
-function outputRecord(mode, identity = null) {
+async function commitPullRequestNumber({
+  apiUrl,
+  fetchImplementation,
+  repository,
+  token,
+  workflowRun,
+}) {
+  const headSha = workflowRun?.head_sha;
+  if (typeof headSha !== 'string' || !COMMIT_SHA.test(headSha)) return null;
+  const candidates = await githubJson(
+    fetchImplementation,
+    apiUrl,
+    token,
+    `/repos/${repository}/commits/${headSha}/pulls`,
+  );
+  if (!Array.isArray(candidates)) return null;
+  const numbers = [...new Set(candidates
+    .filter((pullRequest) => sameRepositoryPullRequest(pullRequest, repository))
+    .map((pullRequest) => Number(pullRequest.number))
+    .filter((number) => Number.isSafeInteger(number) && number > 0))];
+  return numbers.length === 1 ? numbers[0] : null;
+}
+
+function outputRecord(mode, identity = null, desiredMode = 'none', resolutionSource = 'none') {
   return {
+    desired_mode: desiredMode,
     mode,
-    should_cleanup: mode === 'cleanup' ? 'true' : 'false',
+    resolution_source: resolutionSource,
+    should_cleanup: ['cleanup', 'reconcile'].includes(mode) ? 'true' : 'false',
     source_branch: identity?.sourceBranch ?? '',
     pull_request_number: identity?.pullRequestNumber ?? '',
     slug: identity?.slug ?? '',
@@ -80,10 +102,10 @@ export async function resolvePreviewCleanupRequest({
   token,
   triggeringActor,
 }) {
-  if (eventName === 'schedule') return outputRecord('janitor');
+  if (eventName === 'schedule') return outputRecord('janitor', null, 'none', 'schedule');
 
   let pullRequestNumber;
-  let removedLabel = null;
+  let resolutionSource;
   let requireMaintainer = false;
   let workflowRun = null;
   if (eventName === 'workflow_run') {
@@ -94,22 +116,32 @@ export async function resolvePreviewCleanupRequest({
         'preview lifecycle signal did not complete successfully',
       );
     }
-    if (!['pull_request', 'workflow_dispatch'].includes(workflowRun?.event)) {
+    if (workflowRun?.event !== 'pull_request') {
       throw new PreviewCleanupRequestError(
         'invalid_lifecycle_event',
         'preview lifecycle signal has an invalid source event',
       );
     }
-    const lifecycle = lifecyclePullRequestNumber(workflowRun);
-    pullRequestNumber = lifecycle?.number;
-    removedLabel = lifecycle?.removedLabel ?? null;
-    if (workflowRun.event === 'workflow_dispatch') {
-      requireMaintainer = true;
-      triggeringActor = workflowRun?.triggering_actor?.login;
+    pullRequestNumber = associatedPullRequestNumber(workflowRun);
+    if (pullRequestNumber) {
+      resolutionSource = 'workflow_run.pull_requests';
+    } else {
+      pullRequestNumber = await commitPullRequestNumber({
+        apiUrl,
+        fetchImplementation,
+        repository,
+        token,
+        workflowRun,
+      });
+      if (pullRequestNumber) resolutionSource = 'workflow_run.head_sha';
+    }
+    if (!pullRequestNumber) {
+      return outputRecord('skip', null, 'none', 'workflow_run.unresolved');
     }
   } else if (eventName === 'workflow_dispatch') {
     pullRequestNumber = Number(manualPullRequest);
     requireMaintainer = true;
+    resolutionSource = 'workflow_dispatch';
   } else {
     throw new PreviewCleanupRequestError(
       'invalid_cleanup_event',
@@ -141,26 +173,20 @@ export async function resolvePreviewCleanupRequest({
     token,
     `/repos/${repository}/pulls/${pullRequestNumber}`,
   ), repository);
-  if (!pullRequest) return outputRecord('skip');
-  if (workflowRun?.event === 'pull_request') {
-    if (pullRequest.head?.sha !== workflowRun.head_sha || pullRequest.head?.ref !== workflowRun.head_branch) {
-      throw new PreviewCleanupRequestError(
-        'lifecycle_pull_request_mismatch',
-        'preview lifecycle signal does not match the resolved pull request head',
-      );
-    }
-  }
-  if (!requireMaintainer && pullRequest.state === 'open') {
-    const desiredMode = desiredPreviewMode(pullRequest);
-    const fullDowngrade = removedLabel === 'full-preview' && desiredMode !== 'full';
-    if (!fullDowngrade && desiredMode !== 'none') return outputRecord('skip');
-  }
+  if (!pullRequest) return outputRecord('skip', null, 'none', resolutionSource);
   const sourceBranch = manualSourceBranch || requiredString(
     pullRequest.head?.ref,
     'missing_preview_branch',
     'pull request head branch is missing',
   );
-  return outputRecord('cleanup', previewIdentity(sourceBranch, pullRequestNumber));
+  const identity = previewIdentity(sourceBranch, pullRequestNumber);
+  const desiredMode = desiredPreviewMode(pullRequest);
+  return outputRecord(
+    requireMaintainer ? 'cleanup' : 'reconcile',
+    identity,
+    desiredMode,
+    resolutionSource,
+  );
 }
 
 export async function runPreviewCleanupRequestCli(environment = process.env) {

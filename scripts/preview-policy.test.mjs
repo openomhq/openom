@@ -9,6 +9,7 @@ for (const [state, labels, expected] of [
   ['open', ['preview'], 'web'],
   ['open', [], 'none'],
   ['closed', ['full-preview', 'preview'], 'none'],
+  ['closed', ['full-preview'], 'none'],
   ['closed', ['preview'], 'none'],
 ]) {
   test(`${state} pull request with ${labels.join(', ') || 'no labels'} desires ${expected}`, () => {

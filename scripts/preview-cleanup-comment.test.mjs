@@ -6,6 +6,7 @@ import {
   berlinTimestamp,
   previewCleanupComment,
   reconcilePreviewCleanupComment,
+  runPreviewCleanupCommentCli,
 } from './preview-cleanup-comment.mjs';
 
 function response(body, status = 200) {
@@ -62,6 +63,16 @@ test('builds the cleanup comment with resource and workflow details', () => {
   assert.match(body, /\[preview\.cleanup #4\]\(https:\/\/github\.com\/openomhq\/openom\/actions\/runs\/37649128750\)/);
 });
 
+test('explains how to redeploy a still-approved web preview', () => {
+  const body = previewCleanupComment({
+    ...cleanup(),
+    redeployMode: 'web',
+    repository: 'openomhq/openom',
+  });
+  assert.match(body, /still allows a web preview/);
+  assert.match(body, /Run `preview\.deploy` in `web` mode/);
+});
+
 test('creates a cleanup comment when none exists', async () => {
   const github = githubFetch();
   const result = await reconcilePreviewCleanupComment({
@@ -102,4 +113,25 @@ test('does not overwrite a contributor-owned marker comment', async () => {
     token: 'token',
   });
   assert.equal(github.requests[1].method, 'POST');
+});
+
+test('reconciles every cleanup emitted by lifecycle or janitor runs', async () => {
+  const github = githubFetch();
+  const result = await runPreviewCleanupCommentCli({
+    GITHUB_API_URL: 'https://api.github.com',
+    GITHUB_REPOSITORY: 'openomhq/openom',
+    GITHUB_RUN_ID: '37649128750',
+    GITHUB_RUN_NUMBER: '4',
+    GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_TOKEN: 'token',
+    PREVIEW_CLEANUPS: JSON.stringify([{
+      apiUrl: cleanup().apiUrl,
+      appUrl: cleanup().appUrl,
+      branch: cleanup().branch,
+      pullRequestNumber: 42,
+      redeployMode: 'web',
+    }]),
+  }, github.fetchImplementation);
+  assert.deepEqual(result, [{ action: 'created', commentId: 100, pullRequestNumber: 42 }]);
+  assert.match(github.requests[1].body.body, /still allows a web preview/);
 });

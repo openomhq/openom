@@ -13,16 +13,19 @@ const lifecycleSource = readFileSync(
   'utf8',
 );
 const jobs = workflowJobSources(cleanupSource);
+const lifecycleJobs = workflowJobSources(lifecycleSource);
 
-test('unprivileged pull-request lifecycle events carry no code or credentials', () => {
+test('untrusted pull-request lifecycle signals carry no identity, code, or credentials', () => {
   assert.match(lifecycleSource, /^  pull_request:\s*$/m);
-  assert.match(lifecycleSource, /^  workflow_dispatch:\s*$/m);
-  assert.match(
-    lifecycleSource,
-    /^run-name: "preview lifecycle for PR #\$\{\{ github\.event\.pull_request\.number \|\| inputs\.pull_request \}\}\$\{\{ github\.event\.action == 'unlabeled' && format\(' after removing \{0\}', github\.event\.label\.name\) \|\| '' \}\}"\s*$/m,
-  );
+  assert.doesNotMatch(lifecycleSource, /^  pull_request_target:\s*$/m);
+  assert.doesNotMatch(lifecycleSource, /^  workflow_dispatch:\s*$/m);
+  assert.match(lifecycleSource, /^      - closed\s*$/m);
+  assert.match(lifecycleSource, /^      - labeled\s*$/m);
+  assert.match(lifecycleSource, /^      - unlabeled\s*$/m);
+  assert.match(lifecycleSource, /^run-name: preview lifecycle signal\s*$/m);
   assert.match(lifecycleSource, /^permissions: \{\}\s*$/m);
-  assert.doesNotMatch(lifecycleSource, /actions\/checkout|secrets\.|vars\.|id-token:/);
+  assert.doesNotMatch(lifecycleJobs.signal, /actions\/checkout|secrets\.|vars\.|id-token:/);
+  assert.doesNotMatch(lifecycleJobs.signal, /\$\{\{/);
 });
 
 test('privileged cleanup runs only from trusted workflow-run, schedule, or manual events', () => {
@@ -30,6 +33,7 @@ test('privileged cleanup runs only from trusted workflow-run, schedule, or manua
   assert.match(cleanupSource, /^  schedule:\s*$/m);
   assert.match(cleanupSource, /^  workflow_dispatch:\s*$/m);
   assert.doesNotMatch(cleanupSource, /^  pull_request(?:_target)?:/m);
+  assert.doesNotMatch(cleanupSource, /display_title/);
   assert.match(jobs.resolve, /^          ref: main\s*$/m);
   assert.match(jobs.cleanup, /^          ref: main\s*$/m);
   assert.doesNotMatch(jobs.resolve, /environment:|id-token: write|deployments: write/);
@@ -46,6 +50,7 @@ test('cleanup serializes with the matching preview and scopes privilege to delet
   assert.match(jobs.cleanup, /^      deployments: write\s*$/m);
   assert.doesNotMatch(jobs.resolve, /pull-requests: write|issues: write/);
   assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs cleanup/);
+  assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs reconcile/);
   assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs janitor/);
   const cleanupStep = jobs.cleanup
     .split(/(?=^      - )/m)
@@ -65,12 +70,24 @@ test('cleanup serializes with the matching preview and scopes privilege to delet
 test('cleanup comments run separately with only pull-request-write privilege', () => {
   assert.match(
     jobs.comment,
-    /^    if: needs\.resolve\.outputs\.mode == 'cleanup' && needs\.cleanup\.result == 'success'\s*$/m,
+    /^    if: needs\.cleanup\.result == 'success' && needs\.cleanup\.outputs\.comments != '\[\]'\s*$/m,
   );
   assert.match(jobs.comment, /^      contents: read\s*$/m);
   assert.match(jobs.comment, /^      pull-requests: write\s*$/m);
   assert.doesNotMatch(jobs.comment, /issues: write/);
   assert.doesNotMatch(jobs.comment, /environment:|id-token: write|deployments: write|secrets\.|vars\./);
   assert.match(jobs.comment, /^          ref: main\s*$/m);
+  assert.match(jobs.comment, /PREVIEW_CLEANUPS: \$\{\{ needs\.cleanup\.outputs\.comments \}\}/);
   assert.match(jobs.comment, /node scripts\/preview-cleanup-comment\.mjs/);
+});
+
+test('deployment instructions run separately with only pull-request-write privilege', () => {
+  assert.match(
+    jobs.instructions,
+    /^    if: needs\.resolve\.outputs\.mode == 'reconcile' && needs\.resolve\.outputs\.desired_mode != 'none'\s*$/m,
+  );
+  assert.match(jobs.instructions, /^      pull-requests: write\s*$/m);
+  assert.doesNotMatch(jobs.instructions, /environment:|id-token: write|deployments: write|secrets\.|vars\./);
+  assert.match(jobs.instructions, /^          ref: main\s*$/m);
+  assert.match(jobs.instructions, /node scripts\/preview-instructions\.mjs/);
 });

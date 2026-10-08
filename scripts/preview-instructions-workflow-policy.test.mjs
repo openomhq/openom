@@ -1,49 +1,49 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { workflowJobSources } from './deployment-config.mjs';
 
-const source = readFileSync(
-  new URL('../.github/workflows/preview.instructions.yml', import.meta.url),
+const cleanupSource = readFileSync(
+  new URL('../.github/workflows/preview.cleanup.yml', import.meta.url),
   'utf8',
 );
-const jobs = workflowJobSources(source);
+const lifecycleSource = readFileSync(
+  new URL('../.github/workflows/preview.lifecycle.yml', import.meta.url),
+  'utf8',
+);
+const jobs = workflowJobSources(cleanupSource);
 
-test('preview instructions use trusted label and manual triggers', () => {
-  assert.match(source, /^  pull_request_target:\s*$/m);
-  assert.match(source, /^    types: \[labeled\]\s*$/m);
-  assert.match(source, /^    branches: \[main\]\s*$/m);
-  assert.match(source, /^  workflow_dispatch:\s*$/m);
-  assert.match(jobs.comment, /github\.event\.label\.name == 'preview'/);
-  assert.match(jobs.comment, /github\.event\.label\.name == 'full-preview'/);
-  assert.match(
-    jobs.comment,
-    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+test('preview instructions are folded into the trusted cleanup chain', () => {
+  assert.equal(
+    existsSync(new URL('../.github/workflows/preview.instructions.yml', import.meta.url)),
+    false,
   );
-  assert.match(jobs.comment, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(lifecycleSource, /^  pull_request:\s*$/m);
+  assert.match(lifecycleSource, /^      - labeled\s*$/m);
+  assert.doesNotMatch(lifecycleSource, /pull_request_target/);
+  assert.match(jobs.instructions, /needs\.resolve\.outputs\.desired_mode != 'none'/);
+  assert.match(
+    jobs.instructions,
+    /PREVIEW_PULL_REQUEST: \$\{\{ needs\.resolve\.outputs\.pull_request_number \}\}/,
+  );
 });
 
-test('privileged comment automation executes only trusted main code', () => {
-  assert.match(source, /^permissions: \{\}\s*$/m);
-  assert.match(jobs.comment, /^      pull-requests: write\s*$/m);
-  assert.doesNotMatch(jobs.comment, /^      issues: write\s*$/m);
-  assert.match(jobs.comment, /^          ref: main\s*$/m);
-  assert.match(jobs.comment, /persist-credentials: false/);
+test('privileged instruction comments execute only trusted main code', () => {
+  assert.match(jobs.instructions, /^      pull-requests: write\s*$/m);
+  assert.doesNotMatch(jobs.instructions, /^      issues: write\s*$/m);
+  assert.match(jobs.instructions, /^          ref: main\s*$/m);
+  assert.match(jobs.instructions, /persist-credentials: false/);
   assert.doesNotMatch(
-    jobs.comment,
-    /ref:\s*\$\{\{[^\n]*pull_request\.head|repository:\s*\$\{\{[^\n]*pull_request\.head|secrets\.|vars\.|id-token:|deployments: write/,
+    jobs.instructions,
+    /pull_request\.head|secrets\.|vars\.|id-token:|deployments: write/,
   );
-  assert.match(jobs.comment, /node scripts\/preview-instructions\.mjs/);
+  assert.match(jobs.instructions, /node scripts\/preview-instructions\.mjs/);
 });
 
-test('manual and label runs share one serialized pull-request identity', () => {
+test('instruction comments serialize on the server-resolved pull request', () => {
   assert.match(
-    source,
-    /^  group: preview-instructions-\$\{\{ github\.event\.pull_request\.number \|\| inputs\.pull_request \}\}\s*$/m,
-  );
-  assert.match(
-    jobs.comment,
-    /PULL_REQUEST_NUMBER: \$\{\{ github\.event\.pull_request\.number \|\| inputs\.pull_request \}\}/,
+    jobs.instructions,
+    /^      group: preview-instructions-\$\{\{ needs\.resolve\.outputs\.pull_request_number \}\}\s*$/m,
   );
 });

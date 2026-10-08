@@ -518,6 +518,7 @@
             "R2_ENDPOINT"
           ]
         },
+        "instructions": { "environment": false, "oidc": false, "secrets": [], "variables": [] },
         "comment": { "environment": false, "oidc": false, "secrets": [], "variables": [] }
       }
     },

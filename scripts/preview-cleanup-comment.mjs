@@ -79,12 +79,16 @@ export function previewCleanupComment({
   appUrl,
   branch,
   completedAt,
+  redeployMode = null,
   repository,
   runId,
   runNumber,
   serverUrl = 'https://github.com',
 }) {
   const workflowUrl = `${serverUrl}/${repository}/actions/runs/${runId}`;
+  const redeploy = redeployMode === 'web'
+    ? '\nThe PR still allows a web preview. Run `preview.deploy` in `web` mode to publish it again.\n'
+    : '';
   return `${PREVIEW_CLEANUP_MARKER}
 ## Preview cleanup
 
@@ -92,6 +96,7 @@ export function previewCleanupComment({
 
 Preview resources for \`${branch}\` have been removed.
 Cleanup is idempotent; rerunning it safely reconciles any remaining preview resources.
+${redeploy}
 
 | Resource | Former address | Status |
 | --- | --- | --- |
@@ -165,33 +170,64 @@ export async function runPreviewCleanupCommentCli(
   environment = process.env,
   fetchImplementation = fetch,
 ) {
-  return reconcilePreviewCleanupComment({
-    apiUrl: environment.GITHUB_API_URL,
-    cleanup: {
-      apiUrl: requiredString(environment.PREVIEW_API_URL, 'missing_api_url', 'PREVIEW_API_URL is required'),
-      appUrl: requiredString(environment.PREVIEW_APP_URL, 'missing_app_url', 'PREVIEW_APP_URL is required'),
-      branch: requiredString(environment.PREVIEW_BRANCH, 'missing_branch', 'PREVIEW_BRANCH is required'),
-      completedAt: new Date(),
-      runId: positiveInteger(environment.GITHUB_RUN_ID, 'invalid_run_id', 'GITHUB_RUN_ID is invalid'),
-      runNumber: positiveInteger(
-        environment.GITHUB_RUN_NUMBER,
-        'invalid_run_number',
-        'GITHUB_RUN_NUMBER is invalid',
-      ),
-      serverUrl: environment.GITHUB_SERVER_URL,
-    },
-    fetchImplementation,
-    pullRequest: environment.PREVIEW_PULL_REQUEST,
-    repository: environment.GITHUB_REPOSITORY,
-    token: environment.GITHUB_TOKEN,
-  });
+  let cleanups;
+  try {
+    cleanups = JSON.parse(requiredString(
+      environment.PREVIEW_CLEANUPS,
+      'missing_cleanups',
+      'PREVIEW_CLEANUPS is required',
+    ));
+  } catch (error) {
+    if (error instanceof PreviewCleanupCommentError) throw error;
+    throw new PreviewCleanupCommentError('invalid_cleanups', 'PREVIEW_CLEANUPS must be valid JSON');
+  }
+  if (!Array.isArray(cleanups)) {
+    throw new PreviewCleanupCommentError('invalid_cleanups', 'PREVIEW_CLEANUPS must be an array');
+  }
+  const completedAt = new Date();
+  const runId = positiveInteger(environment.GITHUB_RUN_ID, 'invalid_run_id', 'GITHUB_RUN_ID is invalid');
+  const runNumber = positiveInteger(
+    environment.GITHUB_RUN_NUMBER,
+    'invalid_run_number',
+    'GITHUB_RUN_NUMBER is invalid',
+  );
+  const results = [];
+  for (const cleanup of cleanups) {
+    const redeployMode = cleanup?.redeployMode ?? null;
+    if (![null, 'web'].includes(redeployMode)) {
+      throw new PreviewCleanupCommentError(
+        'invalid_redeploy_mode',
+        'cleanup redeploy mode must be web or null',
+      );
+    }
+    results.push(await reconcilePreviewCleanupComment({
+      apiUrl: environment.GITHUB_API_URL,
+      cleanup: {
+        apiUrl: requiredString(cleanup?.apiUrl, 'missing_api_url', 'cleanup API URL is required'),
+        appUrl: requiredString(cleanup?.appUrl, 'missing_app_url', 'cleanup app URL is required'),
+        branch: requiredString(cleanup?.branch, 'missing_branch', 'cleanup branch is required'),
+        completedAt,
+        redeployMode,
+        runId,
+        runNumber,
+        serverUrl: environment.GITHUB_SERVER_URL,
+      },
+      fetchImplementation,
+      pullRequest: cleanup?.pullRequestNumber,
+      repository: environment.GITHUB_REPOSITORY,
+      token: environment.GITHUB_TOKEN,
+    }));
+  }
+  return results;
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
-    const result = await runPreviewCleanupCommentCli();
-    console.log(`[Preview] ${result.action} cleanup comment on pull request ${result.pullRequestNumber}`);
+    const results = await runPreviewCleanupCommentCli();
+    for (const result of results) {
+      console.log(`[Preview] ${result.action} cleanup comment on pull request ${result.pullRequestNumber}`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Preview] ${message}`);

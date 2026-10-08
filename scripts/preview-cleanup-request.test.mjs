@@ -29,16 +29,16 @@ function workflowRunEvent() {
   return {
     workflow_run: {
       conclusion: 'success',
-      display_title: 'preview lifecycle for PR #42',
+      display_title: 'attacker-controlled title for PR #999',
       event: 'pull_request',
       head_branch: 'feat/ope-638',
-      head_sha: '0123456789abcdef0123456789abcdef01234567',
+      head_sha: 'fedcba9876543210fedcba9876543210fedcba98',
       pull_requests: [{ number: 42 }],
     },
   };
 }
 
-test('cleans a closed same-repository pull request from a trusted workflow run', async () => {
+test('reconciles the server-associated pull request and ignores the run title', async () => {
   const result = await resolvePreviewCleanupRequest({
     event: workflowRunEvent(),
     eventName: 'workflow_run',
@@ -46,28 +46,66 @@ test('cleans a closed same-repository pull request from a trusted workflow run',
     repository: 'openomhq/openom',
     token: 'token',
   });
-  assert.equal(result.mode, 'cleanup');
-  assert.equal(result.slug, 'feat-ope-638');
+  assert.equal(result.mode, 'reconcile');
+  assert.equal(result.desired_mode, 'none');
+  assert.equal(result.should_cleanup, 'true');
+  assert.equal(result.pull_request_number, 42);
+  assert.equal(result.resolution_source, 'workflow_run.pull_requests');
 });
 
-test('recovers the pull request from the trusted run title when GitHub omits associations', async () => {
+test('falls back to the unique pull request associated with the workflow commit', async () => {
+  const event = workflowRunEvent();
+  event.workflow_run.pull_requests = [];
+  const routes = [];
+  const result = await resolvePreviewCleanupRequest({
+    event,
+    eventName: 'workflow_run',
+    fetchImplementation: async (url) => {
+      routes.push(url);
+      return response(url.includes('/commits/') ? [pullRequest()] : pullRequest());
+    },
+    repository: 'openomhq/openom',
+    token: 'token',
+  });
+  assert.equal(result.mode, 'reconcile');
+  assert.equal(result.pull_request_number, 42);
+  assert.equal(result.resolution_source, 'workflow_run.head_sha');
+  assert.match(routes[0], /\/commits\/fedcba9876543210fedcba9876543210fedcba98\/pulls$/);
+});
+
+test('skips when GitHub provides no unique pull request association', async () => {
   const event = workflowRunEvent();
   event.workflow_run.pull_requests = [];
   const result = await resolvePreviewCleanupRequest({
     event,
     eventName: 'workflow_run',
-    fetchImplementation: async () => response(pullRequest()),
+    fetchImplementation: async () => response([]),
     repository: 'openomhq/openom',
     token: 'token',
   });
-  assert.equal(result.mode, 'cleanup');
-  assert.equal(result.pull_request_number, 42);
+  assert.equal(result.mode, 'skip');
+  assert.equal(result.resolution_source, 'workflow_run.unresolved');
 });
 
-test('fails when a lifecycle run has no validated pull request identity', async () => {
+test('skips an ambiguous commit association', async () => {
   const event = workflowRunEvent();
   event.workflow_run.pull_requests = [];
-  event.workflow_run.display_title = 'OPE-638: cleanup';
+  const result = await resolvePreviewCleanupRequest({
+    event,
+    eventName: 'workflow_run',
+    fetchImplementation: async () => response([
+      pullRequest(),
+      pullRequest({ number: 43 }),
+    ]),
+    repository: 'openomhq/openom',
+    token: 'token',
+  });
+  assert.equal(result.mode, 'skip');
+});
+
+test('rejects lifecycle runs that did not originate from pull_request', async () => {
+  const event = workflowRunEvent();
+  event.workflow_run.event = 'workflow_dispatch';
   await assert.rejects(
     resolvePreviewCleanupRequest({
       event,
@@ -77,96 +115,31 @@ test('fails when a lifecycle run has no validated pull request identity', async 
       token: 'token',
     }),
     (error) => error instanceof PreviewCleanupRequestError
-      && error.code === 'invalid_pull_request_number',
+      && error.code === 'invalid_lifecycle_event',
   );
 });
 
-test('requires maintainer permission for a manually dispatched lifecycle signal', async () => {
-  const event = workflowRunEvent();
-  event.workflow_run.event = 'workflow_dispatch';
-  event.workflow_run.pull_requests = [];
-  event.workflow_run.triggering_actor = { login: 'developer' };
-  const fetchImplementation = async (url) => response(
-    url.includes('/collaborators/') ? { permission: 'write' } : pullRequest(),
-  );
-  await assert.rejects(
-    resolvePreviewCleanupRequest({
-      event,
-      eventName: 'workflow_run',
-      fetchImplementation,
-      repository: 'openomhq/openom',
-      token: 'token',
-    }),
-    (error) => error instanceof PreviewCleanupRequestError
-      && error.code === 'preview_cleanup_actor_forbidden',
-  );
-});
-
-test('accepts a manually dispatched lifecycle signal from a maintainer', async () => {
-  const event = workflowRunEvent();
-  event.workflow_run.event = 'workflow_dispatch';
-  event.workflow_run.pull_requests = [];
-  event.workflow_run.triggering_actor = { login: 'maintainer' };
-  const fetchImplementation = async (url) => response(
-    url.includes('/collaborators/') ? { permission: 'maintain' } : pullRequest(),
-  );
-  const result = await resolvePreviewCleanupRequest({
-    event,
-    eventName: 'workflow_run',
-    fetchImplementation,
-    repository: 'openomhq/openom',
-    token: 'token',
-  });
-  assert.equal(result.mode, 'cleanup');
-});
-
-test('skips an open pull request that retains either approval label', async () => {
-  for (const label of ['preview', 'full-preview']) {
+for (const [labels, desiredMode] of [
+  [[], 'none'],
+  [['preview'], 'web'],
+  [['full-preview'], 'full'],
+  [['preview', 'full-preview'], 'full'],
+]) {
+  test(`reconciles an open pull request whose desired mode is ${desiredMode}`, async () => {
     const result = await resolvePreviewCleanupRequest({
       event: workflowRunEvent(),
       eventName: 'workflow_run',
       fetchImplementation: async () => response(pullRequest({
-        labels: [{ name: label }],
+        labels: labels.map((name) => ({ name })),
         state: 'open',
       })),
       repository: 'openomhq/openom',
       token: 'token',
     });
-    assert.equal(result.mode, 'skip');
-  }
-});
-
-test('cleans the full preview when full-preview is removed but preview remains', async () => {
-  const event = workflowRunEvent();
-  event.workflow_run.display_title = 'preview lifecycle for PR #42 after removing full-preview';
-  const result = await resolvePreviewCleanupRequest({
-    event,
-    eventName: 'workflow_run',
-    fetchImplementation: async () => response(pullRequest({
-      labels: [{ name: 'preview' }],
-      state: 'open',
-    })),
-    repository: 'openomhq/openom',
-    token: 'token',
+    assert.equal(result.mode, 'reconcile');
+    assert.equal(result.desired_mode, desiredMode);
   });
-  assert.equal(result.mode, 'cleanup');
-});
-
-test('does not clean an approved preview after an unrelated label is removed', async () => {
-  const event = workflowRunEvent();
-  event.workflow_run.display_title = 'preview lifecycle for PR #42 after removing documentation';
-  const result = await resolvePreviewCleanupRequest({
-    event,
-    eventName: 'workflow_run',
-    fetchImplementation: async () => response(pullRequest({
-      labels: [{ name: 'preview' }],
-      state: 'open',
-    })),
-    repository: 'openomhq/openom',
-    token: 'token',
-  });
-  assert.equal(result.mode, 'skip');
-});
+}
 
 test('ignores fork pull requests even after closure', async () => {
   const result = await resolvePreviewCleanupRequest({
@@ -186,11 +159,9 @@ test('ignores fork pull requests even after closure', async () => {
 });
 
 test('rejects a source branch containing shell metacharacters', async () => {
-  const event = workflowRunEvent();
-  event.workflow_run.head_branch = 'fix/x;echo';
   await assert.rejects(
     resolvePreviewCleanupRequest({
-      event,
+      event: workflowRunEvent(),
       eventName: 'workflow_run',
       fetchImplementation: async () => response(pullRequest({
         head: {
@@ -234,8 +205,10 @@ test('emits janitor mode for the nightly schedule', async () => {
   }), {
     api_url: '',
     app_url: '',
+    desired_mode: 'none',
     mode: 'janitor',
     pull_request_number: '',
+    resolution_source: 'schedule',
     should_cleanup: 'false',
     slug: '',
     source_branch: '',
