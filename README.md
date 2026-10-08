@@ -2,7 +2,7 @@
 
 <img src="assets/tree.svg" alt="openom logo — a tree" width="120" align="right">
 
-[![ci.desktop](https://github.com/openomhq/openom/actions/workflows/ci.desktop.yml/badge.svg)](https://github.com/openomhq/openom/actions/workflows/ci.desktop.yml)
+[![main branch health](https://github.com/openomhq/openom/actions/workflows/ci.main.yml/badge.svg?branch=main&event=push)](https://github.com/openomhq/openom/actions/workflows/ci.main.yml)
 [![Docs](https://readthedocs.org/projects/openom/badge/?version=latest)](https://openom.readthedocs.io/)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue.svg)](LICENSE)
 
@@ -57,14 +57,17 @@ refresh tokens, JWKS verification, and the openom server's unregistered-account 
 
 ## Continuous integration
 
-| Workflow | Runs on | Answers |
+CI is organized by role; the workflow files are the detailed source of truth rather than this README serving
+as an inventory of every check.
+
+| Role | When | Purpose |
 | --- | --- | --- |
-| `ci.web.yml` | push to `main` / PR | Do all modules parse, error codes stay in sync, locales complete, and no `.stack` leak into the UI? (seconds, no toolchain) |
-| `ci.desktop.yml` | push to `main` / PR / manual | Clippy gate (runs first, blocks the matrix), then the Tauri build on Windows/macOS/Linux + the store-conformance suite (MemoryStore ≡ SqliteStore) |
-| `ci.server.yml` | push to `main` / PR / manual | The server contract suite (`openom/tests/api.rs` + storage checksum) against a live Postgres + MinIO — the `#[ignore]`d tests the unit jobs skip |
-| `demo.web.yml` | manual | Publishes the local-only web demo to GitHub Pages |
-| `ci.mobile.yml` | manual / weekly ×2 (Mon + Thu) | Android APK + unsigned iOS-simulator build (unsigned `--debug` build-check artifacts — the SDKs are slow, no signing pipeline yet) |
-| `ci.mutants.yml` | manual / weekly (Mon) | Mutation testing (`cargo-mutants`) over the security-critical crypto/keyring/CRDT crates + the pure-core crates — surfaces test gaps a green suite hides |
+| Main branch health | Every push to `main` | `ci.main` finishes quickly after a validated PR merge and runs path-aware repository and Rust checks after an administrator bypass push. Its badge reports the health of committed main, not the latest contributor branch. |
+| Required change gates | Pull requests and the merge queue | Web checks, the live server-contract suite, and desktop Clippy/build validation prevent an unverified candidate from entering `main`. The expensive desktop matrix is reserved for the merge queue. |
+| Extended assurance | Scheduled, path-targeted, or manual | Mobile build drift, mutation testing, telemetry export, and other focused checks cover risks that do not justify delaying every change. |
+
+Deployment workflows for demo, preview, and staging environments are operational automation, not CI health,
+and are intentionally excluded from this summary.
 
 ## Brand
 
