@@ -31,6 +31,10 @@ test('pull request code runs only in the unprivileged build job', () => {
   assert.doesNotMatch(jobs.build, /environment:/);
   assert.doesNotMatch(jobs.build, /id-token: write/);
   assert.doesNotMatch(jobs.build, /\$\{\{\s*(?:secrets|vars)\./);
+  const rustCache = jobs.build.match(
+    /uses: Swatinem\/rust-cache@[\s\S]*?(?=\n\s{6}- |$)/,
+  )?.[0] ?? '';
+  assert.match(rustCache, /^          save-if: false\s*$/m);
   for (const jobName of ['database', 'deploy-web', 'deploy-full']) {
     assert.doesNotMatch(jobs[jobName], /ref: \$\{\{ needs\.authorize\.outputs\.commit_sha \}\}/);
     assert.doesNotMatch(jobs[jobName], /(?:node|bash|sh)\s+_site/);
@@ -63,7 +67,30 @@ test('deployment inventory records the canonical source branch', () => {
     const publish = jobs[jobName].match(
       /node scripts\/preview-deployment\.mjs[\s\S]*?(?=\n\s{6}- name:|$)/,
     )?.[0] ?? '';
-    assert.match(publish, /--source-branch "\$\{\{ needs\.authorize\.outputs\.source_branch \}\}"/);
+    assert.match(
+      jobs[jobName],
+      /PREVIEW_SOURCE_BRANCH: \$\{\{ needs\.authorize\.outputs\.source_branch \}\}/,
+    );
+    assert.match(publish, /--source-branch "\$PREVIEW_SOURCE_BRANCH"/);
+  }
+});
+
+test('validated branch names enter privileged shells only through environment variables', () => {
+  assert.doesNotMatch(
+    source,
+    /--(?:branch|source-branch)\s+["']?\$\{\{\s*needs\.authorize\.outputs\.source_branch/,
+  );
+  for (const jobName of ['database', 'deploy-web', 'deploy-full']) {
+    const branchSteps = jobs[jobName]
+      .split(/(?=^      - )/m)
+      .filter((step) => step.includes('$PREVIEW_SOURCE_BRANCH'));
+    assert.notEqual(branchSteps.length, 0);
+    for (const step of branchSteps) {
+      assert.match(
+        step,
+        /PREVIEW_SOURCE_BRANCH: \$\{\{ needs\.authorize\.outputs\.source_branch \}\}/,
+      );
+    }
   }
 });
 

@@ -8,6 +8,7 @@ export const LAMBDA_NAME_PREFIX = 'openom-preview-';
 export const LAMBDA_NAME_SUFFIX = '-api';
 export const MAX_PREVIEW_SLUG_LENGTH =
   LAMBDA_NAME_LIMIT - LAMBDA_NAME_PREFIX.length - LAMBDA_NAME_SUFFIX.length;
+const SAFE_SOURCE_BRANCH = /^[A-Za-z0-9._/-]+$/;
 
 export class PreviewNameError extends Error {
   constructor(code, message) {
@@ -42,6 +43,16 @@ export function normalizePreviewSlug(branchName) {
   return slug;
 }
 
+export function assertPreviewSourceBranch(branchName) {
+  if (typeof branchName !== 'string' || !SAFE_SOURCE_BRANCH.test(branchName)) {
+    throw new PreviewNameError(
+      'invalid_source_branch',
+      'preview source branch may contain only ASCII letters, digits, dots, underscores, slashes, and dashes',
+    );
+  }
+  return branchName;
+}
+
 function parsePullRequestNumber(value) {
   if (value === undefined || value === null) return null;
   const number = typeof value === 'number' ? value : Number(value);
@@ -55,10 +66,11 @@ function parsePullRequestNumber(value) {
 }
 
 export function previewIdentity(branchName, pullRequestNumber) {
-  const slug = normalizePreviewSlug(branchName);
+  const sourceBranch = assertPreviewSourceBranch(branchName);
+  const slug = normalizePreviewSlug(sourceBranch);
   return Object.freeze({
     slug,
-    sourceBranch: branchName,
+    sourceBranch,
     pullRequestNumber: parsePullRequestNumber(pullRequestNumber),
     appUrl: `https://${slug}.app.dev.openom.org`,
     apiUrl: `https://${slug}.api.dev.openom.org`,

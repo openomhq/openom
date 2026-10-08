@@ -26,6 +26,7 @@ function githubFetch({
   headRepository = 'openomhq/openom',
   labels = ['preview'],
   permission = { permission: 'write', role_name: 'maintain' },
+  sourceBranch = 'feat/ope-513',
   state = 'open',
 } = {}) {
   return async (url, options) => {
@@ -34,7 +35,7 @@ function githubFetch({
     if (url.endsWith('/pulls/42')) {
       return response({
         base: { repo: { full_name: 'openomhq/openom' } },
-        head: { ref: 'feat/ope-513', repo: { full_name: headRepository }, sha: SHA },
+        head: { ref: sourceBranch, repo: { full_name: headRepository }, sha: SHA },
         labels: labels.map((name) => ({ name })),
         state,
       });
@@ -108,6 +109,13 @@ test('rejects an unknown preview mode before reading pull-request state', async 
   await assert.rejects(
     request({ mode: 'automatic' }),
     (error) => error instanceof PreviewRequestError && error.code === 'invalid_preview_mode',
+  );
+});
+
+test('rejects a source branch containing shell metacharacters', async () => {
+  await assert.rejects(
+    request({ fetchImplementation: githubFetch({ sourceBranch: 'feat/x$(id)' }) }),
+    (error) => error?.code === 'invalid_source_branch',
   );
 });
 

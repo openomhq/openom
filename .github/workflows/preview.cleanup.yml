@@ -102,13 +102,14 @@ jobs:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
           R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.resolve.outputs.source_branch }}
         run: |
           set -euo pipefail
           if [[ '${{ needs.resolve.outputs.mode }}' == 'janitor' ]]; then
             node scripts/preview-cleanup.mjs janitor | tee cleanup.json
           else
             node scripts/preview-cleanup.mjs cleanup \
-              --branch '${{ needs.resolve.outputs.source_branch }}' \
+              --branch "$PREVIEW_SOURCE_BRANCH" \
               --pull-request '${{ needs.resolve.outputs.pull_request_number }}' | tee cleanup.json
           fi
       - name: Write cleanup summary

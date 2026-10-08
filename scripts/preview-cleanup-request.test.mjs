@@ -153,6 +153,27 @@ test('ignores fork pull requests even after closure', async () => {
   assert.equal(result.mode, 'skip');
 });
 
+test('rejects a source branch containing shell metacharacters', async () => {
+  const event = workflowRunEvent();
+  event.workflow_run.head_branch = 'fix/x;echo';
+  await assert.rejects(
+    resolvePreviewCleanupRequest({
+      event,
+      eventName: 'workflow_run',
+      fetchImplementation: async () => response(pullRequest({
+        head: {
+          ref: 'fix/x;echo',
+          repo: { full_name: 'openomhq/openom' },
+          sha: '0123456789abcdef0123456789abcdef01234567',
+        },
+      })),
+      repository: 'openomhq/openom',
+      token: 'token',
+    }),
+    (error) => error?.code === 'invalid_source_branch',
+  );
+});
+
 test('requires maintainer permission for manual cleanup', async () => {
   const fetchImplementation = async (url) => response(
     url.includes('/collaborators/') ? { permission: 'write' } : pullRequest(),

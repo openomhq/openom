@@ -47,6 +47,18 @@ test('cleanup serializes with the matching preview and scopes privilege to delet
   assert.doesNotMatch(jobs.resolve, /pull-requests: write|issues: write/);
   assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs cleanup/);
   assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs janitor/);
+  const cleanupStep = jobs.cleanup
+    .split(/(?=^      - )/m)
+    .find((step) => step.includes('--branch "$PREVIEW_SOURCE_BRANCH"')) ?? '';
+  assert.match(
+    cleanupStep,
+    /PREVIEW_SOURCE_BRANCH: \$\{\{ needs\.resolve\.outputs\.source_branch \}\}/,
+  );
+  assert.match(cleanupStep, /--branch "\$PREVIEW_SOURCE_BRANCH"/);
+  assert.doesNotMatch(
+    cleanupSource,
+    /--branch\s+["']?\$\{\{\s*needs\.resolve\.outputs\.source_branch/,
+  );
   assert.doesNotMatch(jobs.cleanup, /issues: write|preview-cleanup-comment/);
 });
 

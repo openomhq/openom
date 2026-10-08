@@ -9,6 +9,7 @@ import {
   MAX_PREVIEW_SLUG_LENGTH,
   PreviewNameError,
   assertPreviewSlugAvailable,
+  assertPreviewSourceBranch,
   normalizePreviewSlug,
   previewIdentity,
   runPreviewNameCli,
@@ -23,6 +24,24 @@ test('normalizes documented branch examples', () => {
 test('collapses punctuation and removes non-ASCII characters deterministically', () => {
   assert.equal(normalizePreviewSlug('--Feature///Auth__Flow--'), 'feature-auth-flow');
   assert.equal(normalizePreviewSlug('feat/Grüße/東京'), 'feat-gr-e');
+});
+
+test('accepts only shell-safe source branch characters for preview identities', () => {
+  assert.equal(assertPreviewSourceBranch('fix/OPE-601.sync_v2'), 'fix/OPE-601.sync_v2');
+  for (const branch of [
+    'feat/x$(id)',
+    'feat/x;echo',
+    'feat/"quoted',
+    "feat/'quoted",
+    'feat/`id`',
+    'feat/with space',
+    'feat/grüße',
+  ]) {
+    assert.throws(
+      () => previewIdentity(branch, 42),
+      (error) => error instanceof PreviewNameError && error.code === 'invalid_source_branch',
+    );
+  }
 });
 
 test('rejects branch names that produce an empty slug', () => {

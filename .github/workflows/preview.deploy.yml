@@ -80,6 +80,8 @@ jobs:
           targets: aarch64-unknown-linux-gnu
       - if: needs.authorize.outputs.mode == 'full'
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.8.1
+        with:
+          save-if: false
 
       - if: needs.authorize.outputs.mode == 'full'
         name: Install checksum-verified Zig and cargo-lambda
@@ -213,10 +215,11 @@ jobs:
           NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
           NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
           PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-neon.mjs reconcile
           --branch "preview/${{ needs.authorize.outputs.slug }}"
-          --source-branch "${{ needs.authorize.outputs.source_branch }}"
+          --source-branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --output-file _database/database.json
 
@@ -322,9 +325,10 @@ jobs:
         env:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
           CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-route.mjs put
-          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --rollback-file _artifact/route-rollback.json
@@ -337,13 +341,14 @@ jobs:
       - name: Publish the native GitHub deployment
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-deployment.mjs
           --app-url "${{ needs.authorize.outputs.app_url }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --slug "${{ needs.authorize.outputs.slug }}"
-          --source-branch "${{ needs.authorize.outputs.source_branch }}"
+          --source-branch "$PREVIEW_SOURCE_BRANCH"
 
       - name: Write preview summary
         env:
@@ -365,9 +370,10 @@ jobs:
         name: Restore the previous route
         env:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-route.mjs rollback
-          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --rollback-file _artifact/route-rollback.json
 
@@ -484,10 +490,11 @@ jobs:
           NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
           NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
           PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-neon.mjs reconcile
           --branch "preview/${{ needs.authorize.outputs.slug }}"
-          --source-branch "${{ needs.authorize.outputs.source_branch }}"
+          --source-branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --output-file _database/database.json
 
@@ -504,12 +511,13 @@ jobs:
           SUPABASE_JWKS_URL: ${{ vars.SUPABASE_JWKS_URL }}
           SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
           SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: |
           set -euo pipefail
           node scripts/preview-lambda.mjs reconcile \
             --function-name "openom-preview-${{ needs.authorize.outputs.slug }}-api" \
             --slug "${{ needs.authorize.outputs.slug }}" \
-            --source-branch "${{ needs.authorize.outputs.source_branch }}" \
+            --source-branch "$PREVIEW_SOURCE_BRANCH" \
             --pull-request "${{ needs.authorize.outputs.pull_request_number }}" \
             --commit "${{ needs.authorize.outputs.commit_sha }}" \
             --artifact-key "previews/${{ needs.authorize.outputs.slug }}/${{ needs.authorize.outputs.commit_sha }}.zip" \
@@ -563,9 +571,10 @@ jobs:
         env:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
           CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-route.mjs put
-          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --mode full
@@ -631,13 +640,14 @@ jobs:
       - name: Publish the native GitHub deployment
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-deployment.mjs
           --app-url "${{ needs.authorize.outputs.app_url }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --slug "${{ needs.authorize.outputs.slug }}"
-          --source-branch "${{ needs.authorize.outputs.source_branch }}"
+          --source-branch "$PREVIEW_SOURCE_BRANCH"
 
       - name: Write preview summary
         env:
@@ -659,9 +669,10 @@ jobs:
         name: Restore the previous route
         env:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
+          PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
           node scripts/preview-route.mjs rollback
-          --branch "${{ needs.authorize.outputs.source_branch }}"
+          --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --rollback-file _artifact/route-rollback.json
 
