@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
 
 import { workflowJobSources } from './deployment-config.mjs';
@@ -8,6 +8,35 @@ const readWorkflow = (name) => readFileSync(
   new URL(`../.github/workflows/${name}`, import.meta.url),
   'utf8',
 );
+
+const workflowNames = readdirSync(new URL('../.github/workflows/', import.meta.url))
+  .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+  .sort();
+
+test('third-party actions use immutable commit SHAs', () => {
+  const violations = [];
+
+  for (const workflowName of workflowNames) {
+    const source = readWorkflow(workflowName);
+    for (const match of source.matchAll(/^\s*(?:-\s*)?uses:\s*["']?([^\s#"']+)["']?/gm)) {
+      const action = match[1];
+      const line = source.slice(0, match.index).split('\n').length;
+      const isLocalAction = action.startsWith('./');
+      const isCommitPinned = /@[0-9a-f]{40}$/.test(action);
+      const isDigestPinnedContainer = /^docker:\/\/[^\s]+@sha256:[0-9a-f]{64}$/.test(action);
+
+      if (!isLocalAction && !isCommitPinned && !isDigestPinnedContainer) {
+        violations.push(`${workflowName}:${line}: ${action}`);
+      }
+    }
+  }
+
+  assert.deepEqual(
+    violations,
+    [],
+    `third-party actions must use full commit SHAs:\n${violations.join('\n')}`,
+  );
+});
 
 for (const workflow of ['ci.desktop.yml', 'ci.server.yml', 'ci.web.yml']) {
   test(`${workflow} validates pull requests and merge groups without repeating on main`, () => {

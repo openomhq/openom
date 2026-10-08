@@ -28,7 +28,7 @@ jobs:
         with:
           toolchain: 1.97.1
           targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.8.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install checksum-verified Zig and cargo-lambda
         run: |
@@ -110,7 +110,7 @@ jobs:
       - name: Upload the SHA-keyed artifact
         run: aws s3 cp _artifact/bootstrap.zip "s3://${ARTIFACTS_BUCKET}/openom/${GITHUB_SHA}.zip"
 
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.68.14
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: sqlx-cli@0.9.0
 
