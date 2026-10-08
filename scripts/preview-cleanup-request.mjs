@@ -77,6 +77,37 @@ async function commitPullRequestNumber({
   return numbers.length === 1 ? numbers[0] : null;
 }
 
+async function branchPullRequestNumber({
+  apiUrl,
+  fetchImplementation,
+  repository,
+  token,
+  workflowRun,
+}) {
+  const headBranch = workflowRun?.head_branch;
+  const headRepository = workflowRun?.head_repository?.full_name;
+  const headSha = workflowRun?.head_sha;
+  if (headRepository !== repository) return null;
+  if (typeof headBranch !== 'string' || headBranch.length === 0) return null;
+  if (typeof headSha !== 'string' || !COMMIT_SHA.test(headSha)) return null;
+  const [owner] = repository.split('/');
+  if (!owner) return null;
+  const head = encodeURIComponent(`${owner}:${headBranch}`);
+  const candidates = await githubJson(
+    fetchImplementation,
+    apiUrl,
+    token,
+    `/repos/${repository}/pulls?state=all&base=main&head=${head}&per_page=100`,
+  );
+  if (!Array.isArray(candidates)) return null;
+  const numbers = [...new Set(candidates
+    .filter((pullRequest) => sameRepositoryPullRequest(pullRequest, repository))
+    .filter((pullRequest) => pullRequest.head?.ref === headBranch && pullRequest.head?.sha === headSha)
+    .map((pullRequest) => Number(pullRequest.number))
+    .filter((number) => Number.isSafeInteger(number) && number > 0))];
+  return numbers.length === 1 ? numbers[0] : null;
+}
+
 function outputRecord(mode, identity = null, desiredMode = 'none', resolutionSource = 'none') {
   return {
     desired_mode: desiredMode,
@@ -134,6 +165,16 @@ export async function resolvePreviewCleanupRequest({
         workflowRun,
       });
       if (pullRequestNumber) resolutionSource = 'workflow_run.head_sha';
+    }
+    if (!pullRequestNumber) {
+      pullRequestNumber = await branchPullRequestNumber({
+        apiUrl,
+        fetchImplementation,
+        repository,
+        token,
+        workflowRun,
+      });
+      if (pullRequestNumber) resolutionSource = 'workflow_run.head_branch';
     }
     if (!pullRequestNumber) {
       return outputRecord('skip', null, 'none', 'workflow_run.unresolved');

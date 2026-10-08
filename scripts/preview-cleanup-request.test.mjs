@@ -32,6 +32,7 @@ function workflowRunEvent() {
       display_title: 'attacker-controlled title for PR #999',
       event: 'pull_request',
       head_branch: 'feat/ope-638',
+      head_repository: { full_name: 'openomhq/openom' },
       head_sha: 'fedcba9876543210fedcba9876543210fedcba98',
       pull_requests: [{ number: 42 }],
     },
@@ -71,6 +72,35 @@ test('falls back to the unique pull request associated with the workflow commit'
   assert.equal(result.pull_request_number, 42);
   assert.equal(result.resolution_source, 'workflow_run.head_sha');
   assert.match(routes[0], /\/commits\/fedcba9876543210fedcba9876543210fedcba98\/pulls$/);
+});
+
+test('falls back to the unique pull request matching the workflow branch and SHA', async () => {
+  const event = workflowRunEvent();
+  event.workflow_run.pull_requests = [];
+  const matchedPullRequest = pullRequest({
+    head: {
+      ref: event.workflow_run.head_branch,
+      repo: { full_name: 'openomhq/openom' },
+      sha: event.workflow_run.head_sha,
+    },
+  });
+  const routes = [];
+  const result = await resolvePreviewCleanupRequest({
+    event,
+    eventName: 'workflow_run',
+    fetchImplementation: async (url) => {
+      routes.push(url);
+      if (url.includes('/commits/')) return response([]);
+      if (url.includes('/pulls?')) return response([matchedPullRequest]);
+      return response(matchedPullRequest);
+    },
+    repository: 'openomhq/openom',
+    token: 'token',
+  });
+  assert.equal(result.mode, 'reconcile');
+  assert.equal(result.pull_request_number, 42);
+  assert.equal(result.resolution_source, 'workflow_run.head_branch');
+  assert.match(routes[1], /pulls\?state=all&base=main&head=openomhq%3Afeat%2Fope-638&per_page=100$/);
 });
 
 test('skips when GitHub provides no unique pull request association', async () => {
