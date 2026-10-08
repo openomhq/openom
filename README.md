@@ -38,6 +38,9 @@ client-verified guarantee rather than a server promise.
 
 ## Quick start
 
+The following explains how to prepare a local development environment and start working with openom. It covers
+the required tooling, initial setup, and primary workflows for development, validation, and local data management.
+
 ### Requirements
 
 - **Core toolchain:** Node.js 20+, pnpm 11.20.0, Rust through rustup (the repository pins 1.97.1), and Task 3+.
