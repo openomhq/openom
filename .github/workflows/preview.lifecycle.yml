@@ -1,5 +1,5 @@
 name: preview.lifecycle
-run-name: 'preview lifecycle for PR #${{ github.event.pull_request.number || inputs.pull_request }}'
+run-name: "preview lifecycle for PR #${{ github.event.pull_request.number || inputs.pull_request }}${{ github.event.action == 'unlabeled' && format(' after removing {0}', github.event.label.name) || '' }}"
 
 on:
   pull_request:

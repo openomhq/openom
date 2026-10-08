@@ -4,10 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { previewIdentity } from './preview-name.mjs';
+import { desiredPreviewMode } from './preview-policy.mjs';
 
-const APPROVAL_LABELS = new Set(['preview', 'full-preview']);
 const MAINTAINER_PERMISSIONS = new Set(['admin', 'maintain']);
-const LIFECYCLE_RUN_TITLE = /^preview lifecycle for PR #([1-9][0-9]*)$/;
+const LIFECYCLE_RUN_TITLE = /^preview lifecycle for PR #([1-9][0-9]*)(?: after removing (.+))?$/;
 
 export class PreviewCleanupRequestError extends Error {
   constructor(code, message) {
@@ -48,15 +48,13 @@ function sameRepositoryPullRequest(pullRequest, repository) {
 function lifecyclePullRequestNumber(workflowRun) {
   const pullRequests = workflowRun?.pull_requests;
   if (Array.isArray(pullRequests) && pullRequests.length === 1) {
-    return pullRequests[0].number;
+    return {
+      number: pullRequests[0].number,
+      removedLabel: LIFECYCLE_RUN_TITLE.exec(workflowRun?.display_title ?? '')?.[2] ?? null,
+    };
   }
   const match = LIFECYCLE_RUN_TITLE.exec(workflowRun?.display_title ?? '');
-  return match ? Number(match[1]) : null;
-}
-
-function approved(pullRequest) {
-  return Array.isArray(pullRequest?.labels)
-    && pullRequest.labels.some((label) => APPROVAL_LABELS.has(label?.name));
+  return match ? { number: Number(match[1]), removedLabel: match[2] ?? null } : null;
 }
 
 function outputRecord(mode, identity = null) {
@@ -85,6 +83,7 @@ export async function resolvePreviewCleanupRequest({
   if (eventName === 'schedule') return outputRecord('janitor');
 
   let pullRequestNumber;
+  let removedLabel = null;
   let requireMaintainer = false;
   let workflowRun = null;
   if (eventName === 'workflow_run') {
@@ -101,7 +100,9 @@ export async function resolvePreviewCleanupRequest({
         'preview lifecycle signal has an invalid source event',
       );
     }
-    pullRequestNumber = lifecyclePullRequestNumber(workflowRun);
+    const lifecycle = lifecyclePullRequestNumber(workflowRun);
+    pullRequestNumber = lifecycle?.number;
+    removedLabel = lifecycle?.removedLabel ?? null;
     if (workflowRun.event === 'workflow_dispatch') {
       requireMaintainer = true;
       triggeringActor = workflowRun?.triggering_actor?.login;
@@ -149,8 +150,10 @@ export async function resolvePreviewCleanupRequest({
       );
     }
   }
-  if (!requireMaintainer && pullRequest.state === 'open' && approved(pullRequest)) {
-    return outputRecord('skip');
+  if (!requireMaintainer && pullRequest.state === 'open') {
+    const desiredMode = desiredPreviewMode(pullRequest);
+    const fullDowngrade = removedLabel === 'full-preview' && desiredMode !== 'full';
+    if (!fullDowngrade && desiredMode !== 'none') return outputRecord('skip');
   }
   const sourceBranch = manualSourceBranch || requiredString(
     pullRequest.head?.ref,

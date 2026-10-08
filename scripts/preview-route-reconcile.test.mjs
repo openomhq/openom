@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { previewIdentity } from './preview-name.mjs';
 import {
+  assertWebPreviewDeployable,
   deletePreviewRoute,
   listPreviewRoutes,
   PreviewRouteError,
@@ -55,6 +56,33 @@ test('publishes a web route with the current KVS ETag', async () => {
     'put-key',
   ]);
   assert.ok(calls[2][1].includes('KV1'));
+});
+
+test('refuses a web deploy until an existing full preview is cleaned', () => {
+  const existing = {
+    version: 1,
+    slug: IDENTITY.slug,
+    sourceBranch: IDENTITY.sourceBranch,
+    pullRequestNumber: IDENTITY.pullRequestNumber,
+    commitSha: SHA,
+    mode: 'full',
+    webOrigin: 'feat-ope-513.openom-preview.pages.dev',
+    apiOrigin: 'example.lambda-url.eu-central-1.on.aws',
+  };
+  assert.throws(
+    () => assertWebPreviewDeployable({
+      execute: () => result(0, { Value: JSON.stringify(existing) }),
+      identity: IDENTITY,
+      kvsArn: 'arn:aws:cloudfront::123456789012:key-value-store/example',
+    }),
+    (error) => error instanceof PreviewRouteError
+      && error.code === 'preview_downgrade_requires_cleanup',
+  );
+  assert.doesNotThrow(() => assertWebPreviewDeployable({
+    execute: () => result(0, { Value: JSON.stringify({ ...existing, mode: 'web' }) }),
+    identity: IDENTITY,
+    kvsArn: 'arn:aws:cloudfront::123456789012:key-value-store/example',
+  }));
 });
 
 test('retries an ETag conflict against fresh route ownership and state', async () => {
@@ -234,6 +262,7 @@ test('discovers owned routes for lifecycle reconciliation', () => {
     slug: IDENTITY.slug,
     sourceBranch: IDENTITY.sourceBranch,
     pullRequestNumber: IDENTITY.pullRequestNumber,
+    mode: 'web',
   };
   const listed = listPreviewRoutes({
     execute: () => result(0, {

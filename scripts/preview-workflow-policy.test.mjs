@@ -26,6 +26,13 @@ test('authorization and deployment automation are pinned to main', () => {
   }
 });
 
+test('web deployment refuses an implicit full-stack downgrade before publishing Pages', () => {
+  const guard = jobs['deploy-web'].indexOf('name: Refuse an implicit full-stack downgrade');
+  const pages = jobs['deploy-web'].indexOf('name: Deploy the immutable Pages artifact');
+  assert.ok(guard !== -1 && guard < pages);
+  assert.match(jobs['deploy-web'], /node scripts\/preview-route\.mjs assert-web/);
+});
+
 test('pull request code runs only in the unprivileged build job', () => {
   assert.match(jobs.build, /ref: \$\{\{ needs\.authorize\.outputs\.commit_sha \}\}/);
   assert.doesNotMatch(jobs.build, /environment:/);

@@ -7,7 +7,7 @@ import {
   deletePreviewArtifactPrefix,
   deletePreviewObjectPrefix,
   janitorPreviewResources,
-  listApprovedPullRequests,
+  listDesiredPullRequests,
   PreviewCleanupError,
   selectOrphanedPreviews,
 } from './preview-cleanup.mjs';
@@ -87,35 +87,51 @@ test('keeps deletion commands inside exact preview prefixes', () => {
   assert.ok(calls[1].args.includes('s3://openom-preview-artifacts/previews/feat-ope-638/'));
 });
 
-test('lists only approved same-repository pull requests', async () => {
+test('lists desired modes only for approved same-repository pull requests', async () => {
   const fetchImplementation = async () => ({
     ok: true,
     status: 200,
     async json() {
       return [
-        { head: { ref: 'feat/one', repo: { full_name: 'openomhq/openom' } }, labels: [{ name: 'preview' }], number: 1 },
-        { head: { ref: 'feat/two', repo: { full_name: 'fork/openom' } }, labels: [{ name: 'full-preview' }], number: 2 },
-        { head: { ref: 'feat/three', repo: { full_name: 'openomhq/openom' } }, labels: [], number: 3 },
+        { head: { ref: 'feat/one', repo: { full_name: 'openomhq/openom' } }, labels: [{ name: 'preview' }], number: 1, state: 'open' },
+        { head: { ref: 'feat/two', repo: { full_name: 'fork/openom' } }, labels: [{ name: 'full-preview' }], number: 2, state: 'open' },
+        { head: { ref: 'feat/three', repo: { full_name: 'openomhq/openom' } }, labels: [], number: 3, state: 'open' },
       ];
     },
   });
-  const listed = await listApprovedPullRequests({
+  const listed = await listDesiredPullRequests({
     fetchImplementation,
     repository: 'openomhq/openom',
     token: 'token',
   });
-  assert.deepEqual(listed.map((identity) => identity.pullRequestNumber), [1]);
+  assert.deepEqual(listed.map(({ identity, mode }) => [identity.pullRequestNumber, mode]), [[1, 'web']]);
+});
+
+test('janitor removes full-stack resources that exceed preview-only approval', () => {
+  const identity = previewIdentity('feat/web-only', 7);
+  const approved = [{ identity, mode: 'web' }];
+  assert.equal(selectOrphanedPreviews({
+    desired: approved,
+    discovered: [{ identity, routeMode: 'web', sources: new Set(['deployment', 'route']) }],
+  }).length, 0);
+  for (const record of [
+    { identity, routeMode: 'full', sources: new Set(['deployment', 'route']) },
+    { identity, routeMode: 'web', sources: new Set(['database', 'deployment', 'route']) },
+    { identity, routeMode: 'web', sources: new Set(['deployment', 'lambda', 'route']) },
+  ]) {
+    assert.deepEqual(selectOrphanedPreviews({ desired: approved, discovered: [record] }), [record]);
+  }
 });
 
 test('keeps renamed previews until the replacement route is live', () => {
   const previous = previewIdentity('feat/old', 42);
   const replacement = previewIdentity('feat/new', 42);
   assert.deepEqual(selectOrphanedPreviews({
-    approved: [replacement],
+    desired: [replacement],
     discovered: [{ identity: previous, sources: new Set(['lambda', 'route']) }],
   }), []);
   const orphaned = selectOrphanedPreviews({
-    approved: [replacement],
+    desired: [replacement],
     discovered: [
       { identity: previous, sources: new Set(['lambda', 'route']) },
       { identity: replacement, sources: new Set(['route']) },
@@ -141,7 +157,7 @@ test('janitor cleans closed and unapproved resource owners once', async () => {
         lambda: [orphan],
         route: [active, orphan],
       }),
-      listApproved: async () => [active],
+      listDesired: async () => [active],
     },
   });
   assert.deepEqual(cleaned, ['feat-orphan']);
@@ -162,7 +178,7 @@ test('janitor resumes cleanup when only the deployment inventory survived', asyn
         lambda: [],
         route: [],
       }),
-      listApproved: async () => [],
+      listDesired: async () => [],
     },
   });
   assert.deepEqual(cleaned, ['feat-orphan']);
@@ -179,7 +195,7 @@ test('rejects conflicting ownership for one normalized slug', async () => {
           lambda: [previewIdentity('feat/conflict', 1)],
           route: [previewIdentity('feat-conflict', 2)],
         }),
-        listApproved: async () => [],
+        listDesired: async () => [],
       },
     }),
     (error) => error instanceof PreviewCleanupError

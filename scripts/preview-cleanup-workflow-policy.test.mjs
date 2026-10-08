@@ -19,7 +19,7 @@ test('unprivileged pull-request lifecycle events carry no code or credentials', 
   assert.match(lifecycleSource, /^  workflow_dispatch:\s*$/m);
   assert.match(
     lifecycleSource,
-    /^run-name: 'preview lifecycle for PR #\$\{\{ github\.event\.pull_request\.number \|\| inputs\.pull_request \}\}'\s*$/m,
+    /^run-name: "preview lifecycle for PR #\$\{\{ github\.event\.pull_request\.number \|\| inputs\.pull_request \}\}\$\{\{ github\.event\.action == 'unlabeled' && format\(' after removing \{0\}', github\.event\.label\.name\) \|\| '' \}\}"\s*$/m,
   );
   assert.match(lifecycleSource, /^permissions: \{\}\s*$/m);
   assert.doesNotMatch(lifecycleSource, /actions\/checkout|secrets\.|vars\.|id-token:/);

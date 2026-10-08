@@ -116,7 +116,7 @@ function isPreconditionFailure(result) {
   return detail.includes('PreconditionFailedException') || detail.includes('PreconditionFailed');
 }
 
-function validatedRouteIdentity(record, key) {
+function validatedRouteRecord(record, key) {
   if (!record || typeof record !== 'object') {
     throw new PreviewRouteError('invalid_existing_route', `KVS route ${key} is malformed`);
   }
@@ -124,12 +124,15 @@ function validatedRouteIdentity(record, key) {
   if (record.slug !== key || identity.slug !== key) {
     throw new PreviewRouteError('invalid_existing_route', `KVS route ${key} has inconsistent identity`);
   }
+  if (record.mode !== 'web' && record.mode !== 'full') {
+    throw new PreviewRouteError('invalid_existing_route', `KVS route ${key} has an invalid mode`);
+  }
   assertPreviewSlugAvailable(identity, [record]);
-  return identity;
+  return { identity, mode: record.mode };
 }
 
-export function listPreviewRoutes({ execute = command, kvsArn }) {
-  const identities = [];
+export function listPreviewRouteRecords({ execute = command, kvsArn }) {
+  const records = [];
   let nextToken;
   do {
     const values = ['--kvs-arn', kvsArn, '--max-results', '50'];
@@ -151,13 +154,30 @@ export function listPreviewRoutes({ execute = command, kvsArn }) {
       } catch {
         throw new PreviewRouteError('invalid_existing_route', `KVS route ${item.Key} is malformed`);
       }
-      identities.push(validatedRouteIdentity(record, item.Key));
+      records.push(validatedRouteRecord(record, item.Key));
     }
     nextToken = typeof response.NextToken === 'string' && response.NextToken.length > 0
       ? response.NextToken
       : undefined;
   } while (nextToken);
-  return identities;
+  return records;
+}
+
+export function listPreviewRoutes(options) {
+  return listPreviewRouteRecords(options).map((record) => record.identity);
+}
+
+export function assertWebPreviewDeployable({ execute = command, identity, kvsArn }) {
+  const existing = getExistingRoute(execute, kvsArn, identity.slug);
+  if (!existing) return;
+  const route = validatedRouteRecord(existing, identity.slug);
+  assertPreviewSlugAvailable(identity, [route.identity]);
+  if (route.mode === 'full') {
+    throw new PreviewRouteError(
+      'preview_downgrade_requires_cleanup',
+      'remove the full-preview label and wait for cleanup before deploying a web preview',
+    );
+  }
 }
 
 export async function putPreviewRoute({
@@ -294,10 +314,14 @@ export async function runPreviewRouteCli(args, environment = process.env) {
   if (operation === 'delete') {
     return deletePreviewRoute({ identity, kvsArn });
   }
+  if (operation === 'assert-web') {
+    assertWebPreviewDeployable({ identity, kvsArn });
+    return { deployable: true };
+  }
   if (operation !== 'put') {
     throw new PreviewRouteError(
       'missing_operation',
-      'usage: preview-route.mjs put|rollback|delete --branch <name> --pull-request <number> ...',
+      'usage: preview-route.mjs put|rollback|delete|assert-web --branch <name> --pull-request <number> ...',
     );
   }
   const result = await putPreviewRoute({

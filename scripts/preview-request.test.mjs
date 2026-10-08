@@ -105,6 +105,14 @@ test('requires the dedicated full-preview approval for a full stack', async () =
   );
 });
 
+test('refuses a web deploy while full-preview remains approved', async () => {
+  await assert.rejects(
+    request({ fetchImplementation: githubFetch({ labels: ['preview', 'full-preview'] }) }),
+    (error) => error instanceof PreviewRequestError
+      && error.code === 'preview_downgrade_requires_cleanup',
+  );
+});
+
 test('rejects an unknown preview mode before reading pull-request state', async () => {
   await assert.rejects(
     request({ mode: 'automatic' }),

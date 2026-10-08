@@ -10,10 +10,10 @@ import {
   deletePreviewDatabase,
   listPreviewDatabases,
 } from './preview-neon.mjs';
-import { deletePreviewRoute, listPreviewRoutes } from './preview-route.mjs';
+import { deletePreviewRoute, listPreviewRouteRecords } from './preview-route.mjs';
+import { desiredPreviewMode } from './preview-policy.mjs';
 
 const AWS_CLI_IMAGE = 'amazon/aws-cli:2.31.22@sha256:bf253be91e12d49ba1bd6dc939a76ea9777901772032692b14639e643118e1c1';
-const APPROVAL_LABELS = new Set(['preview', 'full-preview']);
 
 export class PreviewCleanupError extends Error {
   constructor(code, message, options) {
@@ -237,7 +237,7 @@ async function githubGet(fetchImplementation, apiUrl, token, route) {
   return response.json();
 }
 
-export async function listApprovedPullRequests({
+export async function listDesiredPullRequests({
   apiUrl = 'https://api.github.com',
   fetchImplementation = fetch,
   repository,
@@ -255,10 +255,10 @@ export async function listApprovedPullRequests({
       throw new PreviewCleanupError('invalid_github_response', 'GitHub pull-request listing is malformed');
     }
     for (const pull of pulls) {
-      const labels = Array.isArray(pull.labels) ? pull.labels.map((label) => label?.name) : [];
-      if (!labels.some((label) => APPROVAL_LABELS.has(label))) continue;
       if (pull.head?.repo?.full_name !== repository) continue;
-      identities.push(previewIdentity(pull.head.ref, pull.number));
+      const mode = desiredPreviewMode(pull);
+      if (mode === 'none') continue;
+      identities.push({ identity: previewIdentity(pull.head.ref, pull.number), mode });
     }
     if (pulls.length < 100) break;
   }
@@ -272,7 +272,8 @@ function identityKey(identity) {
 function mergeDiscoveredIdentities(groups) {
   const records = new Map();
   for (const [source, identities] of Object.entries(groups)) {
-    for (const identity of identities) {
+    for (const value of identities) {
+      const identity = value.identity ?? value;
       const existingSlug = [...records.values()].find((record) => (
         record.identity.slug === identity.slug && identityKey(record.identity) !== identityKey(identity)
       ));
@@ -283,24 +284,33 @@ function mergeDiscoveredIdentities(groups) {
         );
       }
       const key = identityKey(identity);
-      const record = records.get(key) ?? { identity, sources: new Set() };
+      const record = records.get(key) ?? { identity, routeMode: null, sources: new Set() };
       record.sources.add(source);
+      if (source === 'route' && typeof value.mode === 'string') record.routeMode = value.mode;
       records.set(key, record);
     }
   }
   return [...records.values()];
 }
 
-export function selectOrphanedPreviews({ approved, discovered }) {
-  const approvedByPullRequest = new Map(approved.map((identity) => [identity.pullRequestNumber, identity]));
+export function selectOrphanedPreviews({ desired, discovered }) {
+  const desiredByPullRequest = new Map(desired.map((value) => {
+    const desired = value.identity ? value : { identity: value, mode: 'full' };
+    return [desired.identity.pullRequestNumber, desired];
+  }));
   const readyReplacements = new Set(discovered
     .filter((record) => record.sources.has('route'))
     .map((record) => identityKey(record.identity)));
   return discovered.filter((record) => {
-    const expected = approvedByPullRequest.get(record.identity.pullRequestNumber);
+    const expected = desiredByPullRequest.get(record.identity.pullRequestNumber);
     if (!expected) return true;
-    if (identityKey(expected) === identityKey(record.identity)) return false;
-    return readyReplacements.has(identityKey(expected));
+    if (identityKey(expected.identity) !== identityKey(record.identity)) {
+      return readyReplacements.has(identityKey(expected.identity));
+    }
+    if (expected.mode === 'full') return false;
+    return record.routeMode === 'full'
+      || record.sources.has('database')
+      || record.sources.has('lambda');
   });
 }
 
@@ -325,12 +335,12 @@ export async function janitorPreviewResources({
       token: config.githubToken,
     }),
     lambda: listPreviewLambdas({ execute }),
-    route: listPreviewRoutes({ execute, kvsArn: config.kvsArn }),
+    route: listPreviewRouteRecords({ execute, kvsArn: config.kvsArn }),
   }));
-  const listApproved = operations.listApproved ?? listApprovedPullRequests;
+  const listDesired = operations.listDesired ?? listDesiredPullRequests;
   const cleanup = operations.cleanup ?? cleanupPreview;
-  const [approved, groups] = await Promise.all([
-    listApproved({
+  const [desired, groups] = await Promise.all([
+    listDesired({
       apiUrl: config.githubApiUrl,
       fetchImplementation,
       repository: config.githubRepository,
@@ -339,7 +349,7 @@ export async function janitorPreviewResources({
     discover(),
   ]);
   const discovered = mergeDiscoveredIdentities(groups);
-  const orphaned = selectOrphanedPreviews({ approved, discovered });
+  const orphaned = selectOrphanedPreviews({ desired, discovered });
   const cleaned = [];
   for (const record of orphaned) {
     cleaned.push(await cleanup({
@@ -350,7 +360,7 @@ export async function janitorPreviewResources({
     }));
   }
   return {
-    approved: approved.length,
+    desired: desired.length,
     cleaned,
     discovered: discovered.length,
   };

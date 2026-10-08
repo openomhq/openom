@@ -4,11 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { previewIdentity } from './preview-name.mjs';
-
-const PREVIEW_MODE_LABELS = Object.freeze({
-  full: 'full-preview',
-  web: 'preview',
-});
+import { desiredPreviewMode, PREVIEW_MODE_LABELS } from './preview-policy.mjs';
 
 export class PreviewRequestError extends Error {
   constructor(code, message) {
@@ -60,7 +56,7 @@ function assertAuthorizedActor(permission, actor) {
   );
 }
 
-function assertEligiblePullRequest(pullRequest, repository, requiredLabel) {
+function assertEligiblePullRequest(pullRequest, repository, requestedMode) {
   if (pullRequest?.state !== 'open') {
     throw new PreviewRequestError('preview_pull_request_closed', 'pull request must be open');
   }
@@ -70,13 +66,17 @@ function assertEligiblePullRequest(pullRequest, repository, requiredLabel) {
       'preview deployments are limited to same-repository pull requests',
     );
   }
-  const labels = Array.isArray(pullRequest.labels)
-    ? pullRequest.labels.map((label) => label?.name).filter(Boolean)
-    : [];
-  if (!labels.includes(requiredLabel)) {
+  const desiredMode = desiredPreviewMode(pullRequest);
+  if (requestedMode === 'web' && desiredMode === 'full') {
+    throw new PreviewRequestError(
+      'preview_downgrade_requires_cleanup',
+      'remove the full-preview label and wait for cleanup before deploying a web preview',
+    );
+  }
+  if (desiredMode !== requestedMode) {
     throw new PreviewRequestError(
       'preview_approval_missing',
-      `pull request must have the ${requiredLabel} label`,
+      `pull request must have the ${PREVIEW_MODE_LABELS[requestedMode]} label`,
     );
   }
   requiredString(pullRequest.head?.ref, 'missing_preview_branch', 'pull request head branch is missing');
@@ -130,7 +130,7 @@ export async function resolvePreviewRequest({
   assertEligiblePullRequest(
     pullRequestRecord,
     repositoryName,
-    PREVIEW_MODE_LABELS[requestedMode],
+    requestedMode,
   );
   const identity = previewIdentity(pullRequestRecord.head.ref, number);
   return {

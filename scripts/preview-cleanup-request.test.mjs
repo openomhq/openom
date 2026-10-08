@@ -136,6 +136,38 @@ test('skips an open pull request that retains either approval label', async () =
   }
 });
 
+test('cleans the full preview when full-preview is removed but preview remains', async () => {
+  const event = workflowRunEvent();
+  event.workflow_run.display_title = 'preview lifecycle for PR #42 after removing full-preview';
+  const result = await resolvePreviewCleanupRequest({
+    event,
+    eventName: 'workflow_run',
+    fetchImplementation: async () => response(pullRequest({
+      labels: [{ name: 'preview' }],
+      state: 'open',
+    })),
+    repository: 'openomhq/openom',
+    token: 'token',
+  });
+  assert.equal(result.mode, 'cleanup');
+});
+
+test('does not clean an approved preview after an unrelated label is removed', async () => {
+  const event = workflowRunEvent();
+  event.workflow_run.display_title = 'preview lifecycle for PR #42 after removing documentation';
+  const result = await resolvePreviewCleanupRequest({
+    event,
+    eventName: 'workflow_run',
+    fetchImplementation: async () => response(pullRequest({
+      labels: [{ name: 'preview' }],
+      state: 'open',
+    })),
+    repository: 'openomhq/openom',
+    token: 'token',
+  });
+  assert.equal(result.mode, 'skip');
+});
+
 test('ignores fork pull requests even after closure', async () => {
   const result = await resolvePreviewCleanupRequest({
     event: workflowRunEvent(),
