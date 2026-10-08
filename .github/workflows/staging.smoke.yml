@@ -1,9 +1,10 @@
 name: staging.smoke
 
-# Provider and deployed-application checks remain one workflow, grouped into five independently
+# Provider and deployed-application checks remain one reusable workflow, grouped into five independently
 # diagnosable jobs. The configuration check receives no secrets; each other job receives only the
 # credential set needed for its group.
 on:
+  workflow_call:
   workflow_dispatch:
   schedule:
     - cron: '30 6 * * 1,4'

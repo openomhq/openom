@@ -1,9 +1,10 @@
 name: staging.web
 
-# Manual staging web deployment. Static/WASM build receives no staging environment or credentials;
+# Manual or orchestrated staging web deployment. Static/WASM build receives no staging environment or credentials;
 # deployment injects public runtime configuration and publishes the verified artifact; browser
 # acceptance receives only the dedicated test-account credentials.
 on:
+  workflow_call:
   workflow_dispatch:
 
 concurrency:

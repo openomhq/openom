@@ -1,9 +1,10 @@
 name: staging.server
 
-# Manual staging deployment. Build runs without the staging environment, secrets, or AWS OIDC.
+# Manual or orchestrated staging deployment. Build runs without the staging environment, secrets, or AWS OIDC.
 # Deploy receives the verified build artifact and only the credentials required for migration and
 # publication. Acceptance probes the public API without inheriting deployment credentials.
 on:
+  workflow_call:
   workflow_dispatch:
 
 concurrency:

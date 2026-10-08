@@ -1,0 +1,55 @@
+name: staging.deploy
+
+# The ordinary staging release entry point. Component workflows remain independently dispatchable for
+# targeted recovery, while this coordinator preserves server -> web -> smoke ordering for a full release.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Staging components to deploy before smoke acceptance
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - server
+          - web
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging.deploy
+  cancel-in-progress: false
+
+jobs:
+  server:
+    if: inputs.mode == 'full' || inputs.mode == 'server'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/staging.server.yml
+    secrets: inherit
+
+  web:
+    needs: server
+    if: >-
+      ${{ always()
+          && (inputs.mode == 'full' || inputs.mode == 'web')
+          && (needs.server.result == 'success' || needs.server.result == 'skipped') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/staging.web.yml
+    secrets: inherit
+
+  smoke:
+    needs: [server, web]
+    if: >-
+      ${{ always()
+          && (needs.server.result == 'success' || needs.server.result == 'skipped')
+          && (needs.web.result == 'success' || needs.web.result == 'skipped') }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/staging.smoke.yml
+    secrets: inherit
