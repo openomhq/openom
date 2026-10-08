@@ -21,6 +21,25 @@ for (const workflow of ['ci.desktop.yml', 'ci.server.yml', 'ci.web.yml']) {
   });
 }
 
+test('main workflow runs quick checks only for administrator bypass pushes', () => {
+  const source = readWorkflow('ci.main.yml');
+  const jobs = workflowJobSources(source);
+
+  assert.match(source, /^  push:\s*\n\s+branches: \[main\]\s*$/m);
+  assert.doesNotMatch(source, /^  pull_request:\s*$/m);
+  assert.doesNotMatch(source, /^  merge_group:\s*$/m);
+  assert.match(jobs.detect, /commits\/\$\{GITHUB_SHA\}\/pulls/);
+  assert.match(jobs.detect, /select\(\.merged_at != null and \.base\.ref == "main"\)/);
+  assert.match(jobs.detect, /node scripts\/ci-main-scope\.mjs --github-output/);
+  assert.match(jobs.quick, /needs\.detect\.outputs\.bypass_push == 'true'/);
+  assert.match(jobs.quick, /needs\.detect\.outputs\.quick_required == 'true'/);
+  assert.match(jobs.rust, /needs\.detect\.outputs\.bypass_push == 'true'/);
+  assert.match(jobs.rust, /needs\.detect\.outputs\.rust_required == 'true'/);
+  assert.match(jobs.rust, /cargo fmt --all --check/);
+  assert.match(jobs.rust, /cargo check --workspace --exclude openom-tauri --all-features --locked/);
+  assert.doesNotMatch(source, /cargo clippy|cargo test|tauri build|docker compose/);
+});
+
 test('desktop workflow keeps a stable required gate and reserves the matrix for final acceptance', () => {
   const source = readWorkflow('ci.desktop.yml');
   const jobs = workflowJobSources(source);

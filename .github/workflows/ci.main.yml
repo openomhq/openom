@@ -1,0 +1,121 @@
+name: ci.main
+
+# A push to main can be either a merge-queue delivery or an administrator bypass. The push payload does not
+# distinguish them, so one commit-to-PR lookup suppresses duplicate post-merge CI. Bypass pushes receive a
+# deliberately quick safety net: repository checks for implementation changes, plus a Linux cargo check only
+# when Rust build inputs changed. Full matrices and integration suites remain PR/merge-queue responsibilities.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-main
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      bypass_push: ${{ steps.classify.outputs.bypass_push }}
+      quick_required: ${{ steps.classify.outputs.quick_required }}
+      rust_required: ${{ steps.classify.outputs.rust_required }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+
+      - id: classify
+        name: Detect an administrator bypass push
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          merged_pr_count="$(
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+              --jq '[.[] | select(.merged_at != null and .base.ref == "main")] | length'
+          )"
+
+          if [ "$merged_pr_count" -gt 0 ]; then
+            {
+              echo 'bypass_push=false'
+              echo 'quick_required=false'
+              echo 'rust_required=false'
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo 'bypass_push=true' >> "$GITHUB_OUTPUT"
+          if [[ "$BEFORE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            printf '' | node scripts/ci-main-scope.mjs --github-output "$GITHUB_OUTPUT"
+          else
+            git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" |
+              node scripts/ci-main-scope.mjs --github-output "$GITHUB_OUTPUT"
+          fi
+
+  quick:
+    needs: detect
+    if: needs.detect.outputs.bypass_push == 'true' && needs.detect.outputs.quick_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+
+      - name: Parse every app module
+        run: find apps/app/src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Verify generated and deployment contracts
+        run: |
+          node scripts/gen-error-codes.mjs --check
+          node scripts/deployment-config.mjs --check
+
+      - name: Run repository policy tests
+        run: node --test scripts/*.test.mjs
+
+      - name: Verify error and release hygiene
+        run: |
+          node scripts/check-error-hygiene.mjs
+          node scripts/check-no-debug-build.mjs
+
+  rust:
+    needs: detect
+    if: needs.detect.outputs.bypass_push == 'true' && needs.detect.outputs.rust_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: 1.97.1
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.8.1
+        with:
+          workspaces: .
+
+      - name: Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Rust compile check
+        run: cargo check --workspace --exclude openom-tauri --all-features --locked
