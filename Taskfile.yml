@@ -1,0 +1,183 @@
+version: '3'
+
+dotenv: ['.env']
+output: prefixed
+
+vars:
+  RUNNER: '{{.OPENOM_RUNNER | default "auto"}}'
+  DEV_RUNNER: '{{if eq .RUNNER "docker"}}docker{{else}}local{{end}}'
+  HTTP_PORT: '{{.OPENOM_HTTP_PORT | default "6060"}}'
+  S3_BUCKET_NAME: '{{.S3_BUCKET | default "openom-trees"}}'
+
+tasks:
+  default:
+    desc: List the available development tasks
+    silent: true
+    cmds:
+      - task --list
+
+  setup:
+    desc: Install dependencies, generate browser WASM, and check the server
+    cmds:
+      - task: setup:dependencies
+      - task: build:web-core
+      - task: check:server
+
+  setup:dependencies:
+    internal: true
+    dir: apps
+    cmds:
+      - pnpm install --frozen-lockfile
+
+  build:web-core:
+    desc: Regenerate the browser app-core and tree WASM modules
+    cmds:
+      - node scripts/build-app-core.mjs
+      - node scripts/build-tree.mjs
+
+  dev:
+    desc: Run the browser app and local API using the runner selected in .env
+    cmds:
+      - task: 'dev:{{.DEV_RUNNER}}'
+
+  dev:local:
+    internal: true
+    deps:
+      - task: dev:web
+      - task: dev:server:local
+
+  dev:docker:
+    internal: true
+    deps:
+      - task: dev:web
+      - task: dev:server:docker
+
+  dev:web:
+    desc: Run the buildless browser app at http://localhost:5173
+    dir: apps
+    prefix: web
+    cmds:
+      - pnpm serve
+
+  dev:desktop:
+    desc: Run the native Tauri development shell
+    dir: apps
+    prefix: desktop
+    cmds:
+      - pnpm dev
+
+  dev:server:
+    desc: Run only the local API using the runner selected in .env
+    cmds:
+      - task: 'dev:server:{{.DEV_RUNNER}}'
+
+  dev:server:local:
+    internal: true
+    deps: [services]
+    prefix: api
+    preconditions:
+      - sh: watchexec --version
+        msg: Install Watchexec 2.x to run the native development server with automatic restarts.
+    env:
+      OPENOM_RUNTIME: local
+      OPENOM_HTTP_ADDR: '127.0.0.1:{{.HTTP_PORT}}'
+      OPENOM_WEB_ORIGINS: 'http://localhost:5173'
+      DATABASE_URL: 'postgres://openom:openom@localhost:5432/openom'
+      S3_ENDPOINT: 'http://localhost:9000'
+      S3_PUBLIC_ENDPOINT: 'http://localhost:9000'
+      S3_BUCKET: '{{.S3_BUCKET_NAME}}'
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: openom
+      S3_SECRET_KEY: openompw123
+      RUST_LOG: 'info,openom=debug'
+    cmds:
+      - >-
+        watchexec --restart
+        --watch openom/src --watch openom/migrations --watch openom/Cargo.toml
+        --watch packages --watch Cargo.toml --watch Cargo.lock
+        --filter '*.rs' --filter '*.sql' --filter 'Cargo.toml'
+        -- cargo run -p openom --bin openom
+
+  dev:server:docker:
+    internal: true
+    prefix: api
+    cmds:
+      - docker compose up --build server
+
+  services:
+    desc: Start Postgres and local S3-compatible storage in the background
+    prefix: services
+    cmds:
+      - docker compose up -d --wait postgres minio
+
+  status:
+    desc: Show local service status
+    cmds:
+      - docker compose ps
+
+  logs:
+    desc: Follow logs from the Docker-hosted API
+    cmds:
+      - docker compose logs -f server
+
+  stop:
+    desc: Stop local Compose services without deleting data or build caches
+    cmds:
+      - docker compose --profile supabase-auth --profile observability stop
+
+  check:web:
+    desc: Type-check the browser application
+    cmds:
+      - pnpm --dir apps typecheck
+
+  check:server:
+    desc: Check the server with the configured local/docker/auto Cargo runner
+    cmds:
+      - node scripts/cargo.mjs check -p openom --bin openom
+
+  test:web:
+    desc: Run browser-core unit and integration tests
+    cmds:
+      - pnpm --dir apps test:core
+
+  test:server:
+    desc: Run server integration tests against disposable database state
+    deps: [services]
+    cmds:
+      - node scripts/itest.mjs --fresh
+
+  reset:database:
+    desc: Recreate the local application database without deleting build caches
+    prompt: This permanently deletes the local openom Postgres database. Continue?
+    cmds:
+      - task: _reset:database
+
+  reset:objects:
+    desc: Empty the local application object-store bucket without deleting build caches
+    prompt: 'This permanently deletes every object in the local {{.S3_BUCKET_NAME}} bucket. Continue?'
+    cmds:
+      - task: _reset:objects
+
+  reset:server:
+    desc: Reset both the local application database and object-store bucket
+    prompt: This permanently deletes all local server data. Continue?
+    cmds:
+      - task: _reset:database
+      - task: _reset:objects
+
+  _reset:database:
+    internal: true
+    cmds:
+      - docker compose stop server
+      - docker compose up -d --wait postgres
+      - docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U openom -d postgres -c "DROP DATABASE IF EXISTS openom WITH (FORCE);"
+      - docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U openom -d postgres -c "CREATE DATABASE openom OWNER openom;"
+
+  _reset:objects:
+    internal: true
+    cmds:
+      - docker compose stop server
+      - docker compose up -d --wait minio
+      - docker compose exec -T minio mc alias set local http://localhost:9000 openom openompw123 --api S3v4
+      - docker compose exec -T minio mc mb --ignore-existing 'local/{{.S3_BUCKET_NAME}}'
+      - docker compose exec -T minio mc rm --recursive --force 'local/{{.S3_BUCKET_NAME}}'

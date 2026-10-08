@@ -9,7 +9,7 @@ and of Eritrea.
 
 - [Concepts](concepts.md) — the trust model and how a tree's state is represented.
 - [Architecture](architecture.md) — the Rust core, its seams, and the crates.
-- [Getting started](getting-started.md) — run the web app or the desktop shell.
+- [Local development](getting-started.md) — set up and run the browser, API, services, and native shell.
 
 !!! note
     openom is a prototype. The architecture, crypto, sync, and sharing are built and tested; persistence

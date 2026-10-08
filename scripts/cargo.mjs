@@ -75,6 +75,19 @@ const RUNNER = (process.env.OPENOM_RUNNER || 'auto').toLowerCase();
 const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 const TARGET_VOLUME = 'openom-cargo-target';
+const CUSTOM_TARGET_DIR = process.env.OPENOM_CARGO_TARGET_DIR?.trim();
+
+let hostTargetDir;
+let containerTargetDir = '/tmp/target';
+if (CUSTOM_TARGET_DIR) {
+  hostTargetDir = path.resolve(REPO, CUSTOM_TARGET_DIR);
+  const relativeTarget = path.relative(REPO, hostTargetDir);
+  if (relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) {
+    console.error('OPENOM_CARGO_TARGET_DIR must resolve inside the repository');
+    process.exit(2);
+  }
+  containerTargetDir = `/work/${relativeTarget.replaceAll(path.sep, '/')}`;
+}
 
 const cargoArgs = process.argv.slice(2);
 if (cargoArgs.length === 0) {
@@ -91,8 +104,20 @@ function dockerAvailable() {
   return r.status === 0 && (r.stdout || '').trim().length > 0;
 }
 
+function requestedTarget() {
+  const separate = cargoArgs.indexOf('--target');
+  if (separate >= 0) return cargoArgs[separate + 1];
+  return cargoArgs.find((argument) => argument.startsWith('--target='))?.slice('--target='.length);
+}
+
 function runLocal() {
-  return spawnSync('cargo', cargoArgs, { cwd: REPO, stdio: 'inherit' });
+  const target = requestedTarget();
+  if (target) {
+    const install = spawnSync('rustup', ['target', 'add', target], { cwd: REPO, stdio: 'inherit' });
+    if (install.error || install.status !== 0) return install;
+  }
+  const env = hostTargetDir ? { ...process.env, CARGO_TARGET_DIR: hostTargetDir } : process.env;
+  return spawnSync('cargo', cargoArgs, { cwd: REPO, env, stdio: 'inherit' });
 }
 
 // clippy and rustfmt are rustup COMPONENTS the base rust image doesn't ship. When the
@@ -114,20 +139,20 @@ function runDocker() {
     `${REPO}:/work`,
     '-v',
     `${REGISTRY_VOLUME}:/usr/local/cargo/registry`,
-    '-v',
-    `${TARGET_VOLUME}:/tmp/target`,
-    '-w',
-    '/work',
-    '-e',
-    'CARGO_TARGET_DIR=/tmp/target',
-    IMAGE,
   ];
+  if (!CUSTOM_TARGET_DIR) base.push('-v', `${TARGET_VOLUME}:/tmp/target`);
+  base.push('-w', '/work', '-e', `CARGO_TARGET_DIR=${containerTargetDir}`);
+  if (process.env.RUSTFLAGS !== undefined) base.push('-e', `RUSTFLAGS=${process.env.RUSTFLAGS}`);
+  base.push(IMAGE);
   const component = COMPONENT_FOR[cargoArgs[0]];
+  const target = requestedTarget();
   let args;
-  if (component) {
-    const inner = `rustup component add ${component} >/dev/null 2>&1 || true; exec cargo ${cargoArgs
-      .map(shQuote)
-      .join(' ')}`;
+  if (component || target) {
+    const setup = [
+      component ? `rustup component add ${shQuote(component)} >/dev/null 2>&1` : null,
+      target ? `rustup target add ${shQuote(target)} >/dev/null 2>&1` : null,
+    ].filter(Boolean).join('; ');
+    const inner = `${setup}; exec cargo ${cargoArgs.map(shQuote).join(' ')}`;
     args = [...base, 'sh', '-c', inner];
   } else {
     args = [...base, 'cargo', ...cargoArgs];

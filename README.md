@@ -36,24 +36,42 @@ browser, behind narrow, swappable seams: a content-agnostic store, a domain-agno
 layer on top, a sealer that is the sole holder of keys, and a signed keyring that makes sharing and roles a
 client-verified guarantee rather than a server promise.
 
-## Running it
+## Quick start
 
-pnpm commands run from `apps/`.
+### Requirements
 
-```powershell
-pnpm install
-pnpm serve   # web app on http://localhost:5173 (store = IndexedDB)
-pnpm dev     # tauri dev — desktop window (store = native SQLite)
+- **Core toolchain:** Node.js 20+, pnpm 11.20.0, Rust through rustup (the repository pins 1.97.1), and Task 3+.
+- **Local services and reloads:** Docker with Compose v2; Watchexec 2+ for native API development (bundled in Docker mode).
+- **Desktop and mobile only:** the platform-specific [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+From the repository root:
+
+```sh
+task setup
+task dev
 ```
 
-There is no build chain for the web app: `pnpm serve` is a tiny static server (`scripts/serve.mjs`) that
-exists only because `file://` blocks ES modules in some browsers. Tauri serves the same `apps/app/` folder —
-one app, two shells.
+The browser app is available at `http://localhost:5173` and the local API at
+`http://localhost:6060`. Browser source is buildless: edit it and refresh the page. Relevant Rust,
+migration, and Cargo manifest changes automatically rebuild and restart the API.
+
+| Command | Purpose |
+| --- | --- |
+| `task setup` | Install dependencies, generate browser WebAssembly, and check the server. |
+| `task dev` | Run the browser app, API, Postgres, and local S3-compatible storage. |
+| `task dev:web` | Run only the browser app. |
+| `task dev:server` | Run only the API and its required services. |
+| `task dev:desktop` | Run the native Tauri development shell. |
+| `task build:web-core` | Regenerate browser WebAssembly after changing its Rust sources. |
+| `task check:web` / `task check:server` | Run focused checks; matching `test:*` tasks run the tests. |
+| `task reset:database` | Recreate an incompatible local database after switching migration histories; asks before deleting data. |
+
+Run `task --list` for the complete command list. Detailed setup, runner configuration, local data
+management, and troubleshooting live in [the development guide](docs/getting-started.md).
 
 Ordinary local development uses `DevAuth`. To exercise the real Supabase Auth wire locally without a cloud
-project, run `pnpm test:e2e:supabase-auth` from `apps/`. The runner starts pinned GoTrue services through the
-optional `supabase-auth` Compose profile, generates a temporary ES256 key, and proves password sign-in, rotating
-refresh tokens, JWKS verification, and the openom server's unregistered-account boundary.
+project, run `pnpm --dir apps test:e2e:supabase-auth`. The runner starts pinned GoTrue services through the
+optional `supabase-auth` Compose profile and tests the complete authentication boundary.
 
 ## Continuous integration
 

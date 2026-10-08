@@ -1,7 +1,6 @@
-// Build openom-data-tree to WebAssembly — the claim-model family-tree engine for the web app. Same
-// two-stage flow as build-vault.mjs (Rust→wasm in Docker because the host can't run cargo build
-// scripts; wasm-bindgen glue on the host), just for this crate. Output: apps/app/src/vendor/tree/
-// (gitignored).
+// Build openom-data-tree to WebAssembly — the claim-model family-tree engine for the web app. Rust
+// compilation uses the repository's local/docker/auto Cargo runner; wasm-bindgen glue runs on the
+// host. Output: apps/app/src/vendor/tree/ (gitignored).
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,8 +10,6 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CRATE = path.join(REPO, 'packages', 'openom-data-tree');
-const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
-const REGISTRY_VOLUME = 'openom-cargo-registry';
 
 // The HOST triple for the wasm-bindgen CLI download — the Rust build runs in Docker (Linux), but the
 // bindings generator runs natively on THIS machine, so it must match the host OS/arch.
@@ -24,7 +21,6 @@ const TRIPLE = (() => {
 })();
 const BINDGEN_BIN = process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen';
 const TARGET_SUBDIR = 'target-wasm';
-const CONTAINER_TARGET = `/work/packages/openom-data-tree/${TARGET_SUBDIR}`;
 const PROFILE = process.env.WASM_PROFILE || 'wasm-release';
 const RUSTFLAGS = process.env.WASM_RUSTFLAGS || '';
 
@@ -39,29 +35,19 @@ function run(cmd, args, opts = {}) {
   if (r.status !== 0) throw new Error(`${cmd} ${args.slice(0, 3).join(' ')}… failed (code ${r.status})`);
 }
 
-function dockerAvailable() {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8' });
-  return r.status === 0 && (r.stdout || '').trim().length > 0;
-}
-
-if (!dockerAvailable()) {
-  throw new Error('Docker is required for the wasm build (host cannot run cargo build scripts). Start Docker Desktop.');
-}
-console.log(`[·] Building openom-data-tree → wasm in Docker (wasm32, --features wasm · profile=${PROFILE})…`);
-run('docker', [
-  'run', '--rm', '--init',
-  '-v', `${REPO}:/work`,
-  '-v', `${REGISTRY_VOLUME}:/usr/local/cargo/registry`,
-  '-w', '/work',
-  '-e', `CARGO_TARGET_DIR=${CONTAINER_TARGET}`,
-  '-e', `RUSTFLAGS=${RUSTFLAGS}`,
-  IMAGE,
-  'bash', '-c',
-  'rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true; ' +
-    `cargo build --profile ${PROFILE} --target wasm32-unknown-unknown ` +
-    '-p openom-data-tree --no-default-features --features wasm',
-]);
-if (!fs.existsSync(WASM)) throw new Error(`expected wasm at ${WASM} after the Docker build; not found`);
+console.log(`[·] Building openom-data-tree → wasm (runner=${process.env.OPENOM_RUNNER || 'auto'} · profile=${PROFILE})…`);
+run(process.execPath, [
+  'scripts/cargo.mjs', 'build', '--profile', PROFILE, '--target', 'wasm32-unknown-unknown',
+  '-p', 'openom-data-tree', '--no-default-features', '--features', 'wasm',
+], {
+  cwd: REPO,
+  env: {
+    ...process.env,
+    OPENOM_CARGO_TARGET_DIR: path.relative(REPO, path.join(CRATE, TARGET_SUBDIR)),
+    RUSTFLAGS,
+  },
+});
+if (!fs.existsSync(WASM)) throw new Error(`expected wasm at ${WASM} after the configured build; not found`);
 console.log(`[✓] Compiled ${path.relative(REPO, WASM)} (${(fs.statSync(WASM).size / 1024).toFixed(0)} kb)`);
 
 function resolvedBindgenVersion() {

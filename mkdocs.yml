@@ -24,4 +24,4 @@ nav:
   - Home: index.md
   - Concepts: concepts.md
   - Architecture: architecture.md
-  - Getting started: getting-started.md
+  - Local development: getting-started.md

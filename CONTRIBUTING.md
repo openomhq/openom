@@ -60,7 +60,7 @@ ephemeral resources.
 
 - Keep the change focused on its task; report unrelated findings separately.
 - Follow the applicable `AGENTS.md` files and update package or app README contracts with behavioral changes.
-- Prefer repository runners in `scripts/` and existing Docker-based tooling over ad hoc host commands.
+- Prefer the repository's Task commands, then its existing runners and Docker tooling, over ad hoc host commands.
 - Start with focused tests, then run the relevant broader checks before requesting review.
 - Never commit credentials, generated local state, or provider output containing secrets.
 

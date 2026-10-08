@@ -1,10 +1,10 @@
 # Local dev stack for the openom server (OPENOM_RUNTIME=local). Everything is decoupled
 # from the cloud: MinIO stands in for Cloudflare R2, a Postgres container for Neon.
-# The server rebuilds and restarts on source changes via cargo-watch.
+# The server rebuilds and restarts on source changes via Watchexec.
 #
-#   docker compose up --build     # server (:6060), Postgres (:5432), MinIO (:9000, console :9001)
-#   docker compose down           # stop
-#   docker compose down -v        # stop and wipe the data + build-cache volumes
+# Prefer the repository Taskfile (`task dev`, `task stop`, `task reset:server`). Direct Compose
+# remains useful for container-only debugging, but `docker compose down -v` is deliberately not
+# the routine reset path because it also deletes the expensive Cargo registry and target caches.
 #
 # Real Supabase Auth is opt-in and does not replace DevAuth for ordinary local work:
 #   COMPOSE_PROFILES=supabase-auth docker compose up supabase-auth-gateway
@@ -19,19 +19,15 @@ services:
       context: .
       dockerfile: openom/Dockerfile
     image: openom-server-dev:latest
-    # --poll: file-change events don't cross the Windows→container bind mount
-    # reliably, so poll instead of relying on inotify. -w scopes the poll WALK to just
-    # the Rust source (openom/ + packages/ + the workspace manifests) instead of the
-    # whole bind-mounted repo — the default walk re-stats the host's native `target`,
-    # node_modules, .git and apps/ every cycle, which on a Windows mount is pathologically
-    # slow. (--ignore is only a post-walk event filter and does NOT prune the walk; the
-    # -w allow-list does.) NOTE: on Windows the poll can still be slow to reach the first
-    # build; if it stalls, force the compile once with
-    #   docker compose exec server sh -c 'cd /work && cargo build -p openom'
-    # after which cargo-watch's `cargo run` starts serving in seconds (deps are cached).
-    command: ["cargo", "watch", "--poll",
-              "-w", "openom", "-w", "packages", "-w", "Cargo.toml", "-w", "Cargo.lock",
-              "-x", "run -p openom --bin openom"]
+    # Windows bind mounts do not reliably forward native file events, so Watchexec
+    # polls a narrow source set. It starts the server immediately and restarts it after
+    # relevant Rust, migration, or manifest changes; build outputs are never traversed.
+    command: ["watchexec", "--restart", "--poll", "500ms",
+              "--watch", "openom/src", "--watch", "openom/migrations",
+              "--watch", "openom/Cargo.toml", "--watch", "packages",
+              "--watch", "Cargo.toml", "--watch", "Cargo.lock",
+              "--filter", "*.rs", "--filter", "*.sql", "--filter", "Cargo.toml",
+              "--", "cargo", "run", "-p", "openom", "--bin", "openom"]
     working_dir: /work
     environment:
       # OPENOM_RUNTIME=local presets STORAGE=local (MinIO) + AUTH=dev (fake auth: any bearer

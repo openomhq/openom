@@ -1,6 +1,6 @@
 // Build openom-app-core to WebAssembly — the web app's one worker core (engine + sealer + docsync +
-// local store + replicator). Same two-stage flow as build-vault.mjs / build-tree.mjs (Rust→wasm in
-// Docker; wasm-bindgen glue on the host). Because it links openom-vault (wasm), it needs the same
+// local store + replicator). Rust compilation uses the repository's local/docker/auto Cargo runner;
+// wasm-bindgen glue runs on the host. Because it links openom-vault (wasm), it needs the same
 // getrandom wasm backend flag. Output: apps/app/src/vendor/app-core/ (gitignored).
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -11,8 +11,6 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CRATE = path.join(REPO, 'packages', 'openom-app-core');
-const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1.97.1-bookworm';
-const REGISTRY_VOLUME = 'openom-cargo-registry';
 
 // The HOST triple for the wasm-bindgen CLI download — the Rust build runs in Docker (Linux), but the
 // bindings generator runs natively on THIS machine, so it must match the host OS/arch. Covers a Windows dev
@@ -25,7 +23,6 @@ const TRIPLE = (() => {
 })();
 const BINDGEN_BIN = process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen';
 const TARGET_SUBDIR = 'target-wasm';
-const CONTAINER_TARGET = `/work/packages/openom-app-core/${TARGET_SUBDIR}`;
 const PROFILE = process.env.WASM_PROFILE || 'wasm-release';
 // openom-app-core links openom-vault, which pulls getrandom on wasm32 — it needs the JS CSPRNG backend.
 const RUSTFLAGS = process.env.WASM_RUSTFLAGS || '--cfg getrandom_backend="wasm_js"';
@@ -41,29 +38,19 @@ function run(cmd, args, opts = {}) {
   if (r.status !== 0) throw new Error(`${cmd} ${args.slice(0, 3).join(' ')}… failed (code ${r.status})`);
 }
 
-function dockerAvailable() {
-  const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8' });
-  return r.status === 0 && (r.stdout || '').trim().length > 0;
-}
-
-if (!dockerAvailable()) {
-  throw new Error('Docker is required for the wasm build (host cannot run cargo build scripts). Start Docker Desktop.');
-}
-console.log(`[·] Building openom-app-core → wasm in Docker (wasm32, --features wasm · profile=${PROFILE})…`);
-run('docker', [
-  'run', '--rm', '--init',
-  '-v', `${REPO}:/work`,
-  '-v', `${REGISTRY_VOLUME}:/usr/local/cargo/registry`,
-  '-w', '/work',
-  '-e', `CARGO_TARGET_DIR=${CONTAINER_TARGET}`,
-  '-e', `RUSTFLAGS=${RUSTFLAGS}`,
-  IMAGE,
-  'bash', '-c',
-  'rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true; ' +
-    `cargo build --profile ${PROFILE} --target wasm32-unknown-unknown ` +
-    '-p openom-app-core --no-default-features --features wasm',
-]);
-if (!fs.existsSync(WASM)) throw new Error(`expected wasm at ${WASM} after the Docker build; not found`);
+console.log(`[·] Building openom-app-core → wasm (runner=${process.env.OPENOM_RUNNER || 'auto'} · profile=${PROFILE})…`);
+run(process.execPath, [
+  'scripts/cargo.mjs', 'build', '--profile', PROFILE, '--target', 'wasm32-unknown-unknown',
+  '-p', 'openom-app-core', '--no-default-features', '--features', 'wasm',
+], {
+  cwd: REPO,
+  env: {
+    ...process.env,
+    OPENOM_CARGO_TARGET_DIR: path.relative(REPO, path.join(CRATE, TARGET_SUBDIR)),
+    RUSTFLAGS,
+  },
+});
+if (!fs.existsSync(WASM)) throw new Error(`expected wasm at ${WASM} after the configured build; not found`);
 console.log(`[✓] Compiled ${path.relative(REPO, WASM)} (${(fs.statSync(WASM).size / 1024).toFixed(0)} kb)`);
 
 function resolvedBindgenVersion() {

@@ -18,6 +18,7 @@ apps/app/src/vendor/app-core/
 
 # Per-machine runner config (scripts/cargo.mjs); .env.example is tracked.
 .env
+.task/
 
 plan/
 
@@ -37,6 +38,8 @@ apps/test-results/
 apps/playwright-report/
 apps/.last-run.json
 /tmp/playwright/
+/tmp/docs-venv/
+/tmp/site/
 
 # proptest failure-seed regressions (not tracked, matching repo convention)
 proptest-regressions/
