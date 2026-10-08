@@ -55,7 +55,7 @@ import type {
 } from './contracts.js';
 
 export type Awaitable<Value> = Value | Promise<Value>;
-export type StoragePersistence = 'granted' | 'denied' | 'unavailable';
+export type StoragePersistence = 'granted' | 'denied' | 'unavailable' | 'native';
 export type AccountCustodyStatus = 'none' | 'locked' | 'unlocked';
 
 export interface AccountSyncIdentity {

@@ -22,7 +22,7 @@ export type AccountAuthState = 'signedOut' | 'signedIn' | 'expired';
 export type AccountBindingState = 'unbound' | 'bound' | 'backedUp';
 export type AccountSyncDisposition = 'remote' | 'localOnly';
 export type AccountPendingAction = 'register' | 'restore' | 'backup' | 'revoke';
-export type StoragePersistence = 'granted' | 'denied' | 'unavailable';
+export type StoragePersistence = 'granted' | 'denied' | 'unavailable' | 'native';
 
 export interface RemoteAccountBackup {
   readonly memberId: MemberId;

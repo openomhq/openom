@@ -182,7 +182,8 @@ function accountSyncRecord(value) {
 /** @param {unknown} value */
 function storagePersistence(value) {
   const persistence = stringValue(value, 'storage persistence');
-  if (persistence !== 'granted' && persistence !== 'denied' && persistence !== 'unavailable') {
+  if (persistence !== 'granted' && persistence !== 'denied'
+    && persistence !== 'unavailable' && persistence !== 'native') {
     malformed('storage persistence');
   }
   return persistence;

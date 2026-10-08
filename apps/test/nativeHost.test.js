@@ -36,6 +36,15 @@ describe('native host boundary', () => {
       .rejects.toThrow('native host returned malformed account generation');
   });
 
+  it('accepts native SQLite as durable account persistence', async () => {
+    respondWith({ record: null, storagePersistence: 'native' });
+
+    await expect(invokeNative('account_sync_state')).resolves.toEqual({
+      record: null,
+      storagePersistence: 'native',
+    });
+  });
+
   it('normalizes native sync coverage into the worker transport contract', async () => {
     respondWith({
       uploads: [{ key: 'doc/snapshot', bytes: [7, 8], pointer: true }],
