@@ -36,6 +36,10 @@ jobs:
         with:
           node-version: 24.11.0
 
+      - uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+        with:
+          version: 3.52.0
+
       - id: classify
         name: Detect an administrator bypass push
         env:
@@ -88,7 +92,9 @@ jobs:
           node scripts/deployment-config.mjs --check
 
       - name: Run repository policy tests
-        run: node --test scripts/*.test.mjs
+        run: |
+          task --list
+          node --test scripts/*.test.mjs
 
       - name: Verify error and release hygiene
         run: |

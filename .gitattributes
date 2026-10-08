@@ -7,5 +7,8 @@ packages/openom-protocol/src/generated/** linguist-generated=true
 # Node executes these files directly; keep shebangs portable and Vitest-importable on Windows.
 *.mjs text eol=lf
 
+# Containers and Unix hosts execute these files directly; CRLF breaks their shebangs.
+*.sh text eol=lf
+
 # SQLx checks migration checksums byte-for-byte. Keep them identical on every platform.
 openom/migrations/*.sql text eol=lf

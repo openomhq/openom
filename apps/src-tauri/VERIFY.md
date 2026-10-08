@@ -4,40 +4,40 @@ The whole key-custody path (openom-vault-host + the command mirror) is cargo-tes
 Tauri crate type-checks (`cargo check -p openom-tauri` passes in a WebKitGTK container). What's
 left is **runtime** verification: actually running the app and exercising the flows.
 
-Two ways to run it. Android is attractive because the app runs *inside the emulator*, sidestepping
-the Windows policy that blocks freshly-built `.exe`s — but the cargo **build** step still runs
-dependency build-scripts on the host, which is the thing that policy blocks (that's why the pure
-crates build in Docker). So the first real question is:
+On an ordinary development machine, keep `OPENOM_RUNNER=auto` or set it to `local`, then run the desktop app
+natively with `task dev:desktop`. A managed Windows machine may instead block freshly built executables;
+Android does not avoid that restriction because its Cargo build scripts still run on the host. So the first
+real question is:
 
 > **Does `cargo`/`tauri` build in your own terminal, or does it hit "Access is denied (os error 5)"?**
 
-The agent's context hits it; yours might not. Find out cheaply before anything else.
+Find out cheaply before anything else.
 
 ---
 
 ## Step 0 — does a build run in your terminal?
 
 ```sh
-# from apps/
-pnpm install            # if not already
-pnpm exec tauri --version
+# from the repository root
+pnpm --dir apps install
+pnpm --dir apps exec tauri --version
 ```
 
 If that prints a version, try the smallest possible build (desktop):
 
 ```sh
-pnpm dev                # = tauri dev; builds + launches the desktop app
+task dev:desktop        # tauri dev; builds + launches the desktop app
 ```
 
 - **It launches** → your terminal is not under the build-script block. Great — desktop and Android
   will both work. Do the desktop checklist below, then Android.
-- **`os error 5` during the cargo step** → the policy affects your terminal too. Build under **WSL2**
-  instead (WSL2 can build for Android and drive the Windows emulator over adb; for desktop, WSL2 +
-  WSLg runs the Linux build's GUI). Ping me and we'll wire the WSL path.
+- **`os error 5` during the cargo step** → set `OPENOM_RUNNER=docker` in `.env`, rerun the task, and open
+  `http://localhost:6080/vnc_auto.html?autoconnect=true&resize=scale`. This runs the Linux desktop shell;
+  use native CI for platform-specific verification. WSL2/WSLg remains an optional alternative.
 
 ---
 
-## Desktop runtime checklist (`pnpm dev`)
+## Desktop runtime checklist (`task dev:desktop`)
 
 Run each; all should hold. This exercises the real Rust host (invoke round-trip + SQLite in the app
 data dir).

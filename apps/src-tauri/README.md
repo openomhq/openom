@@ -7,35 +7,43 @@
 design doc of its own (wires `openom-vault-host`'s vault lifecycle + `journal`'s doc store to
 Tauri)
 
-**Last updated:** 2026-09-22
+**Last updated:** 2026/10/08
 
 ## Run / verify
 
-Type-check only, from the repo root (Windows blocks native cargo build scripts here, so
-`scripts/cargo.mjs` routes through WSL2/Docker automatically):
+Type-check only, from the repo root, either in desktop CI or with the dedicated WebKitGTK task:
 
 ```sh
-node scripts/cargo.mjs check -p openom-tauri
+task check:desktop
 ```
 
 This crate has no `#[cfg(test)]` of its own, and `cargo test -p openom-tauri` is **not** the
 verification path here — confirmed by running it: building a *test* binary pulls in Tauri's Linux
-webview stack (webkit2gtk/gdk/pango), which the headless container `cargo.mjs` uses doesn't have,
-and it fails at the `gdk-sys` build script (`Package 'gdk-3.0' ... not found`). `cargo check`
-above succeeds because it stops short of that link step. The custody logic this crate wraps is
-tested where it lives — `node scripts/cargo.mjs test -p openom-vault-host` — headless, no webview
-needed.
+webview stack (webkit2gtk/gdk/pango). The generic `scripts/cargo.mjs` image does not provide that
+stack and intentionally excludes this crate; the dedicated image above does. The custody logic this
+crate wraps is tested where it lives — `node scripts/cargo.mjs test -p openom-vault-host` — headless,
+no webview needed.
 
-Real verification is running the app. From `apps/`:
+Real verification is running the app. From the repository root:
 
 ```sh
-pnpm dev             # tauri dev — desktop window. Works directly unless this machine's
-                      # build-script policy blocks a freshly-built cargo binary ("Access is
-                      # denied (os error 5)") — see VERIFY.md Step 0; if it does, build under WSL2.
+task dev:desktop
+```
+
+With `OPENOM_RUNNER=local`, the task runs native `tauri dev`. Tauri's built-in static development
+server reloads the webview after changes under `apps/app/`, and its Rust watcher rebuilds and restarts the
+shell after changes in the native crate or watched workspace dependencies.
+
+With `OPENOM_RUNNER=docker`, Compose Watch syncs the workspace into a Linux Tauri container and noVNC makes
+its display available at `http://localhost:6080/vnc_auto.html?autoconnect=true&resize=scale`. Use that mode
+only when host policy blocks freshly compiled executables with `Access is denied (os error 5)`. It exercises
+the same application and Rust shell but does not replace native Windows/macOS verification.
+
+Mobile commands still run from `apps/`:
+
+```sh
 pnpm android:init    # one-time: generates src-tauri/gen/android
-pnpm android:dev     # build + install + launch on an emulator/device — on Windows this needs
-                      # WSL2 (native cargo is blocked); see WSL-SETUP.md for the full path
-                      # (mirrored networking, Linux Android SDK/NDK, cloning into ext4).
+pnpm android:dev     # build + install + launch on an emulator/device
 ```
 
 Then work through the runtime checklist in **VERIFY.md** — provision/durability, change-passphrase

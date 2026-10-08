@@ -1,13 +1,14 @@
 # Local development
 
 The repository-level `Taskfile.yml` is the development entry point. It keeps the browser app, Rust API,
-local services, checks, tests, and destructive resets behind memorable cross-platform commands.
+local services, checks, tests, and destructive resets behind memorable cross-platform commands. This is
+the canonical guide for those workflows; the root README intentionally provides only the short path here.
 
 ## Requirements
 
 - **Core toolchain:** Git, Node.js 20+, pnpm 11.20.0, Rust through rustup, and Task 3+. The checked-in
   `rust-toolchain.toml` selects Rust 1.97.1 plus Clippy and rustfmt.
-- **Local services and reloads:** Docker with Compose v2 and Watchexec 2+. Watchexec is required on the
+- **Local services and reloads:** Docker with Compose 2.22+ and Watchexec 2+. Watchexec is required on the
   host for native API development and is already included in the Docker development image.
 - **Desktop and mobile only:** install the platform-specific [Tauri prerequisites][tauri-prerequisites].
   Windows 11 already includes WebView2; native Windows builds also need the Microsoft C++ Build Tools.
@@ -27,8 +28,8 @@ This installs the pinned pnpm dependencies, generates the two browser WebAssembl
 API. The first Rust or Docker build downloads and compiles dependencies; later builds reuse Cargo registry
 and target caches.
 
-Configuration is optional for ordinary development. To override machine-specific behavior, copy
-`.env.example` to the gitignored `.env` and edit it there.
+`task setup` creates the gitignored `.env` from `.env.example` when needed. It selects and persists a
+working native or Docker runner once; edit `.env` later to override machine-specific behavior.
 
 ## Run the full stack
 
@@ -64,26 +65,33 @@ Use a narrower task when the full stack is unnecessary:
 | --- | --- |
 | `task dev:web` | Browser app only. |
 | `task dev:server` | API plus PostgreSQL and object storage. |
-| `task dev:desktop` | Native Tauri shell backed by SQLite. |
+| `task dev:desktop` | Tauri shell backed by SQLite, using the runner selected in `.env`. |
 | `task services` | PostgreSQL and object storage in the background. |
 | `task status` | Current Compose service status. |
 | `task logs` | Follow Docker-hosted API logs. |
 
-Tauri serves the same `apps/app/` source as the browser. There is one application and one Rust core, not a
-separate desktop implementation.
+Tauri serves the same `apps/app/` source as the browser. Its built-in static development server reloads the
+webview after frontend changes, while the Tauri CLI rebuilds and restarts the shell after watched Rust changes.
+There is one application and one Rust core, not a separate desktop implementation.
 
 ## Native and Docker runners
 
 `OPENOM_RUNNER` in `.env` controls where Rust commands run:
 
-- `auto` is the default. The long-running development API runs natively; finite repository runners try the
-  host first and may fall back to Docker.
+- `auto` is the first-setup default. It compiles and executes a tiny probe, checks Watchexec, then persists
+  `local` or `docker` in `.env` so later development commands do not probe again.
 - `local` forces native Rust execution.
 - `docker` runs Rust and Watchexec inside Docker. Use it when host policy blocks locally built executables.
 
 Docker mode polls the bind-mounted source tree because native file events do not reliably cross the
 Windows-to-container boundary. Its watcher is restricted to source, migration, and manifest paths so build
 outputs are not scanned.
+
+For `task dev:desktop`, `auto` and `local` launch the platform-native Tauri shell. Explicit `docker` mode
+runs the Linux shell in a container and exposes its display at
+`http://localhost:6080/vnc_auto.html?autoconnect=true&resize=scale`. The port binds to localhost only, and
+Compose Watch copies source changes into the container so frontend reloads and Rust restarts still work.
+This fallback is useful on restricted hosts, but it does not replace native platform verification.
 
 ## Checks and tests
 
@@ -92,6 +100,7 @@ task check:web
 task check:server
 task test:web
 task test:server
+task test:acceptance
 ```
 
 The server integration task starts its required services and uses disposable test state. Rust changes must
@@ -100,7 +109,7 @@ also satisfy the crate-specific all-feature Clippy requirements in `AGENTS.md` b
 Ordinary local development uses `DevAuth`. To test the real Supabase Auth protocol without a cloud project:
 
 ```sh
-pnpm --dir apps test:e2e:supabase-auth
+task test:acceptance
 ```
 
 That runner starts pinned GoTrue services through the optional `supabase-auth` Compose profile and exercises
@@ -112,7 +121,7 @@ All reset tasks ask for confirmation and preserve dependency downloads and Cargo
 
 | Command | Deleted data |
 | --- | --- |
-| `task reset:database` | Recreates the local `openom` PostgreSQL database. |
+| `task reset:database` | Recreates the local PostgreSQL database and restarts a running API so migrations rerun. |
 | `task reset:objects` | Empties the local object-store bucket. |
 | `task reset:server` | Performs both resets. |
 
