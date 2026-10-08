@@ -1,0 +1,58 @@
+services:
+  desktop:
+    develop:
+      watch:
+        - action: sync
+          path: .cargo
+          target: /work/.cargo
+          initial_sync: true
+        - action: sync
+          path: packages
+          target: /work/packages
+          initial_sync: true
+          ignore:
+            - "**/target/"
+            - "**/target-wasm/"
+            - "**/tools/"
+        - action: sync
+          path: openom
+          target: /work/openom
+          initial_sync: true
+        - action: sync
+          path: apps/app
+          target: /work/apps/app
+          initial_sync: true
+        - action: sync
+          path: apps/scripts
+          target: /work/apps/scripts
+          initial_sync: true
+        - action: sync
+          path: apps/src-tauri
+          target: /work/apps/src-tauri
+          initial_sync: true
+          ignore:
+            - gen/
+        - action: sync
+          path: Cargo.toml
+          target: /work/Cargo.toml
+          initial_sync: true
+        - action: sync
+          path: Cargo.lock
+          target: /work/Cargo.lock
+          initial_sync: true
+        - action: sync
+          path: rust-toolchain.toml
+          target: /work/rust-toolchain.toml
+          initial_sync: true
+        - action: sync
+          path: apps/package.json
+          target: /work/apps/package.json
+          initial_sync: true
+        - action: sync
+          path: apps/pnpm-lock.yaml
+          target: /work/apps/pnpm-lock.yaml
+          initial_sync: true
+        - action: sync
+          path: apps/pnpm-workspace.yaml
+          target: /work/apps/pnpm-workspace.yaml
+          initial_sync: true

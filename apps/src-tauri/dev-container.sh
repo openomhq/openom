@@ -21,7 +21,12 @@ openbox >/tmp/openbox.log 2>&1 &
 x11vnc -display "$display" -forever -shared -nopw -localhost -noxdamage -quiet &
 websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5900 &
 
+workspace_wait=0
 while [ ! -f /work/apps/package.json ]; do
+  workspace_wait=$((workspace_wait + 1))
+  if [ "$workspace_wait" -eq 30 ]; then
+    echo "[desktop] no workspace synced; start this container with 'task dev:desktop'" >&2
+  fi
   sleep 1
 done
 

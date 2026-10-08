@@ -78,7 +78,7 @@ tasks:
     cmds:
       - node scripts/dev-environment.mjs prepare
       - echo "Open http://localhost:{{.DESKTOP_PORT}}/vnc_auto.html?autoconnect=true&resize=scale"
-      - docker compose up --build --watch desktop
+      - docker compose -f docker-compose.yml -f compose.desktop.yml up --build --watch desktop
 
   dev:server:
     desc: Run only the local API using the runner selected in .env

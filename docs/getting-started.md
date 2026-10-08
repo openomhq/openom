@@ -8,8 +8,9 @@ the canonical guide for those workflows; the root README intentionally provides 
 
 - **Core toolchain:** Git, Node.js 20+, pnpm 11.20.0, Rust through rustup, and Task 3+. The checked-in
   `rust-toolchain.toml` selects Rust 1.97.1 plus Clippy and rustfmt.
-- **Local services and reloads:** Docker with Compose 2.22+ and Watchexec 2+. Watchexec is required on the
-  host for native API development and is already included in the Docker development image.
+- **Local services and reloads:** Docker with Compose 2.22+ and Watchexec 2+. Docker-based desktop
+  development requires Compose 2.39.4+ for initial workspace synchronization. Watchexec is required on
+  the host for native API development and is already included in the Docker development image.
 - **Desktop and mobile only:** install the platform-specific [Tauri prerequisites][tauri-prerequisites].
   Windows 11 already includes WebView2; native Windows builds also need the Microsoft C++ Build Tools.
 

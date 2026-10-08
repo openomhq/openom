@@ -4,7 +4,9 @@ import test from 'node:test';
 
 const taskfile = fs.readFileSync(new URL('../Taskfile.yml', import.meta.url), 'utf8');
 const compose = fs.readFileSync(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+const desktopCompose = fs.readFileSync(new URL('../compose.desktop.yml', import.meta.url), 'utf8');
 const devEnvironment = fs.readFileSync(new URL('./dev-environment.mjs', import.meta.url), 'utf8');
+const desktopEntrypoint = fs.readFileSync(new URL('../apps/src-tauri/dev-container.sh', import.meta.url), 'utf8');
 const serverImage = fs.readFileSync(new URL('../openom/Dockerfile', import.meta.url), 'utf8');
 const tauriImage = fs.readFileSync(new URL('../apps/src-tauri/tauri.Dockerfile', import.meta.url), 'utf8');
 const tauriConfig = JSON.parse(fs.readFileSync(new URL('../apps/src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
@@ -62,9 +64,15 @@ test('desktop development selects native or browser-visible Docker execution', (
 
   assert.match(section, /dev-environment\.mjs run dev:desktop/u);
   assert.match(section, /pnpm dev/u);
-  assert.match(section, /docker compose up --build --watch desktop/u);
+  assert.match(
+    section,
+    /docker compose -f docker-compose\.yml -f compose\.desktop\.yml up --build --watch desktop/u,
+  );
   assert.match(compose, /127\.0\.0\.1:\$\{OPENOM_DESKTOP_PORT:-6080\}:6080/u);
-  assert.match(compose, /action: sync[\s\S]*initial_sync: true/u);
+  assert.doesNotMatch(compose, /^\s+develop:\s*$/mu);
+  assert.match(desktopCompose, /^\s+develop:\s*$/mu);
+  assert.match(desktopCompose, /action: sync[\s\S]*initial_sync: true/u);
+  assert.match(desktopEntrypoint, /no workspace synced; start this container with 'task dev:desktop'/u);
   assert.match(tauriImage, /novnc websockify/u);
   assert.equal(tauriConfig.build.frontendDist, '../app');
   assert.equal(tauriConfig.build.devUrl, undefined);
@@ -86,4 +94,5 @@ test('local service configuration has one environment-backed source', () => {
 
 test('stop includes every optional long-running development profile', () => {
   assert.match(taskfile, /--profile desktop --profile supabase-auth --profile observability stop/u);
+  assert.match(compose, /^\s+desktop:\s*$/mu);
 });
