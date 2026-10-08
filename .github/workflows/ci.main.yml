@@ -36,10 +36,6 @@ jobs:
         with:
           node-version: 24.11.0
 
-      - uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-        with:
-          version: 3.52.0
-
       - id: classify
         name: Detect an administrator bypass push
         env:
@@ -82,6 +78,10 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
         with:
           node-version: 24.11.0
+
+      - uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+        with:
+          version: 3.52.0
 
       - name: Parse every app module
         run: find apps/app/src -name '*.js' -print0 | xargs -0 -n1 node --check

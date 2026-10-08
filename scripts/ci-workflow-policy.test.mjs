@@ -33,6 +33,12 @@ test('main workflow runs quick checks only for administrator bypass pushes', () 
   assert.match(jobs.detect, /node scripts\/ci-main-scope\.mjs --github-output/);
   assert.match(jobs.quick, /needs\.detect\.outputs\.bypass_push == 'true'/);
   assert.match(jobs.quick, /needs\.detect\.outputs\.quick_required == 'true'/);
+  assert.match(jobs.quick, /go-task\/setup-task@[0-9a-f]{40}/);
+  assert.ok(
+    jobs.quick.indexOf('go-task/setup-task@') < jobs.quick.indexOf('task --list'),
+    'quick must install Task before invoking it',
+  );
+  assert.doesNotMatch(jobs.detect, /go-task\/setup-task@/);
   assert.match(jobs.rust, /needs\.detect\.outputs\.bypass_push == 'true'/);
   assert.match(jobs.rust, /needs\.detect\.outputs\.rust_required == 'true'/);
   assert.match(jobs.rust, /cargo fmt --all --check/);
