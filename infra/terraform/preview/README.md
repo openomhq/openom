@@ -8,6 +8,15 @@ variables on the GitHub `preview` environment. A post-apply plan is clean. Both 
 router's deterministic, non-cacheable 404 for unknown slugs, while direct access to the protected sink
 Function URL is rejected with `403 Forbidden`.
 
+## Verified architecture
+
+The dynamic-origin design was proven live on 2026/09/25 before the standing platform was built. The proof
+selected two protected Lambda Function URLs through one CloudFront distribution and KeyValueStore, preserved
+application authentication and payload hashes behind OAC, changed routes without redeploying CloudFront,
+selected an unsigned web origin, and rejected stale KVS writes. Direct access to both protected Function URLs
+was rejected. The proof destroyed all 22 temporary resources, and its local state was confirmed empty before
+the completed spike was removed from the repository.
+
 ## What it is — and is not
 
 This OpenTofu root owns the shared infrastructure used by every pull-request preview: the edge router,

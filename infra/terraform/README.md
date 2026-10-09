@@ -148,11 +148,3 @@ Cloudflare DNS at it. Deploy the server stack first (the domain reads its Functi
 2. The OpenTofu version pinned in `.opentofu-version` and the AWS CLI, with an Identity Center admin
    profile (`aws configure sso`).
 3. **GitHub `staging` environment protection** limiting it to `main` (see OIDC trust note above).
-
-## Preview dynamic-origin spike
-
-`preview-spike/` is a temporary local-state proof for the planned pull-request preview router. It creates no
-DNS or third-party resources and is not part of staging. Run it only through
-`node scripts/preview-spike.mjs`; the runner verifies the configured AWS account and destroys the temporary
-CloudFront, KVS, IAM, and Lambda resources after testing. See `preview-spike/README.md` for the contract and
-recovery cleanup command.
