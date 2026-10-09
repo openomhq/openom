@@ -180,7 +180,7 @@ jobs:
           SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
           SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
           SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
-        run: node scripts/deployment-config.mjs --validate-job preview.deploy.database
+        run: node infra/deployment/deployment-config.mjs --validate-job preview.deploy.database
 
       - name: Verify Supabase token issuance and JWKS
         env:
@@ -272,7 +272,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
           CLOUDFLARE_PAGES_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
-        run: node scripts/deployment-config.mjs --validate-job preview.deploy.deploy-web
+        run: node infra/deployment/deployment-config.mjs --validate-job preview.deploy.deploy-web
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -441,7 +441,7 @@ jobs:
           SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-        run: node scripts/deployment-config.mjs --validate-job preview.deploy.deploy-full
+        run: node infra/deployment/deployment-config.mjs --validate-job preview.deploy.deploy-full
 
       - name: Verify and extract the immutable artifact
         run: |

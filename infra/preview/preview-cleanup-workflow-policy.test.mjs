@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { workflowJobSources } from '../../scripts/deployment-config.mjs';
+import { workflowJobSources } from '../deployment/deployment-config.mjs';
 
 const cleanupSource = readFileSync(
   new URL('../../.github/workflows/preview.cleanup.yml', import.meta.url),

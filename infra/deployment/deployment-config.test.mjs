@@ -83,7 +83,7 @@ test('requires validation steps to expose every job value under its contract nam
       - name: Verify deployment configuration
         env:
           ENDPOINT: \${{ vars.ENDPOINT }}
-        run: node scripts/deployment-config.mjs --validate-job example.deploy
+        run: node infra/deployment/deployment-config.mjs --validate-job example.deploy
 `;
   const validationSources = workflowValidationStepSources(source);
   assert.throws(

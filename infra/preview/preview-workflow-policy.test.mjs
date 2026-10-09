@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { workflowJobSources } from '../../scripts/deployment-config.mjs';
+import { workflowJobSources } from '../deployment/deployment-config.mjs';
 
 const source = readFileSync(new URL('../../.github/workflows/preview.deploy.yml', import.meta.url), 'utf8');
 const jobs = workflowJobSources(source);

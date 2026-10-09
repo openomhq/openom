@@ -89,12 +89,13 @@ jobs:
       - name: Verify generated and deployment contracts
         run: |
           node scripts/gen-error-codes.mjs --check
-          node scripts/deployment-config.mjs --check
+          node infra/deployment/deployment-config.mjs --check
 
       - name: Run repository policy tests
         run: |
           task --list
           node --test scripts/*.test.mjs
+          node --test infra/deployment/deployment-config.test.mjs
           task test:preview
 
       - name: Verify error and release hygiene

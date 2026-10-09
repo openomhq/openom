@@ -97,7 +97,7 @@ jobs:
           SUPABASE_JWT_ISS: ${{ vars.SUPABASE_JWT_ISS }}
           SUPABASE_JWT_AUD: ${{ vars.SUPABASE_JWT_AUD }}
           OPENOM_WEB_ORIGINS: ${{ vars.OPENOM_WEB_ORIGINS }}
-        run: node scripts/deployment-config.mjs --validate-job staging.server.deploy
+        run: node infra/deployment/deployment-config.mjs --validate-job staging.server.deploy
 
       - name: Verify the deployment artifact
         run: cd _artifact && sha256sum -c SHA256SUMS

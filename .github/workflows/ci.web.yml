@@ -63,8 +63,8 @@ jobs:
 
       - name: Deployment configuration contract in sync
         run: |
-          node --test scripts/deployment-config.test.mjs
-          node scripts/deployment-config.mjs --check
+          node --test infra/deployment/deployment-config.test.mjs
+          node infra/deployment/deployment-config.mjs --check
 
       - name: Preview workflow security and lifecycle contracts
         run: |

@@ -87,7 +87,7 @@ jobs:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
           R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: node scripts/deployment-config.mjs --validate-job preview.cleanup.cleanup
+        run: node infra/deployment/deployment-config.mjs --validate-job preview.cleanup.cleanup
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v5.1.0
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}

@@ -72,7 +72,7 @@ jobs:
           R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-        run: node scripts/deployment-config.mjs --validate-job staging.web.deploy
+        run: node infra/deployment/deployment-config.mjs --validate-job staging.web.deploy
 
       - name: Verify and extract the static artifact
         run: |
@@ -140,7 +140,7 @@ jobs:
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
           OPENOM_TEST_ACCOUNT_PASSPHRASE: ${{ vars.OPENOM_TEST_ACCOUNT_PASSPHRASE }}
           STAGING_APP_GATE_PASSWORD: ${{ secrets.STAGING_APP_GATE_PASSWORD }}
-        run: node scripts/deployment-config.mjs --validate-job staging.web.acceptance
+        run: node infra/deployment/deployment-config.mjs --validate-job staging.web.acceptance
 
       - name: Install browser acceptance dependencies
         run: |
