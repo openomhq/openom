@@ -35,7 +35,7 @@ on `openom-roles` — but openom-domain-specific: the `EngineKind` roster and th
 
 The `ROLE_*` constants (`ROLE_OWNER=1 … ROLE_VIEWER=5`) are pinned to openom's proto `MemberRole` values
 by `openom-roles`'s drift-guard test (`tests::keyeo_api_role_convention_matches_openom_roles`) — that
-binding is asserted there, not here, so this crate keeps no openom dependency. Run: `node scripts/cargo.mjs test -p openom-keyring-api` (from the repo root).
+binding is asserted there, not here, so this crate keeps no openom dependency. Run: `node scripts/rust/cargo.mjs test -p openom-keyring-api` (from the repo root).
 
 ## Usage
 

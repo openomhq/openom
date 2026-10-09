@@ -61,7 +61,7 @@ the Invariants table in `packages/keyeo-crypto/README.md`. The wrapper tests
 (`kdf::tests::derive_kek_wrapper_matches_the_core`, `root::tests::frozen_labels_are_unchanged`) pin
 this crate's proto wrappers to those cores.
 
-Run: `node scripts/cargo.mjs test -p openom-crypto` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-crypto` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage

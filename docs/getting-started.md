@@ -102,10 +102,21 @@ task check:server
 task test:web
 task test:server
 task test:acceptance
+task test:automation
 ```
 
 The server integration task starts its required services and uses disposable test state. Rust changes must
 also satisfy the crate-specific all-feature Clippy requirements in `AGENTS.md` before commit.
+
+Use `task generate:error-codes` after editing the shared error contract and `task check:error-codes` to verify
+its generated mirrors. The focused repository guards are available as `task check:error-hygiene`,
+`task check:release-build`, and `task check:nursery`. Run Kani proofs with, for example,
+`task proof:kani PACKAGE=openom-data-model`; add a specific harness through `KANI_ARGS` when needed.
+
+`task test:automation` runs every repository and infrastructure automation suite. The narrower
+`test:repository`, `test:deployment`, `test:preview`, and `test:terraform` tasks use the same tracked-test
+discovery guard, so a new `*.test.mjs` file cannot be silently omitted. Executable implementations under
+`scripts/` are grouped by responsibility; developers should normally use these stable Task commands instead.
 
 Ordinary local development uses `DevAuth`. To test the real Supabase Auth protocol without a cloud project:
 

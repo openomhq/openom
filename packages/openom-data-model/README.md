@@ -40,7 +40,7 @@ can verify.
 | **CLAIM-7** | The frozen record schema (`validation` feature, Draft 2020-12) rejects a malformed id/type/`createdBy`/signature pattern and a bad attest verdict. | The typed shape and the wire shape can't silently drift apart. | `schema::tests::a_real_claim_and_anchor_validate`, `schema::tests::attestation_value_is_constrained`, `schema::tests::junk_and_malformed_ids_are_rejected` |
 | **CLAIM-8** | `Record::try_from` (the parse-don't-validate ingest boundary) verifies a Claim's content-hash id, parses a known anchor type as typed, and preserves an unrecognized `type` verbatim as `Record::Unknown` — provided it has a non-empty, non-content-addressed (`sha256:`) id; a missing id or a reserved `sha256:` id is refused. | Forward-compat: a newer version's record type flows through an older client untouched, yet an unknown record can neither be unfoldable (no id) nor squat a claim's content-address. | `envelope::tests::record_try_from_dispatches_and_verifies_the_id`, `envelope::tests::unknown_records_are_preserved_but_guarded`, `envelope::tests::record_serde_roundtrips_and_verifies_embedded_ids` |
 
-Run: `node scripts/cargo.mjs test -p openom-data-model` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-data-model` (from the repo root; on Windows cargo runs under
 WSL2/Docker). Fuzz: `cargo +nightly fuzz run hash_and_verify` (from `packages/openom-data-model/fuzz`) —
 hashing/verifying an arbitrary envelope must never panic, OOM, or hang.
 

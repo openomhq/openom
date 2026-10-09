@@ -23,10 +23,10 @@ jobs:
           node-version: 22
 
       - name: Generate app-core wasm declarations
-        run: node scripts/build-app-core.mjs
+        run: node scripts/build/build-app-core.mjs
 
       - name: Type-check JavaScript boundaries
-        run: node scripts/typecheck.mjs
+        run: node scripts/check/typecheck.mjs
 
   check:
     runs-on: ubuntu-latest
@@ -50,7 +50,7 @@ jobs:
           task --dry --force dev:desktop:docker
           task --dry --force dev:server:local
           task --dry --force dev:server:docker
-          node --test scripts/taskfile-policy.test.mjs
+          node --test tests/repository/taskfile-policy.test.mjs
 
       # Syntaxpruefung ohne Bundler: node parst jedes Modul. Dank
       # "type": "module" in package.json gelten .js-Dateien als ES-Module.
@@ -59,7 +59,7 @@ jobs:
 
       # Der Fehlercode-Generator (contracts/error-codes.json -> JS + Rust Spiegel) darf nicht driften.
       - name: Error codes in sync
-        run: node scripts/gen-error-codes.mjs --check
+        run: node scripts/build/gen-error-codes.mjs --check
 
       - name: Deployment configuration contract in sync
         run: |
@@ -69,18 +69,18 @@ jobs:
       - name: Preview workflow security and lifecycle contracts
         run: |
           node --test \
-            scripts/ci-scope.test.mjs \
-            scripts/ci-workflow-policy.test.mjs
+            tests/repository/ci-scope.test.mjs \
+            tests/repository/ci-workflow-policy.test.mjs
           task test:preview
 
       # Kein `.stack` darf je in die UI gerendert werden (nur Dev-Konsole).
       - name: Error hygiene
-        run: node scripts/check-error-hygiene.mjs
+        run: node scripts/check/check-error-hygiene.mjs
 
       # Kein Auslieferungs-Build darf `tauri build --debug` nutzen: das brächte den zerstörerischen
       # Schema-Reset (store-sqlite, nur unter debug_assertions) in ein ausgeliefertes Binary.
       - name: No debug release build
-        run: node scripts/check-no-debug-build.mjs
+        run: node scripts/check/check-no-debug-build.mjs
 
   # Eigener PARALLELER Job, damit fehlende Uebersetzungen sofort und unabhaengig
   # sichtbar sind — nicht als letzter Schritt hinter den anderen Pruefungen versteckt

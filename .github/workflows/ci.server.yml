@@ -3,7 +3,7 @@ name: ci.server
 # The server contract suite (openom/tests/api.rs + the storage checksum test) against a LIVE Postgres + MinIO.
 # These are the `#[ignore]`d integration tests the compile/unit jobs never run, so without this gate a
 # client<->server contract regression (the BlobStore-over-HTTP conformance, keyring/access/media/proposals/GC
-# semantics) is only caught by running `node scripts/itest.mjs` locally. It runs for each PR update and again
+# semantics) is only caught by running `task test:server` locally. It runs for each PR update and again
 # for the merge queue's final integrated candidate, but not redundantly after that candidate lands on main.
 
 on:
@@ -17,7 +17,7 @@ jobs:
   server-contract:
     runs-on: ubuntu-latest
     env:
-      # Mirrors docker-compose.yml / scripts/itest.mjs, with the stack reached at localhost (published ports).
+      # Mirrors docker-compose.yml / scripts/test/itest.mjs, with the stack reached at localhost (published ports).
       # OPENOM_RUNTIME=local presets storage=local (MinIO) + auth=dev + the /dev routes the media/log GC tests use;
       # the S3/DB endpoints still come from the explicit vars below (OPENOM_RUNTIME never overrides those).
       OPENOM_RUNTIME: local

@@ -11,5 +11,5 @@ deployment steps, and CI checks the complete contract with:
 
 ```sh
 node infra/deployment/deployment-config.mjs --check
-node --test infra/deployment/deployment-config.test.mjs
+task test:deployment
 ```

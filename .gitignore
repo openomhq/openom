@@ -16,7 +16,7 @@ apps/app/src/vendor/tree/
 packages/openom-app-core/target-wasm/
 apps/app/src/vendor/app-core/
 
-# Per-machine runner config (scripts/cargo.mjs); .env.example is tracked.
+# Per-machine runner config (scripts/rust/cargo.mjs); .env.example is tracked.
 .env
 .task/
 

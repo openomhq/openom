@@ -32,5 +32,5 @@ openom-crypto — this crate is a code move, not a behavior change.
 | **KCRYPTO-4** | `derive_root` splits one Argon2id master (via HKDF-SHA256, over caller-supplied `RootLabels`) into independent sibling keys — KEK, Ed25519 identity, X25519 HPKE keypair — deterministically from `(passphrase, params)`, and each derived key actually works (identity signs/verifies; HPKE keypair wraps/unwraps). | A KEK compromise alone can never yield the signing or HPKE key, and unlock is reproducible from the passphrase alone. | `root::tests::is_deterministic_for_the_same_passphrase`, `root::tests::kek_and_identity_are_independent`, `root::tests::the_hpke_keypair_is_deterministic_independent_and_usable`, `root::tests::the_derived_identity_signs_and_verifies` |
 | **KCRYPTO-5** | A recovery code rejects malformed input and checksum mismatches before any KDF runs. | A detected mistype fails fast and cheaply instead of burning an Argon2id derivation. | `recovery::tests::typo_caught_by_checksum`, `recovery::tests::malformed_rejected` |
 
-Run: `node scripts/cargo.mjs test -p keyeo-crypto` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p keyeo-crypto` (from the repo root; on Windows cargo runs under
 WSL2/Docker).

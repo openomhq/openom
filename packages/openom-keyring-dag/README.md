@@ -38,7 +38,7 @@ openom crates to cross-check against the chain.
 | **KDAG-6** | The op verifier and full-anchor verifier fold authenticated DAG state into a `openom_keyring_api::MembershipView`; full-anchor admission refuses rollback. The RVK is deterministic + secret-dependent. | The keyless server seam, fresh-device restore artifact, and recovery-key derivation remain one verified contract. | `verifier::tests::dag_verifier_folds_admitted_ops_into_a_membership_view`, `anchor_verifier::tests::full_anchor_admission_bootstraps_and_advances_verified_state`, `anchor_verifier::tests::full_anchor_admission_refuses_a_rollback`, `recovery::tests::different_secrets_yield_different_rvks` |
 
 The RVK derivation is byte-identical to the chain vault's (`openom_crypto::derive_rvk`), guarded by a
-cross-check test in `openom-vault`. Run: `node scripts/cargo.mjs test -p openom-keyring-dag` (from the repo root).
+cross-check test in `openom-vault`. Run: `node scripts/rust/cargo.mjs test -p openom-keyring-dag` (from the repo root).
 
 ## Usage
 

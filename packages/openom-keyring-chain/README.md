@@ -103,7 +103,7 @@ recovery/provision writer's self-check), and `sign_keyring` / `verify_keyring` /
 `ChainVerifier` (in `verifier`) is the keyless server-side `KeyringVerifier` seam; `blob_sync` is the
 `store-blob` transport.
 
-Run: `node scripts/cargo.mjs test -p openom-keyring-chain` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-keyring-chain` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Position

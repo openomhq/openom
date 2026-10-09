@@ -38,7 +38,7 @@ mean.
 | **SYNC-7** | A moderator remove propagates and folds the record out of the live set (and out of a later snapshot — the structural GC horizon). | Deletion is a claim-model op, not a store operation; it must converge like any other. | `sync::tests::a_moderator_remove_syncs_and_drops_the_record`, `sync::tests::compaction_folds_out_removed_records` |
 | **SYNC-8** | Opening a log sealed under a different DEK fails; it never returns partial or garbage plaintext. | E2EE: a wrong key must fail closed at the boundary this crate calls through. | `sync::tests::a_wrong_key_cannot_open_the_claim_log` |
 
-Run: `node scripts/cargo.mjs test -p openom-docsync` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-docsync` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage

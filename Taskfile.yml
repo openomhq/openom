@@ -23,7 +23,7 @@ tasks:
   setup:
     desc: Install dependencies, generate browser WASM, and check the server
     cmds:
-      - node scripts/dev-environment.mjs configure
+      - node scripts/dev/dev-environment.mjs configure
       - task: setup:dependencies
       - task: build:web-core
       - task: check:server
@@ -37,13 +37,18 @@ tasks:
   build:web-core:
     desc: Regenerate the browser app-core and tree WASM modules
     cmds:
-      - node scripts/build-app-core.mjs
-      - node scripts/build-tree.mjs
+      - node scripts/build/build-app-core.mjs
+      - node scripts/build/build-tree.mjs
+
+  generate:error-codes:
+    desc: Regenerate the shared application error-code mirrors
+    cmds:
+      - node scripts/build/gen-error-codes.mjs
 
   dev:
     desc: Run the browser app and local API using the runner selected in .env
     cmds:
-      - node scripts/dev-environment.mjs run dev
+      - node scripts/dev/dev-environment.mjs run dev
 
   dev:local:
     deps:
@@ -65,7 +70,7 @@ tasks:
   dev:desktop:
     desc: Run the Tauri shell using the runner selected in .env
     cmds:
-      - node scripts/dev-environment.mjs run dev:desktop
+      - node scripts/dev/dev-environment.mjs run dev:desktop
 
   dev:desktop:local:
     dir: apps
@@ -76,14 +81,14 @@ tasks:
   dev:desktop:docker:
     prefix: desktop
     cmds:
-      - node scripts/dev-environment.mjs prepare
+      - node scripts/dev/dev-environment.mjs prepare
       - echo "Open http://localhost:{{.DESKTOP_PORT}}/vnc_auto.html?autoconnect=true&resize=scale"
       - docker compose -f docker-compose.yml -f compose.desktop.yml up --build --watch desktop
 
   dev:server:
     desc: Run only the local API using the runner selected in .env
     cmds:
-      - node scripts/dev-environment.mjs run dev:server
+      - node scripts/dev/dev-environment.mjs run dev:server
 
   dev:server:local:
     deps: [services]
@@ -104,7 +109,7 @@ tasks:
       S3_SECRET_KEY: '{{.OBJECT_STORE_SECRET_KEY}}'
       RUST_LOG: 'info,openom=debug'
     cmds:
-      - node scripts/dev-environment.mjs prepare
+      - node scripts/dev/dev-environment.mjs prepare
       - >-
         watchexec --restart --no-vcs-ignore
         --ignore '**/target*/**' --ignore '**/tools/**'
@@ -116,7 +121,7 @@ tasks:
   dev:server:docker:
     prefix: api
     cmds:
-      - node scripts/dev-environment.mjs prepare
+      - node scripts/dev/dev-environment.mjs prepare
       - docker compose up --build server
 
   services:
@@ -145,10 +150,30 @@ tasks:
     cmds:
       - pnpm --dir apps typecheck
 
+  check:error-codes:
+    desc: Verify generated application error-code mirrors are current
+    cmds:
+      - node scripts/build/gen-error-codes.mjs --check
+
+  check:error-hygiene:
+    desc: Verify UI error surfaces never expose raw messages or stacks
+    cmds:
+      - node scripts/check/check-error-hygiene.mjs
+
+  check:release-build:
+    desc: Verify every shipping desktop build uses the release profile
+    cmds:
+      - node scripts/check/check-no-debug-build.mjs
+
   check:server:
     desc: Check the server with the configured local/docker/auto Cargo runner
     cmds:
-      - node scripts/cargo.mjs check -p openom --bin openom
+      - node scripts/rust/cargo.mjs check -p openom --bin openom
+
+  check:nursery:
+    desc: Report candidate Rust lints without weakening the deny gate
+    cmds:
+      - node scripts/rust/nursery.mjs
 
   check:desktop:
     desc: Check the Tauri crate in its dedicated WebKitGTK container
@@ -171,17 +196,54 @@ tasks:
     desc: Run server integration tests against disposable database state
     deps: [services]
     cmds:
-      - node scripts/itest.mjs --fresh
+      - node scripts/test/itest.mjs --fresh
 
   test:acceptance:
     desc: Run the local Supabase Auth acceptance suite
     cmds:
       - pnpm --dir apps test:e2e:supabase-auth
 
+  test:account:
+    desc: Run the local account backup and restore acceptance suite
+    cmds:
+      - pnpm --dir apps test:e2e:account
+
+  test:identity:
+    desc: Run the local durable-identity acceptance suite
+    cmds:
+      - pnpm --dir apps test:e2e:durable-identity
+
+  test:automation:
+    desc: Run every repository and infrastructure automation test
+    cmds:
+      - node tests/run-automation-tests.mjs
+
+  test:repository:
+    desc: Run repository workflow, Taskfile, migration, and CI-scope policy tests
+    cmds:
+      - node tests/run-automation-tests.mjs repository
+
+  test:deployment:
+    desc: Run shared deployment configuration tests
+    cmds:
+      - node tests/run-automation-tests.mjs deployment
+
   test:preview:
     desc: Run preview lifecycle, workflow, router, and sink tests
     cmds:
-      - node infra/preview/run-tests.mjs
+      - node tests/run-automation-tests.mjs preview
+
+  test:terraform:
+    desc: Run shared Terraform and OpenTofu infrastructure tests
+    cmds:
+      - node tests/run-automation-tests.mjs terraform
+
+  proof:kani:
+    desc: Run Kani proofs for PACKAGE, optionally with KANI_ARGS
+    requires:
+      vars: [PACKAGE]
+    cmds:
+      - node scripts/rust/kani.mjs -p {{.PACKAGE}} {{.KANI_ARGS}}
 
   reset:database:
     desc: Recreate the local application database without deleting build caches
@@ -222,4 +284,4 @@ tasks:
   _restart:server:
     internal: true
     cmds:
-      - node scripts/dev-environment.mjs restart-server
+      - node scripts/dev/dev-environment.mjs restart-server

@@ -33,7 +33,7 @@ crypto beyond `sha256` helpers, and **depends on no other openom crate** — not
 | **JCS-7** | Field selection (`canonical_subset` / `canonical_excluding`) is order-independent and object-only (else `JcsError::NotObject`). | Fingerprint / id inputs are stable regardless of caller field order. | `tests::subset_and_excluding_pick_fields_order_independently`, `tests::non_object_subset_errors` |
 | **JCS-8** | Hex output (`hex`, `hex256`) is lowercase. | Every crate on the content-addressing path encodes hashes identically. | `tests::hex256_is_lowercase_64_chars` |
 
-Run: `node scripts/cargo.mjs test -p format-jcs` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p format-jcs` (from the repo root; on Windows cargo runs under
 WSL2/Docker). Fuzz: `cargo +nightly fuzz run canonicalize` (from `packages/jcs/fuzz`).
 
 ## Usage

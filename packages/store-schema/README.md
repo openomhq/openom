@@ -18,7 +18,7 @@
     user's data on a schema change. The caller surfaces the error (never a silent panic).
 
 The destructive/reset path is compiled in ONLY under `debug_assertions`, so a shipped binary physically cannot
-wipe a DB on a schema mismatch (the CI guard `scripts/check-no-debug-build.mjs` keeps every shipping build a
+wipe a DB on a schema mismatch (the CI guard `task check:release-build` keeps every shipping build a
 release build). Motivating bug: a `CREATE TABLE IF NOT EXISTS` column rename silently kept a stale table on an
 existing device — `IF NOT EXISTS` never alters a table that already exists, and every test used a fresh
 in-memory DB, so nothing caught it until a query hit the missing column at runtime.

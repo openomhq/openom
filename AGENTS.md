@@ -40,11 +40,11 @@ Run quick type checks, format checks, and unit tests after a series of commits.
 **Clippy is a gate (`deny`).** `clippy::pedantic` + `clippy::cargo` are wired workspace-wide as `deny`
 in `[workspace.lints.clippy]` (each crate opts in with `[lints] workspace = true`), so a finding FAILS
 the build under clippy — CI runs `cargo clippy --workspace --all-features`. For every crate you touch,
-run `node scripts/cargo.mjs clippy -p <crate> --all-features` and clear any finding before committing.
+run `node scripts/rust/cargo.mjs clippy -p <crate> --all-features` and clear any finding before committing.
 **Pass `--all-features`** — without it the feature-gated modules (`wasm`, `sqlite`, `profiling`, the
 `test-util` gates) are not compiled, so a finding there stays invisible until CI. After a
 `Cargo.toml`/dependency change, run one workspace-root pass —
-`node scripts/cargo.mjs clippy --workspace --exclude openom-tauri --all-features` — which also catches
+`node scripts/rust/cargo.mjs clippy --workspace --exclude openom-tauri --all-features` — which also catches
 the project-file `clippy::cargo` lints. If a lint is genuinely wrong for a call site,
 `#[allow(clippy::…)]` it with a one-line reason rather than reaching for a blanket allow.
 
@@ -81,4 +81,4 @@ When you add or materially change a unit:
   Invariants section. A README may omit any section that would be padding — never pad one.
 - Tag non-Rust code fences (` ```sh `, ` ```json `, …) so rustdoc doesn't run them as doctests.
 - Keep the `packages/README.md` map and each `Position` line honest when the graph or a status changes.
-- Verify before done: `node scripts/cargo.mjs test -p <crate>` (repo root; cargo runs under WSL2/Docker on Windows).
+- Verify before done: `node scripts/rust/cargo.mjs test -p <crate>` (repo root; cargo runs under WSL2/Docker on Windows).

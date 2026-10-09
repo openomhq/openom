@@ -34,7 +34,7 @@ as an `Access` variant here.
 | **ROLES-2** | The entry-kind→role matrix is fixed: `Snapshot`/`Delta`→Maintainer, `Proposal`/`Media`→Editor, `Unspecified`→`None`. | This is exactly the mapping `openom-vault`'s `attribution::verify_entry` uses to authorize a landed entry by its kind. | `tests::kind_required_roles_match_the_matrix` |
 | **ROLES-3** | Roles are power-descending and totally ordered: `Owner` < `Co-owner` < `Maintainer` < `Editor` < `Viewer`. | The `member_role <= required` gate used by every caller only works if "weaker" always means "numerically greater." | `tests::roles_are_power_descending` |
 
-Run: `node scripts/cargo.mjs test -p openom-roles` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-roles` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage

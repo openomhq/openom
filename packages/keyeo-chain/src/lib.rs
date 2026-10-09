@@ -702,7 +702,7 @@ mod compaction_tests {
 
 /// Kani proof harnesses — bit-precise model checking (CBMC backend). Compiled ONLY under `cargo kani`
 /// (which sets `--cfg kani`); the normal build and `cargo test` never see them, so there is no `kani`
-/// dependency in `Cargo.toml`. Run them with `node scripts/kani.mjs -p keyeo-chain` (Docker image or a
+/// dependency in `Cargo.toml`. Run them with `task proof:kani PACKAGE=keyeo-chain` (Docker image or a
 /// local Kani install).
 ///
 /// keyeo-chain is a deliberate good-first Kani target: the policy predicates it decides on are pure and

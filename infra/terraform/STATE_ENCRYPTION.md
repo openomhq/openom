@@ -70,5 +70,5 @@ remove it and restore enforced mode.
 Encryption protects confidentiality; S3 versioning provides recovery, while replay and rollback decisions remain
 an operator responsibility.
 
-The executable proof is `infra/terraform/tests/state-encryption.test.mjs`. It uses disposable local state to verify
+Run the executable proof with `task test:terraform`. It uses disposable local state to verify
 plaintext migration, enforced encryption, missing- and wrong-passphrase rejection, and passphrase rollover.

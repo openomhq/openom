@@ -35,7 +35,7 @@ Pure-Rust account and tree lifecycle calls use `Passphrase`, `RecoveryCode`, `Tr
 | **APP-CORE-4** | One durable account uses the same identity for an owned tree and for joined trees on both engines, including after dropping and reopening the account handle. | Joined membership must not mint a second passphrase-derived identity or depend on per-tree member credentials. | `lifecycle_tests::one_account_identity_joins_and_reopens_trees_on_both_engines` |
 | **APP-CORE-5** | Account backup snapshots contain the exact wrapped bytes, their credential-authenticated generation, and a canonical SHA-256 hash; fetched candidates expose no snapshot until credential and floor verification succeeds. | Transport metadata must never advance the rollback floor or become persisted account state without cryptographic verification. | `lifecycle_tests::account_candidates_authenticate_generation_before_exposing_a_snapshot`, `lifecycle_tests::recovery_candidate_rotates_before_it_can_be_adopted` |
 
-Run: `node scripts/cargo.mjs test -p openom-app-core --all-features` (from the repo root).
+Run: `node scripts/rust/cargo.mjs test -p openom-app-core --all-features` (from the repo root).
 
 ## Usage
 

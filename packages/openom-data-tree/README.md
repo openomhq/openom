@@ -41,7 +41,7 @@ assert_eq!(view.people[0].id, "pA");
 assert_eq!(view.people[0].names.len(), 1);
 ```
 
-Run: `node scripts/cargo.mjs test -p openom-data-tree` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-data-tree` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Position
@@ -49,6 +49,6 @@ WSL2/Docker).
 Composes `openom-data-crdt` + `openom-data-projection` (+ `openom-data-model` types). It depends on **no** transport
 crate and holds **no** key material — edits are raw op-batch bytes the caller seals (via the existing
 sealer-worker + store stack). The `#[wasm_bindgen]` veneer (`WasmTree`) +
-`scripts/build-tree.mjs` → `apps/app/src/vendor/tree/` (gitignored) are built; next is the JS
+`task build:web-core` → `apps/app/src/vendor/tree/` (gitignored) is built; next is the JS
 `FamilyTree` adapter (OPE-201) that wraps `WasmTree` at the `library.js` factory. Takes over
 `openom-treelog`'s engine/veneer role; full dependency graph in `packages/README.md`.

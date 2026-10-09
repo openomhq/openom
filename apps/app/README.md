@@ -36,14 +36,14 @@ stop that local session with `Ctrl+C`. Use `pnpm preview:open --profile <name>` 
 local-storage context. Developers without local browser filtering can instead open the pull request's deployment
 URL normally.
 
-`pnpm test:core` runs vitest **inside a Docker container** (`node ../scripts/vitest.mjs`) — not
+`pnpm test:core` runs vitest **inside a Docker container** (`node ../scripts/test/vitest.mjs`) — not
 because of cargo, but because this host's supply-chain policy makes `pnpm install`'s esbuild
 build-script check fatal; a container's pnpm has no such policy. Docker Desktop must be running.
 
 `pnpm typecheck` likewise runs the pinned TypeScript checker inside Docker. It uses separate strict
 main-thread and Web Worker configurations, emits nothing, and therefore preserves the buildless runtime.
 The generated `src/vendor/app-core/openom_app_core.d.ts` must exist first; build it from the repository
-root with `node scripts/build-app-core.mjs` when the runner reports that it is missing. App-owned declarations
+root with `task build:web-core` when the runner reports that it is missing. App-owned declarations
 under `src/core/types/` restore domain distinctions erased by wasm-bindgen; compile-only fixtures under
 `apps/typecheck/` prove that same-representation swaps remain checker errors. The shared app-core RPC
 contract models the production surface once for both the Comlink worker and native host; browser-only extensions
@@ -54,13 +54,13 @@ before running the same Docker-backed checker.
 
 Two things this app *depends on* but does not itself build:
 
-- **The wasm engines** (`src/vendor/vault/`, `src/vendor/tree/`) are generated, gitignored
-  output — `node scripts/build-vault.mjs` / `node scripts/build-tree.mjs` **from the repo
-  root**. Both compile Rust→wasm inside Docker (the host can't run cargo build scripts under
-  company policy — same reason `scripts/cargo.mjs` uses Docker/WSL2 for native crate tests), then
+- **The wasm engines** (`src/vendor/app-core/`, `src/vendor/tree/`) are generated, gitignored
+  output — run `task build:web-core` **from the repo root**. Both compile Rust→wasm inside Docker
+  (the host can't run cargo build scripts under company policy — same reason `scripts/rust/cargo.mjs`
+  uses Docker/WSL2 for native crate tests), then
   run `wasm-bindgen` on the host. Run these once before `pnpm serve` if `src/vendor/{sealer,tree}/`
   is empty.
-- **`pnpm test:store`** (from `apps/`) runs `node ../scripts/cargo.mjs test -p store-log -p openom`
+- **`pnpm test:store`** (from `apps/`) runs `node ../scripts/rust/cargo.mjs test -p store-blob -p store-media -p openom`
   — the native-crate store-conformance suite, not this app's JS — and on Windows that cargo run
   goes through WSL2/Docker too.
 
@@ -250,7 +250,7 @@ src/views/             one file per screen, composed from ui/ + core/ read helpe
 
 src/vendor/            generated + third-party, never hand-edited.
   app-core/, tree/        wasm-bindgen output for openom-app-core / openom-data-tree — gitignored,
-                          rebuilt by scripts/build-app-core.mjs / build-tree.mjs (repo root).
+                          rebuilt by `task build:web-core` (repo root).
   sqlite/                 vendored sqlite-wasm (OPFS-SAHPool) bundle, checked in — the persistent
                           browser-SQLite spike (apps/e2e/sqlite*.e2e.ts exercises it).
   comlink.js, fluent.js   vendored third-party libraries (worker RPC, Fluent i18n runtime).

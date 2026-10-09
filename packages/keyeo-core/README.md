@@ -36,5 +36,5 @@ Layer 0 — the seam types beneath the keyeo engine. `keyeo-dag` depends on it a
 `keyeo_dag::X` consumers are unaffected. It depends only on `serde`, `postcard`, `edsign`, and `thiserror`.
 Full dependency graph: see `packages/README.md`.
 
-Run: `node scripts/cargo.mjs test -p keyeo-core` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p keyeo-core` (from the repo root; on Windows cargo runs under
 WSL2/Docker).

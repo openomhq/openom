@@ -57,7 +57,7 @@ impl HlcClock {
 }
 
 /// Kani proof harnesses for the engine clock — compiled only under `cargo kani` (`--cfg kani`), never
-/// in the normal build. Run: `node scripts/kani.mjs -p openom-data-tree`. The clock's guarantee (a re-mint
+/// in the normal build. Run: `task proof:kani PACKAGE=openom-data-tree`. The clock's guarantee (a re-mint
 /// can never reproduce an already-used id) reduces to two properties proven here over ALL inputs: `next`
 /// is strictly monotonic and `observe` never regresses. Both take primitive inputs; `next`'s only loop
 /// is the logical carry, bounded to one iteration by the maintained `logical < 1000` invariant.

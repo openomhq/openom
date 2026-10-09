@@ -42,7 +42,7 @@ calendar system beyond proleptic Gregorian; it does no I/O and **depends on no o
 | **EDTF-8** | Season codes `21`-`24` map to Spring/Summer/Autumn/Winter; Winter spans into the following year. | A season is a common genealogy approximation for a birth/death date. | `tests::seasons` |
 | **EDTF-9** | An open (`..`) or unknown (empty) interval end yields `None`, never a fabricated date. | Callers must be able to tell "unbounded" apart from a real day. | `tests::intervals` |
 
-Run: `node scripts/cargo.mjs test -p format-edtf` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p format-edtf` (from the repo root; on Windows cargo runs under
 WSL2/Docker). Fuzz: `cargo +nightly fuzz run parse` (from `packages/edtf/fuzz`).
 
 ## Usage

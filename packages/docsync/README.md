@@ -30,7 +30,7 @@ is being re-layered onto; it is not yet the production openom sync path.
 | **DSYNC-1** | Two replicas that push concurrently converge after each pulls the other, and a third replica bootstraps to the same state. | The correctness of the whole loop: order-independent, at-least-once-safe convergence. | `tests::two_replicas_converge_and_a_third_bootstraps` |
 | **DSYNC-2** | `maybe_compact` replaces the update-log with a snapshot once the configured policy trips (e.g. `EveryNUpdates`), and the compacted state is unchanged. | Bounds log growth without a barrier or a change of semantics. | `tests::snapshot_policy_triggers_compaction_by_length` |
 
-Run: `node scripts/cargo.mjs test -p docsync` (from the repo root).
+Run: `node scripts/rust/cargo.mjs test -p docsync` (from the repo root).
 
 ## Usage
 

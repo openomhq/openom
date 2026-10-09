@@ -33,7 +33,7 @@ backend/domain/crypto-agnostic: it stores opaque bytes under caller-chosen keys 
 | **BLOB-5** | Identical content yields the same reference-impl etag (`hex(sha256(bytes))`); the etag is opaque to callers. | Content addressing + a stable CAS token, without leaking the store's versioning scheme. | `conformance::memory_blob_conforms`, `conformance::fs_blob_conforms` |
 
 `conformance::run(make)` panics on the first violation and is the contract any new backend must satisfy.
-Run: `node scripts/cargo.mjs test -p store-blob` (from the repo root).
+Run: `node scripts/rust/cargo.mjs test -p store-blob` (from the repo root).
 
 ## Usage
 

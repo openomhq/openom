@@ -44,14 +44,14 @@ version = "0.1.0"
 license = "AGPL-3.0-or-later"
 edition = "2021"
 # The supported toolchain is pinned in rust-toolchain.toml and the container runner
-# (see scripts/cargo.mjs). 1.85 remains the honest MSRV floor so the resolver can
+# (see scripts/rust/cargo.mjs). 1.85 remains the honest MSRV floor so the resolver can
 # pick current dependencies rather than downgrading them.
 rust-version = "1.85"
 
 [workspace.lints.rust]
 # The kani proof harnesses are gated on `#[cfg(kani)]` — a cfg the kani driver sets, not cargo — so a
 # normal build would warn "unexpected cfg". Declare it known (still checking every other cfg name). Crates
-# with harnesses opt in via `[lints] workspace = true`. See scripts/kani.mjs and docker/kani.Dockerfile.
+# with harnesses opt in via `[lints] workspace = true`. See scripts/rust/kani.mjs and scripts/rust/kani.Dockerfile.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 # Clippy pedantic + cargo, opted into per-crate via `[lints] workspace = true`. `deny`, so a new finding
@@ -194,8 +194,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # fuzz-style coverage of the decode/open paths without a nightly libFuzzer setup.
 proptest = "1"
 
-# The wasm build profile (sealer + tree). MUST live in this ROOT manifest — Cargo
-# ignores `[profile.*]` in member manifests. `scripts/build-{sealer,tree}.mjs` build
+# The wasm build profile (app core + tree). MUST live in this ROOT manifest — Cargo
+# ignores `[profile.*]` in member manifests. The `scripts/build/` runners build
 # with `--profile wasm-release`. Tuned for STARTUP, not smallest module: opt-level=3, so
 # the compute on the critical path (Argon2id unlock, seal/open, CRDT snapshot decode)
 # runs fast — the same trade the chatletting/libzaungast browser demos landed on, where

@@ -18,7 +18,7 @@ const harnessUrl = `http://localhost:5173/e2e/account-roundtrip-harness.html?${h
 
 for (const engine of ['chain', 'dag'] as const) {
   test(`account facade: register, backup, fresh-context restore, and tree reopen (${engine}) @integration`, async ({ browser }) => {
-    test.skip(!enabled, 'run through scripts/account-acceptance.mjs with the real local server');
+    test.skip(!enabled, 'run through task test:account with the real local server');
     const firstContext = await browser.newContext();
     const secondContext = await browser.newContext();
     const firstPage = await firstContext.newPage();

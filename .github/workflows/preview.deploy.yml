@@ -71,7 +71,7 @@ jobs:
           node-version: 24.11.0
 
       - name: Build the app-core WASM
-        run: node scripts/build-app-core.mjs
+        run: node scripts/build/build-app-core.mjs
 
       - if: needs.authorize.outputs.mode == 'full'
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
@@ -191,8 +191,8 @@ jobs:
           SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
         run: |
-          npm --prefix scripts/smoke install --no-audit --no-fund --ignore-scripts
-          node scripts/smoke/supabase-smoke.mjs
+          npm --prefix scripts/test/smoke install --no-audit --no-fund --ignore-scripts
+          node scripts/test/smoke/supabase-smoke.mjs
 
       - name: Verify and extract migrations
         run: |

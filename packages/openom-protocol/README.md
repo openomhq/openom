@@ -43,7 +43,7 @@ strings derived from them — every consumer above it decides what those bytes m
 | **PROTO-7** | `keyring_signing_bytes` covers `revision`, `prev_keyring_hash`, `members` (which — since the signer set is derived from members — also covers the trust set), and `epochs`/`wraps`, but excludes `signatures`. | Anti-rollback and the history chain are signed; every signer signs identical bytes, so signatures collect independently (threshold-ready). | `aad::tests::keyring_signing_bytes_covers_and_ignores_signatures` |
 | **PROTO-8** | Every AAD/signing byte string is domain-separated by a leading tag or version int, so none collides with another (header vs. author vs. wrap vs. keyring). | A founder/co-owner's author key IS their keyring signer key — only the domain tag stops a signature from being cross-replayed into the wrong context. | `aad::tests::author_signing_bytes_domain_disjoint`, `::wrap_aad_is_disjoint_from_header_aad`, `::keyring_signing_bytes_layout_version_disjoint` |
 
-Run: `node scripts/cargo.mjs test -p openom-protocol` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-protocol` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage

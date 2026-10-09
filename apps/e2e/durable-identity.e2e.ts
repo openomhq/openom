@@ -61,7 +61,7 @@ async function ready(page: import('@playwright/test').Page) {
 }
 
 test('durable identity registers before creating its first DAG tree @integration', async ({ page }) => {
-  test.skip(!enabled, 'run through scripts/durable-identity-acceptance.mjs');
+  test.skip(!enabled, 'run through task test:identity');
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(String(error)));
   await ready(page);
@@ -84,7 +84,7 @@ test('durable identity registers before creating its first DAG tree @integration
 });
 
 test('local DAG signup and credential changes preserve identity and keyring @integration', async ({ page }) => {
-  test.skip(!enabled, 'run through scripts/durable-identity-acceptance.mjs');
+  test.skip(!enabled, 'run through task test:identity');
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(String(error)));
   await ready(page);

@@ -19,9 +19,9 @@ task check:desktop
 
 This crate has no `#[cfg(test)]` of its own, and `cargo test -p openom-tauri` is **not** the
 verification path here — confirmed by running it: building a *test* binary pulls in Tauri's Linux
-webview stack (webkit2gtk/gdk/pango). The generic `scripts/cargo.mjs` image does not provide that
+webview stack (webkit2gtk/gdk/pango). The generic `scripts/rust/cargo.mjs` image does not provide that
 stack and intentionally excludes this crate; the dedicated image above does. The custody logic this
-crate wraps is tested where it lives — `node scripts/cargo.mjs test -p openom-vault-host` — headless,
+crate wraps is tested where it lives — `node scripts/rust/cargo.mjs test -p openom-vault-host` — headless,
 no webview needed.
 
 Real verification is running the app. From the repository root:

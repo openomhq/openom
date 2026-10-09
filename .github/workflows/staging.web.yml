@@ -30,7 +30,7 @@ jobs:
           node-version: 24.11.0
 
       - name: Build the app-core WASM
-        run: node scripts/build-app-core.mjs
+        run: node scripts/build/build-app-core.mjs
 
       - name: Assemble and hash the static site
         run: |

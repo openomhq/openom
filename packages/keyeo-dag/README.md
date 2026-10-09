@@ -35,7 +35,7 @@ and is publishable on its own.
 | **KEYEO-4** | Concurrent epochs reconcile to a single shared DEK, and a fresh epoch's DEK round-trips for every current member. | Two members re-keying at once must not fork the group's encryption; everyone lands on one key. | `epoch::tests::concurrent_epochs_reconcile_to_a_single_shared_dek`, `epoch::tests::fresh_epoch_round_trips_for_its_members` |
 | **KEYEO-5** | Quorum governance is exact: `All` is unanimity (and the empty set is not a quorum); `EitherFounderOr` accepts the founder alone or the configured set. | Multi-party authority can't be met by an off-by-one or an empty roster. | (the generic `Requirement` now lives in `keyeo-core`) `keyeo_core::quorum::tests::all_is_unanimity_and_the_empty_set_is_not`, `keyeo_core::quorum::tests::either_is_founder_or_unanimity`; `Individual` inertness: `quorum::tests::individual_governance_never_reaches_quorum` |
 
-Run: `node scripts/cargo.mjs test -p keyeo-dag` (from the repo root; on Windows cargo runs under WSL2/Docker).
+Run: `node scripts/rust/cargo.mjs test -p keyeo-dag` (from the repo root; on Windows cargo runs under WSL2/Docker).
 
 ## Usage
 

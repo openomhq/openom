@@ -41,7 +41,7 @@ jobs:
           fi
           test -n "$base_sha"
           git diff --name-only "$base_sha" "$GITHUB_SHA" |
-            node scripts/ci-scope.mjs --github-output "$GITHUB_OUTPUT"
+            node scripts/ci/ci-scope.mjs --github-output "$GITHUB_OUTPUT"
 
   clippy:
     needs: classify

@@ -160,8 +160,8 @@ jobs:
           SUPABASE_TEST_EMAIL: ${{ vars.SUPABASE_TEST_EMAIL }}
           SUPABASE_TEST_PASSWORD: ${{ secrets.SUPABASE_TEST_PASSWORD }}
         run: |
-          npm --prefix scripts/smoke install --no-audit --no-fund --ignore-scripts
-          node scripts/smoke/supabase-smoke.mjs
+          npm --prefix scripts/test/smoke install --no-audit --no-fund --ignore-scripts
+          node scripts/test/smoke/supabase-smoke.mjs
 
       - name: Install browser acceptance dependencies
         run: |

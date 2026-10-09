@@ -56,7 +56,7 @@ the attribution-forgery gap a duplicate envelope would open.
 | **CRDT-5** | Content-addressed & id-verified: an `Op`'s id is `sha256(JCS(envelope − id − signature − embedded-record-signature))`; ingest (`TryFrom` / deserialize) rejects a stated id that doesn't match and a forged embedded replacement id; signing the replacement never shifts the op id. | One hashing path (shared `ContentAddressed` seam), and there is no id-skipping ingest door. | `tests::op_id_is_stable_when_the_embedded_replacement_is_signed`, `tests::a_tampered_op_id_fails_ingest`, `tests::an_op_with_a_forged_embedded_replacement_id_fails_ingest`, `tests::op_roundtrips_through_serde_and_verifies_its_id`, `tests::channel_item_dispatches_on_type` |
 | **CRDT-6** | Forward-compatible / vocabulary-agnostic: a record of a `type` this build doesn't recognize is preserved verbatim (never dropped, never batch-poisoning) and folds by id/author exactly like a known one; the fold decision is invariant under any claim `predicate`/`value`. `type` and `predicate`/`value` are opaque **shape**, never interpreted **vocabulary**. | A newer app version's data type flows through an older client untouched instead of halting sync; closed-world validation lives in schema + projection, not this transport (OPE-212a). | `tests::a_novel_type_is_preserved_through_the_fold`, `tests::an_unknown_record_obeys_the_same_ops_as_any_record`, `tests::a_batch_with_novel_items_round_trips_through_the_codec_untouched`, `tests::the_fold_ignores_predicate_and_value` |
 
-Run: `node scripts/cargo.mjs test -p openom-data-crdt` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p openom-data-crdt` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage

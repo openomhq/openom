@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 const APPS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO = path.resolve(APPS, '..');
 
-// Load <repo>/.env — same file and convention as scripts/cargo.mjs. A real environment variable
+// Load <repo>/.env — same file and convention as scripts/rust/cargo.mjs. A real environment variable
 // already set always wins (we don't overwrite it below).
 try {
   for (const raw of fs.readFileSync(path.join(REPO, '.env'), 'utf8').split('\n')) {

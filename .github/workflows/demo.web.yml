@@ -37,7 +37,7 @@ jobs:
       # fresh checkout. The script compiles Rust→wasm in Docker (pre-installed on the runner) and runs
       # wasm-bindgen (version-pinned to Cargo.lock) natively. Uncached, ~several minutes — fine for a manual deploy.
       - name: Build the app-core wasm
-        run: node scripts/build-app-core.mjs
+        run: node scripts/build/build-app-core.mjs
 
       # Visitors land in the app, not in a preview page. The device frames sit
       # next to it under /preview.html.

@@ -7,7 +7,7 @@
 ```sh
 cd apps && pnpm test:core
 ```
-`test:core` runs `node ../scripts/vitest.mjs`, which shells out to vitest inside a Linux
+`test:core` runs `node ../scripts/test/vitest.mjs`, which shells out to vitest inside a Linux
 container (this host's supply-chain policy blocks esbuild's install script on the Windows
 host's pnpm) — no local vitest install needed, just Docker.
 

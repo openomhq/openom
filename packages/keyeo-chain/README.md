@@ -59,5 +59,5 @@ Its reference concrete instantiation — `Id = String`-ish member ids, openom's 
 **openom-keyring-chain** (OPE-300), which adds the proto `Keyring` wire, the key-epoch / DEK payload, and
 the `ChainVerifier` seam. Full dependency graph: see `packages/README.md`.
 
-Run: `node scripts/cargo.mjs test -p keyeo-chain` (from the repo root; on Windows cargo runs under
+Run: `node scripts/rust/cargo.mjs test -p keyeo-chain` (from the repo root; on Windows cargo runs under
 WSL2/Docker).

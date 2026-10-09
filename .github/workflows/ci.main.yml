@@ -59,10 +59,10 @@ jobs:
 
           echo 'bypass_push=true' >> "$GITHUB_OUTPUT"
           if [[ "$BEFORE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            printf '' | node scripts/ci-main-scope.mjs --github-output "$GITHUB_OUTPUT"
+            printf '' | node scripts/ci/ci-main-scope.mjs --github-output "$GITHUB_OUTPUT"
           else
             git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" |
-              node scripts/ci-main-scope.mjs --github-output "$GITHUB_OUTPUT"
+              node scripts/ci/ci-main-scope.mjs --github-output "$GITHUB_OUTPUT"
           fi
 
   quick:
@@ -83,25 +83,28 @@ jobs:
         with:
           version: 3.52.0
 
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.13.1
+          tofu_wrapper: false
+
       - name: Parse every app module
         run: find apps/app/src -name '*.js' -print0 | xargs -0 -n1 node --check
 
       - name: Verify generated and deployment contracts
         run: |
-          node scripts/gen-error-codes.mjs --check
+          task check:error-codes
           node infra/deployment/deployment-config.mjs --check
 
-      - name: Run repository policy tests
+      - name: Run repository and infrastructure automation tests
         run: |
           task --list
-          node --test scripts/*.test.mjs
-          node --test infra/deployment/deployment-config.test.mjs
-          task test:preview
+          task test:automation
 
       - name: Verify error and release hygiene
         run: |
-          node scripts/check-error-hygiene.mjs
-          node scripts/check-no-debug-build.mjs
+          task check:error-hygiene
+          task check:release-build
 
   rust:
     needs: detect

@@ -35,7 +35,7 @@ it.
 | **SIGN-5** | A malformed public key is a construction error, not a deferred verify failure. | Bad key bytes fail closed at the boundary, before any signature is trusted. | `tests::malformed_public_key_is_a_construction_error` |
 | **SIGN-6** | `derive_signing_key(ikm, info)` domain-separates: the same `ikm` under different `info` yields unrelated keys. | Both keyring engines derive their recovery key here; a signing capability can never be confused with an encryption/identity key from the same secret. | `openom_keyring_dag::recovery::tests::rvk_is_domain_separated_from_the_raw_seed_key` |
 
-Run: `node scripts/cargo.mjs test -p edsign` (from the repo root; on Windows cargo runs under WSL2/Docker).
+Run: `node scripts/rust/cargo.mjs test -p edsign` (from the repo root; on Windows cargo runs under WSL2/Docker).
 
 ## Usage
 

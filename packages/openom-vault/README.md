@@ -49,7 +49,7 @@ platform veneers, preventing same-shaped credentials and identifiers from being 
 | **VAULT-6** | Absurd KDF params are rejected before Argon2id runs; the member's `did:key` is the founder key and stable across unlock. | A malicious keyring can't `DoS` via KDF cost, and the claim-author id is deterministic. | `vault::tests::absurd_kdf_params_are_rejected_before_running_argon2id`, `dag_vault::tests::did_key_is_the_founder_key_and_stable_across_unlock` |
 | **VAULT-7** | The vault's provisioning RVK (`openom_crypto::derive_rvk`) and the dag engine's verifying RVK (`openom_keyring_dag::recovery`) are byte-identical. | A tree recovered by one is verifiable by the other — the two derivations live in different crates and must not drift. | `dag_vault::tests::vault_and_engine_derive_the_same_recovery_key` |
 
-Run: `node scripts/cargo.mjs test -p openom-vault` (from the repo root).
+Run: `node scripts/rust/cargo.mjs test -p openom-vault` (from the repo root).
 
 ## Usage
 

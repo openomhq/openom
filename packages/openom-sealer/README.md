@@ -50,7 +50,7 @@ the DEK never enters the webview at all.
 > **`openom-vault`** with the lifecycle extraction (OPE-279) and now live there as **VAULT-1 … VAULT-7**.
 > IDs are never renumbered, so this crate's table keeps the gap.
 
-Run: `node scripts/cargo.mjs test -p openom-sealer` (from the repo root; on Windows cargo runs
+Run: `node scripts/rust/cargo.mjs test -p openom-sealer` (from the repo root; on Windows cargo runs
 under WSL2/Docker).
 
 ## Usage

@@ -1,0 +1,9 @@
+{
+  "name": "openom-deployment-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Dependencies for the deployment Supabase authentication smoke test.",
+  "dependencies": {
+    "jose": "6.2.12"
+  }
+}
