@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { workflowJobSources } from './deployment-config.mjs';
+import { workflowJobSources } from '../../scripts/deployment-config.mjs';
 
 const cleanupSource = readFileSync(
-  new URL('../.github/workflows/preview.cleanup.yml', import.meta.url),
+  new URL('../../.github/workflows/preview.cleanup.yml', import.meta.url),
   'utf8',
 );
 const lifecycleSource = readFileSync(
-  new URL('../.github/workflows/preview.lifecycle.yml', import.meta.url),
+  new URL('../../.github/workflows/preview.lifecycle.yml', import.meta.url),
   'utf8',
 );
 const jobs = workflowJobSources(cleanupSource);
@@ -49,9 +49,9 @@ test('cleanup serializes with the matching preview and scopes privilege to delet
   assert.match(jobs.cleanup, /^      id-token: write\s*$/m);
   assert.match(jobs.cleanup, /^      deployments: write\s*$/m);
   assert.doesNotMatch(jobs.resolve, /pull-requests: write|issues: write/);
-  assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs cleanup/);
-  assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs reconcile/);
-  assert.match(jobs.cleanup, /node scripts\/preview-cleanup\.mjs janitor/);
+  assert.match(jobs.cleanup, /node infra\/preview\/preview-cleanup\.mjs cleanup/);
+  assert.match(jobs.cleanup, /node infra\/preview\/preview-cleanup\.mjs reconcile/);
+  assert.match(jobs.cleanup, /node infra\/preview\/preview-cleanup\.mjs janitor/);
   const cleanupStep = jobs.cleanup
     .split(/(?=^      - )/m)
     .find((step) => step.includes('--branch "$PREVIEW_SOURCE_BRANCH"')) ?? '';
@@ -78,7 +78,7 @@ test('cleanup comments run separately with only pull-request-write privilege', (
   assert.doesNotMatch(jobs.comment, /environment:|id-token: write|deployments: write|secrets\.|vars\./);
   assert.match(jobs.comment, /^          ref: main\s*$/m);
   assert.match(jobs.comment, /PREVIEW_CLEANUPS: \$\{\{ needs\.cleanup\.outputs\.comments \}\}/);
-  assert.match(jobs.comment, /node scripts\/preview-cleanup-comment\.mjs/);
+  assert.match(jobs.comment, /node infra\/preview\/preview-cleanup-comment\.mjs/);
 });
 
 test('deployment instructions run separately with only pull-request-write privilege', () => {
@@ -89,5 +89,5 @@ test('deployment instructions run separately with only pull-request-write privil
   assert.match(jobs.instructions, /^      pull-requests: write\s*$/m);
   assert.doesNotMatch(jobs.instructions, /environment:|id-token: write|deployments: write|secrets\.|vars\./);
   assert.match(jobs.instructions, /^          ref: main\s*$/m);
-  assert.match(jobs.instructions, /node scripts\/preview-instructions\.mjs/);
+  assert.match(jobs.instructions, /node infra\/preview\/preview-instructions\.mjs/);
 });

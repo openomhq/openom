@@ -49,7 +49,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: >-
-          node scripts/preview-request.mjs
+          node infra/preview/preview-request.mjs
           --pull-request "${{ inputs.pull_request }}"
           --mode "${{ inputs.mode }}"
 
@@ -217,7 +217,7 @@ jobs:
           PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-neon.mjs reconcile
+          node infra/preview/preview-neon.mjs reconcile
           --branch "preview/${{ needs.authorize.outputs.slug }}"
           --source-branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
@@ -284,7 +284,7 @@ jobs:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-route.mjs assert-web
+          node infra/preview/preview-route.mjs assert-web
           --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
 
@@ -336,7 +336,7 @@ jobs:
           CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-route.mjs put
+          node infra/preview/preview-route.mjs put
           --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
@@ -352,7 +352,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-deployment.mjs
+          node infra/preview/preview-deployment.mjs
           --app-url "${{ needs.authorize.outputs.app_url }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
@@ -381,7 +381,7 @@ jobs:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-route.mjs rollback
+          node infra/preview/preview-route.mjs rollback
           --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --rollback-file _artifact/route-rollback.json
@@ -501,7 +501,7 @@ jobs:
           PREVIEW_MAX_FULL_STACKS: ${{ vars.PREVIEW_MAX_FULL_STACKS }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-neon.mjs reconcile
+          node infra/preview/preview-neon.mjs reconcile
           --branch "preview/${{ needs.authorize.outputs.slug }}"
           --source-branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
@@ -523,7 +523,7 @@ jobs:
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: |
           set -euo pipefail
-          node scripts/preview-lambda.mjs reconcile \
+          node infra/preview/preview-lambda.mjs reconcile \
             --function-name "openom-preview-${{ needs.authorize.outputs.slug }}-api" \
             --slug "${{ needs.authorize.outputs.slug }}" \
             --source-branch "$PREVIEW_SOURCE_BRANCH" \
@@ -582,7 +582,7 @@ jobs:
           CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-route.mjs put
+          node infra/preview/preview-route.mjs put
           --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
@@ -651,7 +651,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-deployment.mjs
+          node infra/preview/preview-deployment.mjs
           --app-url "${{ needs.authorize.outputs.app_url }}"
           --commit "${{ needs.authorize.outputs.commit_sha }}"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
@@ -680,14 +680,14 @@ jobs:
           AWS_CLOUDFRONT_KVS_ARN: ${{ vars.AWS_CLOUDFRONT_KVS_ARN }}
           PREVIEW_SOURCE_BRANCH: ${{ needs.authorize.outputs.source_branch }}
         run: >-
-          node scripts/preview-route.mjs rollback
+          node infra/preview/preview-route.mjs rollback
           --branch "$PREVIEW_SOURCE_BRANCH"
           --pull-request "${{ needs.authorize.outputs.pull_request_number }}"
           --rollback-file _artifact/route-rollback.json
 
       - if: failure() && hashFiles('_artifact/lambda-rollback.json') != ''
         name: Restore the previous Lambda alias
-        run: node scripts/preview-lambda.mjs rollback --rollback-file _artifact/lambda-rollback.json
+        run: node infra/preview/preview-lambda.mjs rollback --rollback-file _artifact/lambda-rollback.json
 
       - if: always()
         name: Remove generated database credentials

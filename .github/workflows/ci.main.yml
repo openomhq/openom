@@ -94,7 +94,10 @@ jobs:
       - name: Run repository policy tests
         run: |
           task --list
-          node --test scripts/*.test.mjs
+          node --test \
+            scripts/*.test.mjs \
+            infra/preview/*.test.mjs \
+            infra/terraform/preview/tests/*.test.mjs
 
       - name: Verify error and release hygiene
         run: |

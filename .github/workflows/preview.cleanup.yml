@@ -49,7 +49,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_PULL_REQUEST: ${{ inputs.pull_request }}
           INPUT_SOURCE_BRANCH: ${{ inputs.source_branch }}
-        run: node scripts/preview-cleanup-request.mjs
+        run: node infra/preview/preview-cleanup-request.mjs
 
   cleanup:
     needs: resolve
@@ -111,16 +111,16 @@ jobs:
           set -euo pipefail
           case '${{ needs.resolve.outputs.mode }}' in
             janitor)
-              node scripts/preview-cleanup.mjs janitor | tee cleanup.json
+              node infra/preview/preview-cleanup.mjs janitor | tee cleanup.json
               ;;
             reconcile)
-              node scripts/preview-cleanup.mjs reconcile \
+              node infra/preview/preview-cleanup.mjs reconcile \
                 --branch "$PREVIEW_SOURCE_BRANCH" \
                 --pull-request '${{ needs.resolve.outputs.pull_request_number }}' \
                 --desired-mode "$PREVIEW_DESIRED_MODE" | tee cleanup.json
               ;;
             cleanup)
-              node scripts/preview-cleanup.mjs cleanup \
+              node infra/preview/preview-cleanup.mjs cleanup \
                 --branch "$PREVIEW_SOURCE_BRANCH" \
                 --pull-request '${{ needs.resolve.outputs.pull_request_number }}' \
                 --desired-mode "$PREVIEW_DESIRED_MODE" | tee cleanup.json
@@ -167,7 +167,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PREVIEW_PULL_REQUEST: ${{ needs.resolve.outputs.pull_request_number }}
-        run: node scripts/preview-instructions.mjs --pull-request "$PREVIEW_PULL_REQUEST"
+        run: node infra/preview/preview-instructions.mjs --pull-request "$PREVIEW_PULL_REQUEST"
 
   comment:
     needs:
@@ -188,4 +188,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PREVIEW_CLEANUPS: ${{ needs.cleanup.outputs.comments }}
-        run: node scripts/preview-cleanup-comment.mjs
+        run: node infra/preview/preview-cleanup-comment.mjs

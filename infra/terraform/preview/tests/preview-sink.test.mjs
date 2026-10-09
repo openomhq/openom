@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { handler } from '../infra/terraform/preview/sink/index.mjs';
+import { handler } from '../sink/index.mjs';
 
 test('the standing origin always returns the deterministic preview 404', async () => {
   const response = await handler({

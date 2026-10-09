@@ -78,7 +78,7 @@ cd infra/terraform/preview
 infisical run --env=prod --path=/admin --command \
   'export TF_VAR_state_passphrase="$TOFU_STATE_PASSPHRASE_PREVIEW_PLATFORM"; tofu init -backend-config=env/preview.s3.tfbackend && tofu plan -var-file=env/preview.tfvars -out=.terraform/preview.tfplan'
 cd ../../..
-tofu -chdir=infra/terraform/preview show -json .terraform/preview.tfplan | node scripts/preview-plan-check.mjs
+tofu -chdir=infra/terraform/preview show -json .terraform/preview.tfplan | node infra/terraform/preview/tools/preview-plan-check.mjs
 ```
 
 The token is deliberately vendor-prefixed. The per-preview application namespace is not: workflows set the
@@ -87,8 +87,8 @@ server's vendor-independent `OBJECT_STORE_KEY_PREFIX=previews/<slug>/` regardles
 Run the exact router-source tests from the repository root:
 
 ```sh
-node --test scripts/preview-router.test.mjs
-node --test scripts/preview-sink.test.mjs
+node --test infra/terraform/preview/tests/preview-router.test.mjs
+node --test infra/terraform/preview/tests/preview-sink.test.mjs
 ```
 
 ## Preview lifecycle

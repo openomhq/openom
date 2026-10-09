@@ -2,21 +2,21 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { workflowJobSources } from './deployment-config.mjs';
+import { workflowJobSources } from '../../scripts/deployment-config.mjs';
 
 const cleanupSource = readFileSync(
-  new URL('../.github/workflows/preview.cleanup.yml', import.meta.url),
+  new URL('../../.github/workflows/preview.cleanup.yml', import.meta.url),
   'utf8',
 );
 const lifecycleSource = readFileSync(
-  new URL('../.github/workflows/preview.lifecycle.yml', import.meta.url),
+  new URL('../../.github/workflows/preview.lifecycle.yml', import.meta.url),
   'utf8',
 );
 const jobs = workflowJobSources(cleanupSource);
 
 test('preview instructions are folded into the trusted cleanup chain', () => {
   assert.equal(
-    existsSync(new URL('../.github/workflows/preview.instructions.yml', import.meta.url)),
+    existsSync(new URL('../../.github/workflows/preview.instructions.yml', import.meta.url)),
     false,
   );
   assert.match(lifecycleSource, /^  pull_request:\s*$/m);
@@ -38,7 +38,7 @@ test('privileged instruction comments execute only trusted main code', () => {
     jobs.instructions,
     /pull_request\.head|secrets\.|vars\.|id-token:|deployments: write/,
   );
-  assert.match(jobs.instructions, /node scripts\/preview-instructions\.mjs/);
+  assert.match(jobs.instructions, /node infra\/preview\/preview-instructions\.mjs/);
 });
 
 test('instruction comments serialize on the server-resolved pull request', () => {

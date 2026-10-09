@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { workflowJobSources } from './deployment-config.mjs';
+import { workflowJobSources } from '../../scripts/deployment-config.mjs';
 
-const source = readFileSync(new URL('../.github/workflows/preview.deploy.yml', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../../.github/workflows/preview.deploy.yml', import.meta.url), 'utf8');
 const jobs = workflowJobSources(source);
 
 test('preview deployment is manual and cannot run from pull request events', () => {
@@ -17,7 +17,7 @@ test('preview deployment is manual and cannot run from pull request events', () 
 
 test('authorization and deployment automation are pinned to main', () => {
   assert.match(jobs.authorize, /^          ref: main\s*$/m);
-  assert.match(jobs.authorize, /node scripts\/preview-request\.mjs/);
+  assert.match(jobs.authorize, /node infra\/preview\/preview-request\.mjs/);
   assert.match(jobs.authorize, /GITHUB_TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}/);
   for (const jobName of ['database', 'deploy-web', 'deploy-full']) {
     assert.match(jobs[jobName], /^          ref: main\s*$/m);
@@ -30,7 +30,7 @@ test('web deployment refuses an implicit full-stack downgrade before publishing 
   const guard = jobs['deploy-web'].indexOf('name: Refuse an implicit full-stack downgrade');
   const pages = jobs['deploy-web'].indexOf('name: Deploy the immutable Pages artifact');
   assert.ok(guard !== -1 && guard < pages);
-  assert.match(jobs['deploy-web'], /node scripts\/preview-route\.mjs assert-web/);
+  assert.match(jobs['deploy-web'], /node infra\/preview\/preview-route\.mjs assert-web/);
 });
 
 test('pull request code runs only in the unprivileged build job', () => {
@@ -72,7 +72,7 @@ test('only trusted deploy jobs receive OIDC and deployment write access', () => 
 test('deployment inventory records the canonical source branch', () => {
   for (const jobName of ['deploy-web', 'deploy-full']) {
     const publish = jobs[jobName].match(
-      /node scripts\/preview-deployment\.mjs[\s\S]*?(?=\n\s{6}- name:|$)/,
+      /node infra\/preview\/preview-deployment\.mjs[\s\S]*?(?=\n\s{6}- name:|$)/,
     )?.[0] ?? '';
     assert.match(
       jobs[jobName],

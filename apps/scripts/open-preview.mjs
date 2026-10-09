@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from '@playwright/test';
 
-import { previewIdentity } from '../../scripts/preview-name.mjs';
+import { previewIdentity } from '../../infra/preview/preview-name.mjs';
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_PROFILE = 'default';

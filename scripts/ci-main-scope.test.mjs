@@ -13,7 +13,7 @@ test('documentation-only pushes need no implementation checks', () => {
 test('JavaScript and automation changes need only quick repository checks', () => {
   for (const file of [
     'apps/app/src/main.js',
-    'scripts/preview-cleanup.mjs',
+    'infra/preview/preview-cleanup.mjs',
     '.github/workflows/preview.cleanup.yml',
     'contracts/deployment-environments.json',
   ]) {
