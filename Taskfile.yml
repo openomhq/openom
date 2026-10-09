@@ -178,6 +178,11 @@ tasks:
     cmds:
       - pnpm --dir apps test:e2e:supabase-auth
 
+  test:preview:
+    desc: Run preview lifecycle, workflow, router, and sink tests
+    cmds:
+      - node infra/preview/run-tests.mjs
+
   reset:database:
     desc: Recreate the local application database without deleting build caches
     prompt: 'This permanently deletes the local {{.DATABASE_NAME}} Postgres database. Continue?'

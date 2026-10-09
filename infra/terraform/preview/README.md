@@ -84,11 +84,10 @@ tofu -chdir=infra/terraform/preview show -json .terraform/preview.tfplan | node 
 The token is deliberately vendor-prefixed. The per-preview application namespace is not: workflows set the
 server's vendor-independent `OBJECT_STORE_KEY_PREFIX=previews/<slug>/` regardless of the object-store provider.
 
-Run the exact router-source tests from the repository root:
+Run the complete preview automation and router suite from the repository root:
 
 ```sh
-node --test infra/terraform/preview/tests/preview-router.test.mjs
-node --test infra/terraform/preview/tests/preview-sink.test.mjs
+task test:preview
 ```
 
 ## Preview lifecycle

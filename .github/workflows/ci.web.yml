@@ -70,23 +70,8 @@ jobs:
         run: |
           node --test \
             scripts/ci-scope.test.mjs \
-            scripts/ci-workflow-policy.test.mjs \
-            infra/preview/preview-cleanup-comment.test.mjs \
-            infra/preview/preview-cleanup-request.test.mjs \
-            infra/preview/preview-cleanup-workflow-policy.test.mjs \
-            infra/preview/preview-cleanup.test.mjs \
-            infra/preview/preview-deployment.test.mjs \
-            infra/preview/preview-instructions.test.mjs \
-            infra/preview/preview-instructions-workflow-policy.test.mjs \
-            infra/preview/preview-lambda.test.mjs \
-            infra/preview/preview-name.test.mjs \
-            infra/preview/preview-neon.test.mjs \
-            infra/preview/preview-policy.test.mjs \
-            infra/preview/preview-request.test.mjs \
-            infra/preview/preview-route-reconcile.test.mjs \
-            infra/preview/preview-workflow-policy.test.mjs \
-            infra/terraform/preview/tests/preview-router.test.mjs \
-            infra/terraform/preview/tests/preview-sink.test.mjs
+            scripts/ci-workflow-policy.test.mjs
+          task test:preview
 
       # Kein `.stack` darf je in die UI gerendert werden (nur Dev-Konsole).
       - name: Error hygiene

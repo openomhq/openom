@@ -10,6 +10,8 @@ const desktopEntrypoint = fs.readFileSync(new URL('../apps/src-tauri/dev-contain
 const serverImage = fs.readFileSync(new URL('../openom/Dockerfile', import.meta.url), 'utf8');
 const tauriImage = fs.readFileSync(new URL('../apps/src-tauri/tauri.Dockerfile', import.meta.url), 'utf8');
 const tauriConfig = JSON.parse(fs.readFileSync(new URL('../apps/src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+const mainWorkflow = fs.readFileSync(new URL('../.github/workflows/ci.main.yml', import.meta.url), 'utf8');
+const webWorkflow = fs.readFileSync(new URL('../.github/workflows/ci.web.yml', import.meta.url), 'utf8');
 
 function taskSection(task) {
   const start = taskfile.indexOf(`  ${task}:`);
@@ -95,4 +97,10 @@ test('local service configuration has one environment-backed source', () => {
 test('stop includes every optional long-running development profile', () => {
   assert.match(taskfile, /--profile desktop --profile supabase-auth --profile observability stop/u);
   assert.match(compose, /^\s+desktop:\s*$/mu);
+});
+
+test('preview tests have one discoverable Task entry point', () => {
+  assert.match(taskSection('test:preview'), /node infra\/preview\/run-tests\.mjs/u);
+  assert.match(mainWorkflow, /task test:preview/u);
+  assert.match(webWorkflow, /task test:preview/u);
 });
