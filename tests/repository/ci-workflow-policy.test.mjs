@@ -38,7 +38,7 @@ test('third-party actions use immutable commit SHAs', () => {
   );
 });
 
-for (const workflow of ['ci.desktop.yml', 'ci.server.yml', 'ci.web.yml']) {
+for (const workflow of ['ci.desktop.yml', 'ci.infra.yml', 'ci.server.yml', 'ci.web.yml']) {
   test(`${workflow} validates pull requests and merge groups without repeating on main`, () => {
     const source = readWorkflow(workflow);
     assert.match(source, /^  pull_request:\s*$/m);
@@ -50,6 +50,20 @@ for (const workflow of ['ci.desktop.yml', 'ci.server.yml', 'ci.web.yml']) {
   });
 }
 
+test('infrastructure workflow owns repository automation and OpenTofu checks', () => {
+  const infra = readWorkflow('ci.infra.yml');
+  const web = readWorkflow('ci.web.yml');
+  const jobs = workflowJobSources(infra);
+
+  assert.match(jobs['infra-gate'], /^    name: infra-gate\s*$/m);
+  assert.match(jobs['infra-gate'], /opentofu\/setup-opentofu@[0-9a-f]{40}/);
+  assert.match(jobs['infra-gate'], /task test:automation/);
+  assert.match(jobs['infra-gate'], /task check:error-codes/);
+  assert.match(jobs['infra-gate'], /deployment-config\.mjs --check/);
+  assert.match(jobs['infra-gate'], /task check:release-build/);
+
+  assert.doesNotMatch(web, /setup-opentofu|test:automation|deployment-config|check:release-build/);
+});
 
 test('main workflow runs quick checks only for administrator bypass pushes', () => {
   const source = readWorkflow('ci.main.yml');

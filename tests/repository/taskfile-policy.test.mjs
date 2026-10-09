@@ -11,6 +11,7 @@ const serverImage = fs.readFileSync(new URL('../../openom/Dockerfile', import.me
 const tauriImage = fs.readFileSync(new URL('../../apps/src-tauri/tauri.Dockerfile', import.meta.url), 'utf8');
 const tauriConfig = JSON.parse(fs.readFileSync(new URL('../../apps/src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
 const mainWorkflow = fs.readFileSync(new URL('../../.github/workflows/ci.main.yml', import.meta.url), 'utf8');
+const infraWorkflow = fs.readFileSync(new URL('../../.github/workflows/ci.infra.yml', import.meta.url), 'utf8');
 
 function taskSection(task) {
   const start = taskfile.indexOf(`  ${task}:`);
@@ -102,4 +103,5 @@ test('automation tests have one discoverable aggregate Task entry point', () => 
   assert.match(taskSection('test:automation'), /node tests\/run-automation-tests\.mjs/u);
   assert.match(taskSection('test:preview'), /node tests\/run-automation-tests\.mjs preview/u);
   assert.match(mainWorkflow, /task test:automation/u);
+  assert.match(infraWorkflow, /task test:automation/u);
 });

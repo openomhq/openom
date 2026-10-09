@@ -85,7 +85,7 @@ as an inventory of every check.
 | Role | When | Purpose |
 | --- | --- | --- |
 | Main branch health | Every push to `main` | `ci.main` finishes quickly after a validated PR merge and runs path-aware repository and Rust checks after an administrator bypass push. Its badge reports the health of committed main, not the latest contributor branch. |
-| Required change gates | Pull requests and the merge queue | Web checks, the live server-contract suite, and desktop Clippy/build validation prevent an unverified candidate from entering `main`. The expensive desktop matrix is reserved for the merge queue. |
+| Required change gates | Pull requests and the merge queue | Web checks, repository/infrastructure contracts, the live server-contract suite, and desktop Clippy/build validation prevent an unverified candidate from entering `main`. The expensive desktop matrix is reserved for the merge queue. |
 | Extended assurance | Scheduled, path-targeted, or manual | Mobile build drift, mutation testing, telemetry export, and other focused checks cover risks that do not justify delaying every change. |
 
 Deployment workflows for demo, preview, and staging environments are operational automation, not CI health,

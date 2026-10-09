@@ -1,0 +1,55 @@
+name: ci.infra
+
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  infra-gate:
+    name: infra-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: 24.11.0
+
+      - uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+        with:
+          version: 3.52.0
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.13.1
+          tofu_wrapper: false
+
+      - name: Verify Task development contracts
+        run: |
+          task --list
+          task --dry --force dev:local
+          task --dry --force dev:docker
+          task --dry --force dev:desktop:local
+          task --dry --force dev:desktop:docker
+          task --dry --force dev:server:local
+          task --dry --force dev:server:docker
+
+      - name: Verify generated and deployment contracts
+        run: |
+          task check:error-codes
+          node infra/deployment/deployment-config.mjs --check
+
+      - name: Run repository and infrastructure automation tests
+        run: task test:automation
+
+      - name: Verify release-build policy
+        run: task check:release-build

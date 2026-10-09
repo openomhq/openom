@@ -37,50 +37,14 @@ jobs:
         with:
           node-version: 20
 
-      - uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-        with:
-          version: 3.52.0
-
-      - name: Taskfile contract
-        run: |
-          task --list
-          task --dry --force dev:local
-          task --dry --force dev:docker
-          task --dry --force dev:desktop:local
-          task --dry --force dev:desktop:docker
-          task --dry --force dev:server:local
-          task --dry --force dev:server:docker
-          node --test tests/repository/taskfile-policy.test.mjs
-
       # Syntaxpruefung ohne Bundler: node parst jedes Modul. Dank
       # "type": "module" in package.json gelten .js-Dateien als ES-Module.
       - name: Parse every module
         run: find apps/app/src -name '*.js' -print0 | xargs -0 -n1 node --check
 
-      # Der Fehlercode-Generator (contracts/error-codes.json -> JS + Rust Spiegel) darf nicht driften.
-      - name: Error codes in sync
-        run: node scripts/build/gen-error-codes.mjs --check
-
-      - name: Deployment configuration contract in sync
-        run: |
-          node --test infra/deployment/deployment-config.test.mjs
-          node infra/deployment/deployment-config.mjs --check
-
-      - name: Preview workflow security and lifecycle contracts
-        run: |
-          node --test \
-            tests/repository/ci-scope.test.mjs \
-            tests/repository/ci-workflow-policy.test.mjs
-          task test:preview
-
       # Kein `.stack` darf je in die UI gerendert werden (nur Dev-Konsole).
       - name: Error hygiene
         run: node scripts/check/check-error-hygiene.mjs
-
-      # Kein Auslieferungs-Build darf `tauri build --debug` nutzen: das brächte den zerstörerischen
-      # Schema-Reset (store-sqlite, nur unter debug_assertions) in ein ausgeliefertes Binary.
-      - name: No debug release build
-        run: node scripts/check/check-no-debug-build.mjs
 
   # Eigener PARALLELER Job, damit fehlende Uebersetzungen sofort und unabhaengig
   # sichtbar sind — nicht als letzter Schritt hinter den anderen Pruefungen versteckt
