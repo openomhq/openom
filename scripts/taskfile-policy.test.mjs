@@ -12,6 +12,7 @@ const tauriImage = fs.readFileSync(new URL('../apps/src-tauri/tauri.Dockerfile',
 const tauriConfig = JSON.parse(fs.readFileSync(new URL('../apps/src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
 const mainWorkflow = fs.readFileSync(new URL('../.github/workflows/ci.main.yml', import.meta.url), 'utf8');
 const webWorkflow = fs.readFileSync(new URL('../.github/workflows/ci.web.yml', import.meta.url), 'utf8');
+const previewTestRunner = fs.readFileSync(new URL('../infra/preview/run-tests.mjs', import.meta.url), 'utf8');
 
 function taskSection(task) {
   const start = taskfile.indexOf(`  ${task}:`);
@@ -101,6 +102,7 @@ test('stop includes every optional long-running development profile', () => {
 
 test('preview tests have one discoverable Task entry point', () => {
   assert.match(taskSection('test:preview'), /node infra\/preview\/run-tests\.mjs/u);
+  assert.match(previewTestRunner, /recursive: true/u);
   assert.match(mainWorkflow, /task test:preview/u);
   assert.match(webWorkflow, /task test:preview/u);
 });

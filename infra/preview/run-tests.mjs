@@ -13,9 +13,9 @@ const testDirectories = [
 const testFiles = testDirectories
   .flatMap((directory) =>
     fs
-      .readdirSync(directory, { withFileTypes: true })
+      .readdirSync(directory, { withFileTypes: true, recursive: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith('.test.mjs'))
-      .map((entry) => path.join(directory, entry.name)),
+      .map((entry) => path.join(entry.parentPath, entry.name)),
   )
   .sort();
 
